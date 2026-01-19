@@ -1,0 +1,61 @@
+Parameters ,Default Value,Description
+disable-inlining,FALSE,Do not run the inliner pass
+max-memory-inhibit,TRUE,Inhibit forking at memory cap (vs. random terminate)
+klee-call-optimisation,TRUE,Allow optimization of functions that contain KLEE calls
+use-construct-hash-stp,TRUE,Use hash-consing during STP query construction
+use-visitor-hash,TRUE,Use hash-consing during expression visitation
+equality-substitution,TRUE,Simplify equality expressions before querying the solver
+check-overshift,TRUE,Inject checks for overshift
+check-div-zero,TRUE,Inject checks for division-by-zero
+use-branch-cache,TRUE,Use the branch cache
+use-independent-solver,TRUE,Use constraint independence
+use-call-paths,TRUE,Enable calltree tracking for instruction level statistics
+use-cex-cache,TRUE,Use the counterexample cache
+use-forked-solver,TRUE,Run the core SMT solver in a forked process
+watchdog,FALSE,Use a watchdog process to enforce --max-time.
+const-array-opt,FALSE,Enable an optimization involving all-constant arrays
+zero-seed-extension,FALSE,Use zero-filled objects if matching seed not found
+warnings-only-to-file,FALSE,"All warnings will be written to warnings.txt only. If disabled, they are also written on screen."
+smtlib-human-readable,FALSE,Enables generated SMT-LIBv2 files to be human readable
+warn-all-external-symbols,FALSE,Issue a warning on startup for all external symbols
+use-iterative-deepening-time-search,FALSE,Use iterative deepening time search (experimental)
+cex-cache-exp,FALSE,Optimization for validity queries
+all-external-warnings,FALSE,"Issue a warning everytime an external call is made, as opposed to once per function"
+readable-posix-inputs,FALSE,"Prefer creation of POSIX inputs (command-line arguments, files, etc.) with human readable bytes. Note: option is expensive when creating lots of tests"
+return-null-on-zero-malloc,FALSE,Returns NULL if malloc(0) is called
+emit-all-errors,FALSE,Generate tests cases for all errors
+solver-optimize-divides,FALSE,Optimize constant divides into add/shift/multiplies before passing them to the core SMT solver
+cex-cache-try-all,FALSE,Try substituting all counterexamples before asking the SMT solver
+simplify-sym-indices,FALSE,Simplify symbolic accesses using equalities from other constraints
+named-seed-matching,FALSE,Use names to match symbolic objects to inputs
+disable-verify,FALSE,Do not verify the module integrity
+track-instruction-time,FALSE,Enable tracking of time for individual instructions
+silent-klee-assume,FALSE,Silently terminate paths with an infeasible condition given to klee_assume() rather than emitting an error
+suppress-external-warnings,FALSE,Supress warnings about calling external functions.
+cex-cache-superset,FALSE,Try substituting SAT superset counterexample before asking the SMT solver
+verify-each,FALSE,Verify intermediate results of all optimization passes
+max-memory,2000,Refuse to fork when above this amount of memory (in MB)
+max-stack-frames,8192,Terminate a state after this many stack frames. Set to 0 to disable
+max-forks,4096,Only fork this many times. Set to -1 to disable
+max-sym-array-size,4096,"If a symbolic array exceeds this size (in bytes), symbolic addresses into this array are concretized. Set to 0 to disable"
+max-depth,2000,Only allow this many symbolic branches. Set to 0 to disable
+batch-instructions,10000,Number of instructions to batch when using --use-batching-search.  Set to 0 to disable
+redzone-size,10,Set the size of the redzones to be added after each allocation (in bytes). This is important to detect out-of-bounds accesses
+seed-time,5s,"Amount of time to dedicate to seeds, before normal search"
+max-solver-time,5s,Maximum amount of time for a single SMT query (default=0s (off)). Enables --use-forked-solver
+batch-time,5s,Amount of time to batch when using --use-batching-search.
+uncovered-update-interval,30s,Update interval for uncovered instructions
+max-static-fork-pct,1,Maximum percentage spent by an instruction forking out of the forking of all instructions
+max-static-solve-pct,1,Maximum percentage of solving time that can be spent by a single instruction over total solving time for all instructions
+max-static-cpfork-pct,1,Maximum percentage spent by an instruction of a call path forking out of the forking of all instructions in the call path
+max-static-cpsolve-pct,1,Maximum percentage of solving time that can be spent by a single instruction of a call path over total solving time for all instructions
+array-value-symb-ratio,1,Maximum ratio of symbolic values to array size for which the mixed value-based transformations are applied.
+array-value-ratio,1,Maximum ratio of unique values to array size for which the value-based transformations are applied.
+search,random-path,Specify the search heuristic
+switch-type,internal,Select the implementation of switch
+smtlib-display-constants,dec,Sets how bitvector constants are written in generated SMT-LIBv2 files
+smtlib-abbreviation-mode,let,Choose abbreviation mode to use in SMT-LIBv2 files
+seed-file,-,.ktest file to be used as seed
+sym-arg,-,Replace by a symbolic argument with length N.
+sym-files,-,"Make NUM symbolic files (‘A’, ‘B’, ‘C’, etc.), each with size N (excluding stdin)"
+sym-stdin,-,Make stdin symbolic with size N.
