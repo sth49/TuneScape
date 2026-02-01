@@ -19,3 +19,34 @@ export interface ProcessedData {
   parameters: string[];
   branchIndices?: Record<string, string>;
 }
+
+// Decision Tree visualization types
+export interface ParamImportance {
+  name: string;
+  importance: number;
+  unique_values: number[];
+  is_boolean: boolean;
+}
+
+export interface DecisionTreeTrial {
+  trial_id: number;
+  coverage: number;
+  parameters: Record<string, boolean | number>;
+}
+
+export interface DecisionTreeTunerData {
+  param_importance: ParamImportance[];
+  trials: DecisionTreeTrial[];
+  stats: {
+    total_trials: number;
+    min_coverage: number;
+    max_coverage: number;
+    mean_coverage: number;
+  };
+}
+
+export interface DecisionTreeData {
+  [program: string]: {
+    [tuner: string]: DecisionTreeTunerData;
+  };
+}
