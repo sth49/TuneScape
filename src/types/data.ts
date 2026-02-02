@@ -24,14 +24,16 @@ export interface ProcessedData {
 export interface ParamImportance {
   name: string;
   importance: number;
-  unique_values: number[];
+  unique_values: (number | string)[];
   is_boolean: boolean;
+  is_categorical?: boolean;
+  is_string?: boolean;
 }
 
 export interface DecisionTreeTrial {
   trial_id: number;
   coverage: number;
-  parameters: Record<string, boolean | number>;
+  parameters: Record<string, boolean | number | string | null>;
 }
 
 export interface DecisionTreeTunerData {

@@ -5,13 +5,11 @@
  * Enhanced tooltip shows ranking and milestone information
  */
 
-import { useMemo, useState, useRef } from 'react';
+import { useMemo, useState } from 'react';
 import { Group } from '@visx/group';
 import { scaleLog } from '@visx/scale';
 import { AxisBottom } from '@visx/axis';
 import { useTooltip, TooltipWithBounds } from '@visx/tooltip';
-import { localPoint } from '@visx/event';
-import { useSelection } from '../context/SelectionContext';
 import type { ProcessedData, TrialData } from '../types/data';
 
 interface CirclePosition {
@@ -28,7 +26,6 @@ interface EventTimelineProps {
   topN?: number;
   color?: string;
   compact?: boolean;
-  programId?: string;
 }
 
 interface TooltipData {
@@ -39,21 +36,15 @@ interface TooltipData {
   percentOfTotal: number;
 }
 
-export function EventTimeline({ data, width = 1000, height = 200, topN = 5, color = '#4f46e5', compact = false, programId }: EventTimelineProps) {
+export function EventTimeline({ data, width = 1000, height = 200, topN = 5, color = '#4f46e5', compact = false }: EventTimelineProps) {
   const margin = compact
-    ? { top: 20, right: 30, bottom: 30, left: 70 }
+    ? { top: 15, right: 20, bottom: 25, left: 50 }
     : { top: 40, right: 30, bottom: 50, left: 70 };
   const innerWidth = width - margin.left - margin.right;
   const innerHeight = height - margin.top - margin.bottom;
 
   const [hoveredTrialId, setHoveredTrialId] = useState<number | null>(null);
   const [showFailedTrials, setShowFailedTrials] = useState(false);
-  const [brushStart, setBrushStart] = useState<number | null>(null);
-  const [brushEnd, setBrushEnd] = useState<number | null>(null);
-  const [isBrushing, setIsBrushing] = useState(false);
-  const svgRef = useRef<SVGSVGElement>(null);
-
-  const { selection, setSelection, isSelected, clearSelection } = useSelection();
 
   const { tooltipOpen, tooltipLeft, tooltipTop, tooltipData, showTooltip, hideTooltip } =
     useTooltip<TooltipData>();
@@ -212,69 +203,6 @@ export function EventTimeline({ data, width = 1000, height = 200, topN = 5, colo
     hideTooltip();
   };
 
-  // Brush handlers
-  const handleBrushStart = (event: React.MouseEvent<SVGRectElement>) => {
-    if (!svgRef.current) return;
-    const point = localPoint(svgRef.current, event);
-    if (!point) return;
-
-    const x = point.x - margin.left;
-    const trialId = Math.round(xScale.invert(x));
-    setBrushStart(Math.max(1, Math.min(trialId, data.totalTrials)));
-    setBrushEnd(null);
-    setIsBrushing(true);
-    clearSelection();
-  };
-
-  const handleBrushMove = (event: React.MouseEvent<SVGRectElement>) => {
-    if (!isBrushing || !svgRef.current) return;
-    const point = localPoint(svgRef.current, event);
-    if (!point) return;
-
-    const x = point.x - margin.left;
-    const trialId = Math.round(xScale.invert(x));
-    setBrushEnd(Math.max(1, Math.min(trialId, data.totalTrials)));
-  };
-
-  const handleBrushEnd = () => {
-    if (!isBrushing || brushStart === null) {
-      setIsBrushing(false);
-      return;
-    }
-
-    const endTrial = brushEnd ?? brushStart;
-    const minTrial = Math.min(brushStart, endTrial);
-    const maxTrial = Math.max(brushStart, endTrial);
-
-    // Find all trials in range
-    const selectedTrialIds = new Set<number>();
-    for (const pos of circlePositions) {
-      if (pos.trial.trialId >= minTrial && pos.trial.trialId <= maxTrial) {
-        selectedTrialIds.add(pos.trial.trialId);
-      }
-    }
-
-    if (selectedTrialIds.size > 0 && programId) {
-      setSelection({ program: programId, trialIds: selectedTrialIds });
-    }
-
-    setIsBrushing(false);
-  };
-
-  const handleDoubleClick = () => {
-    setBrushStart(null);
-    setBrushEnd(null);
-    clearSelection();
-  };
-
-  // Check if a trial is selected (from this or other views)
-  const isTrialSelected = (trialId: number) => {
-    if (!programId || !selection) return false;
-    return selection.program === programId && selection.trialIds.has(trialId);
-  };
-
-  const hasSelection = selection !== null && selection.program === programId;
-
   // Get circle color based on special status
   const getCircleColor = (trial: TrialData) => {
     if (topDiscoveryIds.has(trial.trialId)) return color; // primary color for top
@@ -284,7 +212,7 @@ export function EventTimeline({ data, width = 1000, height = 200, topN = 5, colo
 
   return (
     <div style={{ position: 'relative', height: compact ? height : height + 40 }}>
-      <svg ref={svgRef} width={width} height={height} style={{ overflow: 'visible' }}>
+      <svg width={width} height={height} style={{ overflow: 'visible' }}>
         <Group left={margin.left} top={margin.top}>
           {/* Timeline base line */}
           <line x1={0} y1={centerY} x2={innerWidth} y2={centerY} stroke="#d1d5db" strokeWidth={2} />
@@ -320,25 +248,21 @@ export function EventTimeline({ data, width = 1000, height = 200, topN = 5, colo
           {/* Event circles with beeswarm layout */}
           {circlePositions
             .filter((pos) => pos.trial.trialId !== hoveredTrialId)
-            .map((pos) => {
-              const selected = isTrialSelected(pos.trial.trialId);
-              const dimmed = hasSelection && !selected;
-              return (
-                <circle
-                  key={pos.trial.trialId}
-                  cx={pos.x}
-                  cy={pos.y}
-                  r={selected ? pos.r + 1 : pos.r}
-                  fill={getCircleColor(pos.trial)}
-                  fillOpacity={dimmed ? 0.15 : (hoveredTrialId ? 0.4 : 0.7)}
-                  stroke={selected ? '#1e1b4b' : getCircleColor(pos.trial)}
-                  strokeWidth={selected ? 2 : (topDiscoveryIds.has(pos.trial.trialId) ? 2 : 1)}
-                  onMouseEnter={() => handleMouseEnter(pos)}
-                  onMouseLeave={handleMouseLeave}
-                  style={{ cursor: 'pointer', transition: 'opacity 0.15s ease' }}
-                />
-              );
-            })}
+            .map((pos) => (
+              <circle
+                key={pos.trial.trialId}
+                cx={pos.x}
+                cy={pos.y}
+                r={pos.r}
+                fill={getCircleColor(pos.trial)}
+                fillOpacity={hoveredTrialId ? 0.4 : 0.7}
+                stroke={getCircleColor(pos.trial)}
+                strokeWidth={topDiscoveryIds.has(pos.trial.trialId) ? 2 : 1}
+                onMouseEnter={() => handleMouseEnter(pos)}
+                onMouseLeave={handleMouseLeave}
+                style={{ cursor: 'pointer', transition: 'opacity 0.15s ease' }}
+              />
+            ))}
 
           {/* Hovered circle rendered last (on top) */}
           {hoveredTrialId && (() => {
@@ -376,36 +300,6 @@ export function EventTimeline({ data, width = 1000, height = 200, topN = 5, colo
               Trial (log scale)
             </text>
           )}
-
-          {/* Brush selection rectangle */}
-          {brushStart !== null && brushEnd !== null && (
-            <rect
-              x={Math.min(xScale(brushStart), xScale(brushEnd))}
-              y={0}
-              width={Math.abs(xScale(brushEnd) - xScale(brushStart))}
-              height={innerHeight}
-              fill={color}
-              fillOpacity={0.1}
-              stroke={color}
-              strokeWidth={1}
-              strokeOpacity={0.5}
-            />
-          )}
-
-          {/* Brush overlay (must be last for event handling) */}
-          <rect
-            x={0}
-            y={0}
-            width={innerWidth}
-            height={innerHeight}
-            fill="transparent"
-            style={{ cursor: 'crosshair' }}
-            onMouseDown={handleBrushStart}
-            onMouseMove={handleBrushMove}
-            onMouseUp={handleBrushEnd}
-            onMouseLeave={handleBrushEnd}
-            onDoubleClick={handleDoubleClick}
-          />
         </Group>
       </svg>
 

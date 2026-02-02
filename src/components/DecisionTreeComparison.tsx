@@ -1,26 +1,26 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
-import { ParameterDecisionTree } from './ParameterDecisionTree';
-import type { DecisionTreeData } from '../types/data';
+import { useState, useEffect, useMemo, useRef } from "react";
+import { ParameterDecisionTree } from "./ParameterDecisionTree";
+import type { DecisionTreeData } from "../types/data";
 
 const TUNER_COLORS: Record<string, string> = {
-  SymTuner: '#4f46e5',
-  CMA_ES: '#10b981',
-  Genetic: '#f59e0b',
-  SuccessiveHalving: '#ef4444',
-  TPE: '#8b5cf6',
-  BayesianOptimization: '#ec4899',
+  SymTuner: "#4f46e5",
+  CMA_ES: "#10b981",
+  Genetic: "#f59e0b",
+  SuccessiveHalving: "#ef4444",
+  TPE: "#8b5cf6",
+  BayesianOptimization: "#ec4899",
 };
 
 const TUNER_LABELS: Record<string, string> = {
-  SymTuner: 'SymTuner',
-  CMA_ES: 'CMA-ES',
-  Genetic: 'Genetic',
-  SuccessiveHalving: 'Successive Halving',
-  TPE: 'TPE',
-  BayesianOptimization: 'Bayesian Opt.',
+  SymTuner: "SymTuner",
+  CMA_ES: "CMA-ES",
+  Genetic: "Genetic",
+  SuccessiveHalving: "Successive Halving",
+  TPE: "TPE",
+  BayesianOptimization: "Bayesian Opt.",
 };
 
-type CompareMode = 'tuner' | 'time';
+type CompareMode = "tuner" | "time";
 
 export function DecisionTreeComparison() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -30,15 +30,15 @@ export function DecisionTreeComparison() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [selectedProgram, setSelectedProgram] = useState('gawk');
-  const [compareMode, setCompareMode] = useState<CompareMode>('tuner');
+  const [selectedProgram, setSelectedProgram] = useState("gawk");
+  const [compareMode, setCompareMode] = useState<CompareMode>("tuner");
 
   // Tuner comparison mode
-  const [leftTuner, setLeftTuner] = useState('SymTuner');
-  const [rightTuner, setRightTuner] = useState('CMA_ES');
+  const [leftTuner, setLeftTuner] = useState("SymTuner");
+  const [rightTuner, setRightTuner] = useState("CMA_ES");
 
   // Time comparison mode
-  const [timeTuner, setTimeTuner] = useState('SymTuner');
+  const [timeTuner, setTimeTuner] = useState("SymTuner");
   const [timeRanges] = useState<[number, number][]>([
     [1, 550],
     [551, 1100],
@@ -54,16 +54,16 @@ export function DecisionTreeComparison() {
       }
     };
     updateWidth();
-    window.addEventListener('resize', updateWidth);
-    return () => window.removeEventListener('resize', updateWidth);
+    window.addEventListener("resize", updateWidth);
+    return () => window.removeEventListener("resize", updateWidth);
   }, []);
 
   // Load data
   useEffect(() => {
     setLoading(true);
-    fetch('/data/decision_tree_data.json')
+    fetch("/data/decision_tree_data.json")
       .then((res) => {
-        if (!res.ok) throw new Error('Failed to load data');
+        if (!res.ok) throw new Error("Failed to load data");
         return res.json();
       })
       .then((json) => {
@@ -103,33 +103,37 @@ export function DecisionTreeComparison() {
 
   if (loading) {
     return (
-      <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>
-        Loading decision tree data...
+      <div className="flex items-center justify-center p-10">
+        <span className="loading loading-spinner loading-lg text-primary"></span>
       </div>
     );
   }
 
   if (error || !data) {
     return (
-      <div style={{ padding: 40, textAlign: 'center', color: '#ef4444' }}>
-        Error: {error || 'No data'}
+      <div className="alert alert-error">
+        <span>Error: {error || "No data"}</span>
       </div>
     );
   }
 
-  const treeWidth = compareMode === 'tuner'
-    ? (containerWidth - 60) / 2
-    : (containerWidth - 80) / timeRanges.length;
+  const treeWidth =
+    compareMode === "tuner"
+      ? (containerWidth - 60) / 2
+      : (containerWidth - 80) / timeRanges.length;
   const treeHeight = 500;
 
   return (
-    <div ref={containerRef} className="decision-tree-container">
+    <div ref={containerRef} className="flex flex-col gap-4 w-full h-full">
       {/* Controls */}
-      <div className="controls">
+      <div className="flex flex-wrap items-center gap-4 p-3 bg-base-200 rounded-lg">
         {/* Program selector */}
-        <div className="control-group">
-          <label>Program:</label>
+        <div className="form-control">
+          <label className="label py-0">
+            <span className="label-text text-xs font-medium">Program</span>
+          </label>
           <select
+            className="select select-bordered select-sm w-32"
             value={selectedProgram}
             onChange={(e) => setSelectedProgram(e.target.value)}
           >
@@ -142,18 +146,20 @@ export function DecisionTreeComparison() {
         </div>
 
         {/* Compare mode */}
-        <div className="control-group">
-          <label>Compare:</label>
-          <div className="button-group">
+        <div className="form-control">
+          <label className="label py-0">
+            <span className="label-text text-xs font-medium">Compare</span>
+          </label>
+          <div className="join">
             <button
-              className={compareMode === 'tuner' ? 'active' : ''}
-              onClick={() => setCompareMode('tuner')}
+              className={`join-item btn btn-sm ${compareMode === "tuner" ? "btn-primary" : "btn-ghost"}`}
+              onClick={() => setCompareMode("tuner")}
             >
               Tuners
             </button>
             <button
-              className={compareMode === 'time' ? 'active' : ''}
-              onClick={() => setCompareMode('time')}
+              className={`join-item btn btn-sm ${compareMode === "time" ? "btn-primary" : "btn-ghost"}`}
+              onClick={() => setCompareMode("time")}
             >
               Time Segments
             </button>
@@ -161,11 +167,14 @@ export function DecisionTreeComparison() {
         </div>
 
         {/* Tuner selectors */}
-        {compareMode === 'tuner' && (
+        {compareMode === "tuner" && (
           <>
-            <div className="control-group">
-              <label>Left:</label>
+            <div className="form-control">
+              <label className="label py-0">
+                <span className="label-text text-xs font-medium">Left</span>
+              </label>
               <select
+                className="select select-bordered select-sm w-40"
                 value={leftTuner}
                 onChange={(e) => setLeftTuner(e.target.value)}
               >
@@ -176,9 +185,12 @@ export function DecisionTreeComparison() {
                 ))}
               </select>
             </div>
-            <div className="control-group">
-              <label>Right:</label>
+            <div className="form-control">
+              <label className="label py-0">
+                <span className="label-text text-xs font-medium">Right</span>
+              </label>
               <select
+                className="select select-bordered select-sm w-40"
                 value={rightTuner}
                 onChange={(e) => setRightTuner(e.target.value)}
               >
@@ -193,10 +205,13 @@ export function DecisionTreeComparison() {
         )}
 
         {/* Time mode tuner selector */}
-        {compareMode === 'time' && (
-          <div className="control-group">
-            <label>Tuner:</label>
+        {compareMode === "time" && (
+          <div className="form-control">
+            <label className="label py-0">
+              <span className="label-text text-xs font-medium">Tuner</span>
+            </label>
             <select
+              className="select select-bordered select-sm w-40"
               value={timeTuner}
               onChange={(e) => setTimeTuner(e.target.value)}
             >
@@ -211,54 +226,44 @@ export function DecisionTreeComparison() {
       </div>
 
       {/* Trees */}
-      <div className="trees-container">
-        {compareMode === 'tuner' && (
+      <div className="flex flex-1 gap-2">
+        {compareMode === "tuner" && (
           <>
-            <div className="tree-panel">
+            <div className="flex-1 min-w-0 bg-base-100 rounded-lg p-2">
               <ParameterDecisionTree
                 data={data[selectedProgram][leftTuner]}
                 width={treeWidth}
                 height={treeHeight}
                 tunerName={TUNER_LABELS[leftTuner] || leftTuner}
-                color={TUNER_COLORS[leftTuner] || '#6b7280'}
+                color={TUNER_COLORS[leftTuner] || "#6b7280"}
               />
             </div>
-            <div className="tree-divider" />
-            <div className="tree-panel">
+            <div className="divider divider-horizontal m-0"></div>
+            <div className="flex-1 min-w-0 bg-base-100 rounded-lg p-2">
               <ParameterDecisionTree
                 data={data[selectedProgram][rightTuner]}
                 width={treeWidth}
                 height={treeHeight}
                 tunerName={TUNER_LABELS[rightTuner] || rightTuner}
-                color={TUNER_COLORS[rightTuner] || '#6b7280'}
+                color={TUNER_COLORS[rightTuner] || "#6b7280"}
               />
             </div>
           </>
         )}
 
-        {compareMode === 'time' && (
-          <>
-            {timeRanges.map((range, i) => (
-              <div key={i} className="tree-panel">
-                <ParameterDecisionTree
-                  data={data[selectedProgram][timeTuner]}
-                  width={treeWidth}
-                  height={treeHeight}
-                  tunerName={TUNER_LABELS[timeTuner] || timeTuner}
-                  color={TUNER_COLORS[timeTuner] || '#6b7280'}
-                  trialRange={range}
-                />
-              </div>
-            ))}
-          </>
-        )}
-      </div>
-
-      {/* Legend */}
-      <div className="legend">
-        <strong>How it works:</strong> Click nodes to expand. Tree splits by SHAP importance
-        (parameters that most affect coverage). Each node shows trial count and average
-        coverage. Hover for distribution histogram.
+        {compareMode === "time" &&
+          timeRanges.map((range, i) => (
+            <div key={i} className="flex-1 min-w-0 bg-base-100 rounded-lg p-2">
+              <ParameterDecisionTree
+                data={data[selectedProgram][timeTuner]}
+                width={treeWidth}
+                height={treeHeight}
+                tunerName={TUNER_LABELS[timeTuner] || timeTuner}
+                color={TUNER_COLORS[timeTuner] || "#6b7280"}
+                trialRange={range}
+              />
+            </div>
+          ))}
       </div>
     </div>
   );

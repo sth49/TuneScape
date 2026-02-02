@@ -1,14 +1,16 @@
-import { useState, useMemo, useCallback, type ReactElement } from 'react';
+import { useState, useMemo, useCallback, useEffect, type ReactElement } from 'react';
 import type { DecisionTreeTunerData, DecisionTreeTrial } from '../types/data';
 
 interface TreeNode {
   id: string;
   paramName: string | null;
   paramValue: boolean | number | null;
+  splitType: 'true' | 'false' | 'low' | 'high' | null;
   trials: DecisionTreeTrial[];
   children: TreeNode[];
   depth: number;
   isExpanded: boolean;
+  importance: number;
 }
 
 interface ParameterDecisionTreeProps {
@@ -17,7 +19,7 @@ interface ParameterDecisionTreeProps {
   height: number;
   tunerName: string;
   color: string;
-  trialRange?: [number, number]; // For time-based segmentation
+  trialRange?: [number, number];
   onNodeHover?: (node: TreeNode | null) => void;
 }
 
@@ -34,11 +36,6 @@ function getCoverageColor(coverage: number, min: number, max: number): string {
   return COLORS.high;
 }
 
-function formatParamValue(value: boolean | number): string {
-  if (typeof value === 'boolean') return value ? 'True' : 'False';
-  return value.toFixed(2);
-}
-
 export function ParameterDecisionTree({
   data,
   width,
@@ -48,7 +45,12 @@ export function ParameterDecisionTree({
   trialRange,
   onNodeHover,
 }: ParameterDecisionTreeProps) {
-  const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set(['root']));
+  // Auto-expand first 2 levels
+  const [expandedNodes, setExpandedNodes] = useState<Set<string>>(() => {
+    const initial = new Set(['root']);
+    // Will be populated after first render
+    return initial;
+  });
   const [hoveredNode, setHoveredNode] = useState<TreeNode | null>(null);
 
   // Filter trials by range if specified
@@ -61,10 +63,15 @@ export function ParameterDecisionTree({
 
   // Get top N important parameters
   const topParams = useMemo(() => {
-    return data.param_importance.slice(0, 10);
+    return data.param_importance.slice(0, 8);
   }, [data.param_importance]);
 
-  // Build tree structure based on expanded nodes
+  // Max importance for scaling
+  const maxImportance = useMemo(() => {
+    return Math.max(...topParams.map(p => p.importance));
+  }, [topParams]);
+
+  // Build tree structure
   const buildTree = useCallback(
     (
       trials: DecisionTreeTrial[],
@@ -75,18 +82,20 @@ export function ParameterDecisionTree({
       const nodeId = parentId;
       const isExpanded = expandedNodes.has(nodeId);
 
-      // Find next parameter to split on (highest importance not yet used)
+      // Find next parameter to split on
       const nextParam = topParams.find((p) => !usedParams.has(p.name));
 
-      if (!nextParam || depth >= 5 || trials.length < 10) {
+      if (!nextParam || depth >= 4 || trials.length < 5) {
         return {
           id: nodeId,
           paramName: null,
           paramValue: null,
+          splitType: null,
           trials,
           children: [],
           depth,
           isExpanded: false,
+          importance: 0,
         };
       }
 
@@ -97,85 +106,61 @@ export function ParameterDecisionTree({
         newUsedParams.add(nextParam.name);
 
         if (nextParam.is_boolean) {
-          // Split by true/false
-          const trueTrials = trials.filter(
-            (t) => t.parameters[nextParam.name] === true
-          );
-          const falseTrials = trials.filter(
-            (t) => t.parameters[nextParam.name] === false
-          );
+          const trueTrials = trials.filter((t) => t.parameters[nextParam.name] === true);
+          const falseTrials = trials.filter((t) => t.parameters[nextParam.name] === false);
 
           if (trueTrials.length > 0) {
-            children.push(
-              buildTree(
-                trueTrials,
-                depth + 1,
-                `${nodeId}-${nextParam.name}-true`,
-                newUsedParams
-              )
-            );
-            children[children.length - 1].paramName = nextParam.name;
-            children[children.length - 1].paramValue = true;
+            const child = buildTree(trueTrials, depth + 1, `${nodeId}-true`, newUsedParams);
+            child.paramName = nextParam.name;
+            child.paramValue = true;
+            child.splitType = 'true';
+            child.importance = nextParam.importance;
+            children.push(child);
           }
           if (falseTrials.length > 0) {
-            children.push(
-              buildTree(
-                falseTrials,
-                depth + 1,
-                `${nodeId}-${nextParam.name}-false`,
-                newUsedParams
-              )
-            );
-            children[children.length - 1].paramName = nextParam.name;
-            children[children.length - 1].paramValue = false;
+            const child = buildTree(falseTrials, depth + 1, `${nodeId}-false`, newUsedParams);
+            child.paramName = nextParam.name;
+            child.paramValue = false;
+            child.splitType = 'false';
+            child.importance = nextParam.importance;
+            children.push(child);
           }
         } else {
-          // Split numeric by median
           const values = trials.map((t) => t.parameters[nextParam.name] as number);
           const median = values.sort((a, b) => a - b)[Math.floor(values.length / 2)];
 
-          const lowTrials = trials.filter(
-            (t) => (t.parameters[nextParam.name] as number) <= median
-          );
-          const highTrials = trials.filter(
-            (t) => (t.parameters[nextParam.name] as number) > median
-          );
+          const lowTrials = trials.filter((t) => (t.parameters[nextParam.name] as number) <= median);
+          const highTrials = trials.filter((t) => (t.parameters[nextParam.name] as number) > median);
 
           if (lowTrials.length > 0) {
-            children.push(
-              buildTree(
-                lowTrials,
-                depth + 1,
-                `${nodeId}-${nextParam.name}-low`,
-                newUsedParams
-              )
-            );
-            children[children.length - 1].paramName = nextParam.name;
-            children[children.length - 1].paramValue = median;
+            const child = buildTree(lowTrials, depth + 1, `${nodeId}-low`, newUsedParams);
+            child.paramName = nextParam.name;
+            child.paramValue = median;
+            child.splitType = 'low';
+            child.importance = nextParam.importance;
+            children.push(child);
           }
           if (highTrials.length > 0) {
-            children.push(
-              buildTree(
-                highTrials,
-                depth + 1,
-                `${nodeId}-${nextParam.name}-high`,
-                newUsedParams
-              )
-            );
-            children[children.length - 1].paramName = nextParam.name;
-            children[children.length - 1].paramValue = median + 0.01;
+            const child = buildTree(highTrials, depth + 1, `${nodeId}-high`, newUsedParams);
+            child.paramName = nextParam.name;
+            child.paramValue = median;
+            child.splitType = 'high';
+            child.importance = nextParam.importance;
+            children.push(child);
           }
         }
       }
 
       return {
         id: nodeId,
-        paramName: depth === 0 ? null : null,
+        paramName: null,
         paramValue: null,
+        splitType: null,
         trials,
         children,
         depth,
         isExpanded,
+        importance: nextParam?.importance || 0,
       };
     },
     [expandedNodes, topParams]
@@ -184,6 +169,21 @@ export function ParameterDecisionTree({
   const tree = useMemo(() => {
     return buildTree(filteredTrials, 0, 'root', new Set());
   }, [filteredTrials, buildTree]);
+
+  // Auto-expand first 2 levels on mount
+  useEffect(() => {
+    const autoExpand = new Set(['root']);
+
+    // Get first level children IDs
+    if (topParams.length > 0) {
+      autoExpand.add('root-true');
+      autoExpand.add('root-false');
+      autoExpand.add('root-low');
+      autoExpand.add('root-high');
+    }
+
+    setExpandedNodes(autoExpand);
+  }, [topParams.length]);
 
   const toggleNode = (nodeId: string) => {
     setExpandedNodes((prev) => {
@@ -202,12 +202,14 @@ export function ParameterDecisionTree({
     onNodeHover?.(node);
   };
 
+  // Compact node dimensions
+  const nodeWidth = 110;
+  const nodeHeight = 44;
+  const verticalGap = 12;
+
   // Render tree recursively
   const renderNode = (node: TreeNode, x: number, y: number, availableWidth: number): ReactElement[] => {
     const elements: ReactElement[] = [];
-    const nodeWidth = 140;
-    const nodeHeight = 50;
-    const verticalGap = 20;
 
     const avgCoverage =
       node.trials.length > 0
@@ -220,89 +222,126 @@ export function ParameterDecisionTree({
       data.stats.max_coverage
     );
 
+    const coveragePercent = ((avgCoverage - data.stats.min_coverage) /
+      (data.stats.max_coverage - data.stats.min_coverage)) * 100;
+
     // Next param to show
-    const nextParam = topParams.find(
-      (p) =>
-        !node.children.some((c) => c.paramName === p.name) &&
-        node.children.length === 0
-    );
-    const nextParamName = node.isExpanded
-      ? null
-      : nextParam?.name || null;
+    const usedParamNames = new Set<string>();
+    let current: TreeNode | null = node;
+    while (current && current.paramName) {
+      usedParamNames.add(current.paramName);
+      current = null; // simplified
+    }
+    const nextParam = topParams.find((p) => !usedParamNames.has(p.name) && node.children.length === 0);
+    const canExpand = node.trials.length >= 5 && node.depth < 4;
+
+    // Format split label
+    const getSplitLabel = () => {
+      if (!node.paramName) return null;
+      const shortName = node.paramName.length > 12
+        ? node.paramName.slice(0, 10) + '..'
+        : node.paramName;
+
+      if (node.splitType === 'true') return `${shortName}=T`;
+      if (node.splitType === 'false') return `${shortName}=F`;
+      if (node.splitType === 'low') return `${shortName}≤${(node.paramValue as number).toFixed(0)}`;
+      if (node.splitType === 'high') return `${shortName}>${(node.paramValue as number).toFixed(0)}`;
+      return null;
+    };
 
     // Node rectangle
     elements.push(
       <g
         key={node.id}
         transform={`translate(${x - nodeWidth / 2}, ${y})`}
-        style={{ cursor: 'pointer' }}
-        onClick={() => toggleNode(node.id)}
+        style={{ cursor: canExpand ? 'pointer' : 'default' }}
+        onClick={() => canExpand && toggleNode(node.id)}
         onMouseEnter={() => handleNodeHover(node)}
         onMouseLeave={() => handleNodeHover(null)}
       >
+        {/* Background */}
         <rect
           width={nodeWidth}
           height={nodeHeight}
-          rx={6}
-          fill={hoveredNode?.id === node.id ? '#f3f4f6' : 'white'}
-          stroke={color}
-          strokeWidth={node.isExpanded ? 2 : 1}
+          rx={4}
+          fill={hoveredNode?.id === node.id ? '#f9fafb' : 'white'}
+          stroke={node.isExpanded ? color : '#d1d5db'}
+          strokeWidth={node.isExpanded ? 1.5 : 1}
         />
-        {/* Coverage bar */}
-        <rect
-          x={4}
-          y={nodeHeight - 8}
-          width={nodeWidth - 8}
-          height={4}
-          rx={2}
-          fill="#e5e7eb"
-        />
-        <rect
-          x={4}
-          y={nodeHeight - 8}
-          width={
-            ((avgCoverage - data.stats.min_coverage) /
-              (data.stats.max_coverage - data.stats.min_coverage)) *
-            (nodeWidth - 8)
-          }
-          height={4}
-          rx={2}
-          fill={coverageColor}
-        />
-        {/* Label */}
+
+        {/* Importance indicator (left edge) */}
+        {node.importance > 0 && (
+          <rect
+            x={0}
+            y={0}
+            width={3}
+            height={nodeHeight}
+            rx={1}
+            fill={color}
+            opacity={node.importance / maxImportance}
+          />
+        )}
+
+        {/* Split label */}
         {node.paramName && (
-          <text x={nodeWidth / 2} y={12} textAnchor="middle" fontSize={9} fill="#6b7280">
-            {node.paramName}={formatParamValue(node.paramValue!)}
+          <text x={nodeWidth / 2} y={11} textAnchor="middle" fontSize={8} fill="#6b7280" fontWeight={500}>
+            {getSplitLabel()}
           </text>
         )}
-        <text x={nodeWidth / 2} y={node.paramName ? 26 : 18} textAnchor="middle" fontSize={11} fontWeight={600}>
-          {node.trials.length} trials
+
+        {/* Trial count */}
+        <text
+          x={nodeWidth / 2}
+          y={node.paramName ? 24 : 18}
+          textAnchor="middle"
+          fontSize={11}
+          fontWeight={600}
+          fill="#1f2937"
+        >
+          {node.trials.length}
         </text>
-        <text x={nodeWidth / 2} y={node.paramName ? 38 : 32} textAnchor="middle" fontSize={10} fill="#6b7280">
-          avg: {avgCoverage.toFixed(0)}
+
+        {/* Coverage bar */}
+        <g transform={`translate(6, ${nodeHeight - 10})`}>
+          <rect width={nodeWidth - 12} height={5} rx={2} fill="#e5e7eb" />
+          <rect
+            width={Math.max(0, (coveragePercent / 100) * (nodeWidth - 12))}
+            height={5}
+            rx={2}
+            fill={coverageColor}
+          />
+        </g>
+
+        {/* Avg coverage text */}
+        <text
+          x={nodeWidth / 2}
+          y={node.paramName ? 35 : 30}
+          textAnchor="middle"
+          fontSize={8}
+          fill="#9ca3af"
+        >
+          μ={avgCoverage.toFixed(0)}
         </text>
+
         {/* Expand indicator */}
-        {node.trials.length >= 10 && node.depth < 5 && (
+        {canExpand && (
+          <circle
+            cx={nodeWidth - 8}
+            cy={8}
+            r={6}
+            fill={node.isExpanded ? color : '#e5e7eb'}
+          />
+        )}
+        {canExpand && (
           <text
             x={nodeWidth - 8}
-            y={14}
+            y={11}
             textAnchor="middle"
-            fontSize={12}
-            fill={color}
+            fontSize={10}
+            fill={node.isExpanded ? 'white' : '#6b7280'}
+            fontWeight={600}
           >
             {node.isExpanded ? '−' : '+'}
-          </text>
-        )}
-        {/* Next param hint */}
-        {nextParamName && !node.isExpanded && node.trials.length >= 10 && (
-          <text
-            x={nodeWidth / 2}
-            y={nodeHeight + 12}
-            textAnchor="middle"
-            fontSize={8}
-            fill="#9ca3af"
-          >
-            split by: {nextParamName}
           </text>
         )}
       </g>
@@ -311,7 +350,7 @@ export function ParameterDecisionTree({
     // Draw children
     if (node.children.length > 0) {
       const childWidth = availableWidth / node.children.length;
-      const childY = y + nodeHeight + verticalGap + 15;
+      const childY = y + nodeHeight + verticalGap;
 
       node.children.forEach((child, i) => {
         const childX = x - availableWidth / 2 + childWidth * (i + 0.5);
@@ -320,7 +359,7 @@ export function ParameterDecisionTree({
         elements.push(
           <path
             key={`${node.id}-${child.id}-line`}
-            d={`M${x},${y + nodeHeight} Q${x},${childY - 10} ${childX},${childY}`}
+            d={`M${x},${y + nodeHeight} L${x},${y + nodeHeight + verticalGap/2} L${childX},${y + nodeHeight + verticalGap/2} L${childX},${childY}`}
             fill="none"
             stroke="#d1d5db"
             strokeWidth={1}
@@ -328,79 +367,77 @@ export function ParameterDecisionTree({
         );
 
         // Recursive render
-        elements.push(...renderNode(child, childX, childY, childWidth - 10));
+        elements.push(...renderNode(child, childX, childY, childWidth - 8));
       });
     }
 
     return elements;
   };
 
-  const treeElements = renderNode(tree, width / 2, 10, width - 40);
+  // Calculate tree depth for dynamic height
+  const getTreeDepth = (node: TreeNode): number => {
+    if (node.children.length === 0) return 1;
+    return 1 + Math.max(...node.children.map(getTreeDepth));
+  };
+
+  const treeDepth = getTreeDepth(tree);
+  const dynamicHeight = Math.min(height, 50 + treeDepth * (nodeHeight + verticalGap + 5));
+
+  const treeElements = renderNode(tree, width / 2, 8, width - 20);
 
   return (
-    <div style={{ position: 'relative' }}>
+    <div className="relative">
       {/* Header */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          marginBottom: 8,
-          paddingLeft: 4,
-        }}
-      >
+      <div className="flex items-center gap-2 mb-2 px-1">
         <div
-          style={{
-            width: 12,
-            height: 12,
-            borderRadius: 2,
-            backgroundColor: color,
-          }}
+          className="w-3 h-3 rounded-sm"
+          style={{ backgroundColor: color }}
         />
-        <span style={{ fontWeight: 600, fontSize: 13 }}>{tunerName}</span>
+        <span className="font-semibold text-sm">{tunerName}</span>
         {trialRange && (
-          <span style={{ fontSize: 11, color: '#6b7280' }}>
+          <span className="text-xs text-gray-500">
             (Trial {trialRange[0]}-{trialRange[1]})
           </span>
         )}
+        <span className="text-xs text-gray-400 ml-auto">
+          {filteredTrials.length} trials
+        </span>
+      </div>
+
+      {/* Top parameters legend */}
+      <div className="flex flex-wrap gap-1 mb-2 px-1">
+        {topParams.slice(0, 5).map((p, i) => (
+          <div
+            key={p.name}
+            className="text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-600"
+            title={`Importance: ${p.importance.toFixed(1)}`}
+          >
+            <span className="font-medium text-gray-800">{i + 1}.</span>{' '}
+            {p.name.length > 15 ? p.name.slice(0, 13) + '..' : p.name}
+          </div>
+        ))}
       </div>
 
       {/* Tree SVG */}
-      <svg width={width} height={height} style={{ overflow: 'visible' }}>
+      <svg width={width} height={dynamicHeight} style={{ overflow: 'visible' }}>
         {treeElements}
       </svg>
 
-      {/* Hover tooltip with distribution */}
+      {/* Hover tooltip */}
       {hoveredNode && (
-        <div
-          style={{
-            position: 'absolute',
-            top: 0,
-            right: 0,
-            background: 'white',
-            border: '1px solid #e5e7eb',
-            borderRadius: 6,
-            padding: 8,
-            fontSize: 11,
-            boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
-            zIndex: 100,
-            minWidth: 150,
-          }}
-        >
-          <div style={{ fontWeight: 600, marginBottom: 4 }}>
-            {hoveredNode.trials.length} Trials
-          </div>
+        <div className="absolute top-0 right-0 bg-white border border-gray-200 rounded-lg p-2 shadow-lg z-50 min-w-[140px] text-xs">
+          <div className="font-semibold mb-1">{hoveredNode.trials.length} Trials</div>
           <MiniHistogram
             values={hoveredNode.trials.map((t) => t.coverage)}
             min={data.stats.min_coverage}
             max={data.stats.max_coverage}
-            width={130}
-            height={40}
+            width={120}
+            height={32}
             color={color}
           />
-          <div style={{ marginTop: 4, color: '#6b7280' }}>
-            Min: {Math.min(...hoveredNode.trials.map((t) => t.coverage))} | Max:{' '}
-            {Math.max(...hoveredNode.trials.map((t) => t.coverage))}
+          <div className="mt-1 text-gray-500 flex justify-between">
+            <span>min: {Math.min(...hoveredNode.trials.map((t) => t.coverage))}</span>
+            <span>max: {Math.max(...hoveredNode.trials.map((t) => t.coverage))}</span>
           </div>
         </div>
       )}
@@ -408,7 +445,7 @@ export function ParameterDecisionTree({
   );
 }
 
-// Mini histogram component for tooltip
+// Mini histogram component
 function MiniHistogram({
   values,
   min,
@@ -424,7 +461,7 @@ function MiniHistogram({
   height: number;
   color: string;
 }) {
-  const bins = 10;
+  const bins = 8;
   const binWidth = (max - min) / bins;
   const counts = new Array(bins).fill(0);
 
@@ -446,7 +483,8 @@ function MiniHistogram({
           width={barWidth}
           height={(count / maxCount) * height}
           fill={color}
-          opacity={0.7}
+          opacity={0.6}
+          rx={1}
         />
       ))}
     </svg>
