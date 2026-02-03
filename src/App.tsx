@@ -2,12 +2,16 @@ import { useState } from "react";
 import { TreeComparison } from "./components/TreeComparison";
 import { ExplorationOverview } from "./components/ExplorationOverview";
 import { DiscoveryTimeline } from "./components/DiscoveryTimeline";
+import { OverviewMap } from "./components/OverviewMap";
+import { HexMap } from "./components/HexMap";
 import "./App.css";
 
-type ViewMode = "overview" | "tree" | "timeline";
+type ViewMode = "overview" | "tree" | "timeline" | "map" | "hexmap";
+type Program = "gawk" | "gcal" | "grep";
 
 function App() {
   const [viewMode, setViewMode] = useState<ViewMode>("overview");
+  const [mapProgram, setMapProgram] = useState<Program>("gawk");
 
   return (
     <div className="w-[100vw] h-[100vh] flex flex-col bg-base-100">
@@ -55,6 +59,20 @@ function App() {
             >
               Discovery Timeline
             </button>
+            <button
+              role="tab"
+              className={`tab ${viewMode === "map" ? "tab-active" : ""}`}
+              onClick={() => setViewMode("map")}
+            >
+              Overview Map
+            </button>
+            <button
+              role="tab"
+              className={`tab ${viewMode === "hexmap" ? "tab-active" : ""}`}
+              onClick={() => setViewMode("hexmap")}
+            >
+              Hex Map
+            </button>
           </div>
         </div>
       </header>
@@ -65,6 +83,52 @@ function App() {
           {viewMode === "overview" && <ExplorationOverview />}
           {viewMode === "tree" && <TreeComparison />}
           {viewMode === "timeline" && <DiscoveryTimeline />}
+          {viewMode === "map" && (
+            <div className="flex flex-col h-full">
+              <div className="flex items-center gap-4 mb-4">
+                <span className="text-sm font-medium text-gray-600">Program:</span>
+                <div className="flex gap-2">
+                  {(["gawk", "gcal", "grep"] as Program[]).map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => setMapProgram(p)}
+                      className={`px-3 py-1 text-sm rounded ${
+                        mapProgram === p
+                          ? "bg-indigo-600 text-white"
+                          : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                      }`}
+                    >
+                      {p}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <OverviewMap width={1100} height={700} program={mapProgram} />
+            </div>
+          )}
+          {viewMode === "hexmap" && (
+            <div className="flex flex-col h-full">
+              <div className="flex items-center gap-4 mb-4">
+                <span className="text-sm font-medium text-gray-600">Program:</span>
+                <div className="flex gap-2">
+                  {(["gawk", "gcal", "grep"] as Program[]).map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => setMapProgram(p)}
+                      className={`px-3 py-1 text-sm rounded ${
+                        mapProgram === p
+                          ? "bg-indigo-600 text-white"
+                          : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                      }`}
+                    >
+                      {p}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <HexMap width={1100} height={700} program={mapProgram} />
+            </div>
+          )}
         </section>
       </main>
     </div>
