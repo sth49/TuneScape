@@ -6,11 +6,12 @@ import { OverviewMap } from "./components/OverviewMap";
 import { HexMap } from "./components/HexMap";
 import "./App.css";
 
-type ViewMode = "overview" | "tree" | "timeline" | "map" | "hexmap";
+// type ViewMode = "overview" | "tree" | "timeline" | "map" | "hexmap";
+type ViewMode = "hexmap";
 type Program = "gawk" | "gcal" | "grep";
 
 function App() {
-  const [viewMode, setViewMode] = useState<ViewMode>("overview");
+  const [viewMode, setViewMode] = useState<ViewMode>("hexmap");
   const [mapProgram, setMapProgram] = useState<Program>("gawk");
 
   return (
@@ -38,7 +39,7 @@ function App() {
         {/* View mode tabs */}
         <div className="flex-none">
           <div role="tablist" className="tabs tabs-boxed">
-            <button
+            {/* <button
               role="tab"
               className={`tab ${viewMode === "overview" ? "tab-active" : ""}`}
               onClick={() => setViewMode("overview")}
@@ -65,7 +66,7 @@ function App() {
               onClick={() => setViewMode("map")}
             >
               Overview Map
-            </button>
+            </button> */}
             <button
               role="tab"
               className={`tab ${viewMode === "hexmap" ? "tab-active" : ""}`}
@@ -80,13 +81,15 @@ function App() {
       {/* Main content */}
       <main className="flex-1 overflow-auto p-4">
         <section className="w-full h-full bg-base-100 p-4 rounded-lg border border-base-300">
-          {viewMode === "overview" && <ExplorationOverview />}
+          {/* {viewMode === "overview" && <ExplorationOverview />}
           {viewMode === "tree" && <TreeComparison />}
           {viewMode === "timeline" && <DiscoveryTimeline />}
           {viewMode === "map" && (
             <div className="flex flex-col h-full">
               <div className="flex items-center gap-4 mb-4">
-                <span className="text-sm font-medium text-gray-600">Program:</span>
+                <span className="text-sm font-medium text-gray-600">
+                  Program:
+                </span>
                 <div className="flex gap-2">
                   {(["gawk", "gcal", "grep"] as Program[]).map((p) => (
                     <button
@@ -105,11 +108,13 @@ function App() {
               </div>
               <OverviewMap width={1100} height={700} program={mapProgram} />
             </div>
-          )}
+          )} */}
           {viewMode === "hexmap" && (
             <div className="flex flex-col h-full">
               <div className="flex items-center gap-4 mb-4">
-                <span className="text-sm font-medium text-gray-600">Program:</span>
+                <span className="text-sm font-medium text-gray-600">
+                  Program:
+                </span>
                 <div className="flex gap-2">
                   {(["gawk", "gcal", "grep"] as Program[]).map((p) => (
                     <button

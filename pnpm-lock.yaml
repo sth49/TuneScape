@@ -77,6 +77,9 @@ importers:
       tailwindcss:
         specifier: ^4.1.18
         version: 4.1.18
+      textures:
+        specifier: ^1.2.3
+        version: 1.2.3
     devDependencies:
       '@eslint/js':
         specifier: ^9.39.1
@@ -1725,6 +1728,9 @@ packages:
   tapable@2.3.0:
     resolution: {integrity: sha512-g9ljZiwki/LfxmQADO3dEY1CbpmXT5Hm2fJ+QaGKwSXUylMybePR7/67YW7jOrrvjEgL1Fmz5kzyAjWVWLlucg==}
     engines: {node: '>=6'}
+
+  textures@1.2.3:
+    resolution: {integrity: sha512-Ehg2adOcyfCR5DPOzBauXERJN4cXF1Bh4dITY2pPQ3+CvBBU0SZAep6pq5cCWp8K+k3OlXYh5dc2stgEQlqAWg==}
 
   tinyglobby@0.2.15:
     resolution: {integrity: sha512-j2Zq4NyQYG5XMST4cbs02Ak8iJUdxRM0XI5QyxXuZOzKOINmWurp3smXu3y5wDcJrptwpSjgXHzIQxR0omXljQ==}
@@ -3457,6 +3463,8 @@ snapshots:
   tailwindcss@4.1.18: {}
 
   tapable@2.3.0: {}
+
+  textures@1.2.3: {}
 
   tinyglobby@0.2.15:
     dependencies:
