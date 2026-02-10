@@ -5,10 +5,11 @@ import { DiscoveryTimeline } from "./components/DiscoveryTimeline";
 import { OverviewMap } from "./components/OverviewMap";
 import { HexMap } from "./components/HexMap";
 import { TrialGraph } from "./components/TrialGraph";
+import { ParameterHexMap } from "./components/ParameterHexMap";
 import "./App.css";
 
 // type ViewMode = "overview" | "tree" | "timeline" | "map" | "hexmap";
-type ViewMode = "hexmap" | "graph";
+type ViewMode = "hexmap" | "graph" | "paramhex";
 type Program = "gawk" | "gcal" | "grep";
 
 function App() {
@@ -81,6 +82,13 @@ function App() {
               onClick={() => setViewMode("graph")}
             >
               Trial Graph
+            </button>
+            <button
+              role="tab"
+              className={`tab ${viewMode === "paramhex" ? "tab-active" : ""}`}
+              onClick={() => setViewMode("paramhex")}
+            >
+              Param Hex
             </button>
           </div>
         </div>
@@ -165,6 +173,11 @@ function App() {
                 </div>
               </div>
               <TrialGraph width={1100} height={700} program={mapProgram} />
+            </div>
+          )}
+          {viewMode === "paramhex" && (
+            <div className="flex flex-col h-full relative">
+              <ParameterHexMap width={1200} height={800} program={mapProgram} />
             </div>
           )}
         </section>
