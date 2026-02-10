@@ -4,10 +4,11 @@ import { ExplorationOverview } from "./components/ExplorationOverview";
 import { DiscoveryTimeline } from "./components/DiscoveryTimeline";
 import { OverviewMap } from "./components/OverviewMap";
 import { HexMap } from "./components/HexMap";
+import { TrialGraph } from "./components/TrialGraph";
 import "./App.css";
 
 // type ViewMode = "overview" | "tree" | "timeline" | "map" | "hexmap";
-type ViewMode = "hexmap";
+type ViewMode = "hexmap" | "graph";
 type Program = "gawk" | "gcal" | "grep";
 
 function App() {
@@ -74,6 +75,13 @@ function App() {
             >
               Hex Map
             </button>
+            <button
+              role="tab"
+              className={`tab ${viewMode === "graph" ? "tab-active" : ""}`}
+              onClick={() => setViewMode("graph")}
+            >
+              Trial Graph
+            </button>
           </div>
         </div>
       </header>
@@ -132,6 +140,31 @@ function App() {
                 </div>
               </div>
               <HexMap width={1100} height={700} program={mapProgram} />
+            </div>
+          )}
+          {viewMode === "graph" && (
+            <div className="flex flex-col h-full">
+              <div className="flex items-center gap-4 mb-4">
+                <span className="text-sm font-medium text-gray-600">
+                  Program:
+                </span>
+                <div className="flex gap-2">
+                  {(["gawk", "gcal", "grep"] as Program[]).map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => setMapProgram(p)}
+                      className={`px-3 py-1 text-sm rounded ${
+                        mapProgram === p
+                          ? "bg-indigo-600 text-white"
+                          : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                      }`}
+                    >
+                      {p}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <TrialGraph width={1100} height={700} program={mapProgram} />
             </div>
           )}
         </section>
