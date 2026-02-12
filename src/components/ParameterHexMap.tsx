@@ -1,7 +1,7 @@
 /**
  * Parameter Hex Map — QAP-optimized hex grid layout
  *
- * Each hex = one unique parameter combination (discretized top-10 SHAP params)
+ * Each hex = one unique parameter combination (all 61 params, discretized)
  * Position encodes parameter similarity (Hamming distance → hex distance)
  * Color encodes tuner distribution
  * LoD slider merges nearby hexes by Hamming distance threshold
@@ -29,15 +29,28 @@ interface HexNode {
   trialIndices: number[];
 }
 
+interface ParamMeta {
+  type: "boolean" | "categorical" | "numeric";
+  binEdges?: number[];
+  binLabels?: string[];
+  categories?: string[];
+}
+
+interface LodLevel {
+  nClusters: number;
+  assignments: number[];
+  positions: [number, number][];
+}
+
 interface HexLayoutData {
   program: string;
   tuners: string[];
   totalTrials: number;
-  shapParams: string[];
-  symArgBinEdges: number[];
-  symArgLabels: string[];
+  allParams: string[];
+  paramMeta: Record<string, ParamMeta>;
   gridRadius: number;
   nodes: HexNode[];
+  lodLevels?: LodLevel[];
 }
 
 // LoD aggregated node
@@ -92,20 +105,14 @@ function hexDistance(q1: number, r1: number, q2: number, r2: number): number {
   return (Math.abs(q1 - q2) + Math.abs(q1 + r1 - q2 - r2) + Math.abs(r1 - r2)) / 2;
 }
 
-// ─── Hamming distance for LoD ────────────────────────────────────────────────
+// ─── LoD Aggregation (precomputed levels) ────────────────────────────────────
 
-function hammingDist(a: (string | number)[], b: (string | number)[]): number {
-  let d = 0;
-  for (let i = 0; i < a.length; i++) {
-    if (a[i] !== b[i]) d++;
-  }
-  return d;
-}
-
-// ─── LoD Aggregation ─────────────────────────────────────────────────────────
-
-function aggregateNodes(nodes: HexNode[], maxHammingDist: number): AggNode[] {
-  if (maxHammingDist === 0) {
+function aggregateByLevel(
+  nodes: HexNode[],
+  lodLevels: LodLevel[] | undefined,
+  lodLevel: number
+): AggNode[] {
+  if (lodLevel === 0 || !lodLevels || lodLevel > lodLevels.length) {
     // No aggregation: each hex node is its own agg node
     return nodes.map((n, i) => ({
       id: i,
@@ -119,50 +126,43 @@ function aggregateNodes(nodes: HexNode[], maxHammingDist: number): AggNode[] {
     }));
   }
 
-  // Greedy clustering: iterate nodes, assign to existing cluster or create new one
-  const clusters: AggNode[] = [];
-  const assigned = new Array(nodes.length).fill(false);
+  const level = lodLevels[lodLevel - 1];
+  const { assignments, positions, nClusters } = level;
 
-  // Sort by trial count descending so big nodes become cluster seeds
-  const order = nodes.map((_, i) => i).sort((a, b) => nodes[b].trialCount - nodes[a].trialCount);
-
-  for (const idx of order) {
-    if (assigned[idx]) continue;
-
-    // Start new cluster
-    const seed = nodes[idx];
-    const members: HexNode[] = [seed];
-    assigned[idx] = true;
-
-    // Find all unassigned nodes within Hamming distance
-    for (let j = 0; j < nodes.length; j++) {
-      if (assigned[j]) continue;
-      if (hammingDist(seed.discrete, nodes[j].discrete) <= maxHammingDist) {
-        members.push(nodes[j]);
-        assigned[j] = true;
-      }
+  // Group nodes by cluster assignment
+  const groups: HexNode[][] = Array.from({ length: nClusters }, () => []);
+  for (let i = 0; i < nodes.length; i++) {
+    const clusterId = assignments[i];
+    if (clusterId !== undefined && clusterId < nClusters) {
+      groups[clusterId].push(nodes[i]);
     }
+  }
 
-    // Compute aggregate
+  // Build AggNode per non-empty cluster
+  const clusters: AggNode[] = [];
+  for (let c = 0; c < nClusters; c++) {
+    const members = groups[c];
+    if (members.length === 0) continue;
+
     const totalTrials = members.reduce((s, m) => s + m.trialCount, 0);
     const tunerCounts: Record<string, number> = {};
     for (const m of members) {
-      for (const [t, c] of Object.entries(m.tunerCounts)) {
-        tunerCounts[t] = (tunerCounts[t] || 0) + c;
+      for (const [t, cnt] of Object.entries(m.tunerCounts)) {
+        tunerCounts[t] = (tunerCounts[t] || 0) + cnt;
       }
     }
-    // Centroid position (weighted by trial count)
-    const qCenter = members.reduce((s, m) => s + m.q * m.trialCount, 0) / totalTrials;
-    const rCenter = members.reduce((s, m) => s + m.r * m.trialCount, 0) / totalTrials;
+
+    const [q, r] = positions[c];
 
     clusters.push({
       id: clusters.length,
       hexNodes: members,
-      q: Math.round(qCenter),
-      r: Math.round(rCenter),
+      q,
+      r,
       trialCount: totalTrials,
       tunerCounts,
-      meanCoverage: members.reduce((s, m) => s + m.meanCoverage * m.trialCount, 0) / totalTrials,
+      meanCoverage:
+        members.reduce((s, m) => s + m.meanCoverage * m.trialCount, 0) / totalTrials,
       maxCoverage: Math.max(...members.map((m) => m.maxCoverage)),
     });
   }
@@ -191,23 +191,65 @@ function piePaths(
     ];
   }
 
+  const TWO_PI = 2 * Math.PI;
+  const SECTOR = Math.PI / 3;
+  const apothem = size * Math.cos(Math.PI / 6); // size * √3/2
+
+  // Precompute hex vertex positions and angles (flat-top)
+  const vertexAngles: number[] = [];
+  const hexVertices: [number, number][] = [];
+  for (let i = 0; i < 6; i++) {
+    const a = SECTOR * i;
+    vertexAngles.push(a);
+    hexVertices.push([size * Math.cos(a), size * Math.sin(a)]);
+  }
+
+  // Point on hex boundary at a given angle from center
+  function hexBoundaryPt(angle: number): [number, number] {
+    const a = ((angle % TWO_PI) + TWO_PI) % TWO_PI;
+    const k = Math.floor(a / SECTOR) % 6;
+    const delta = a - (k + 0.5) * SECTOR;
+    const r = apothem / Math.cos(delta);
+    return [r * Math.cos(a), r * Math.sin(a)];
+  }
+
   const total = entries.reduce((s, e) => s + e.count, 0);
   const paths: { tuner: string; path: string; color: string }[] = [];
   let startAngle = -Math.PI / 2;
 
   for (const entry of entries) {
-    const sweep = (entry.count / total) * 2 * Math.PI;
+    const sweep = (entry.count / total) * TWO_PI;
     const endAngle = startAngle + sweep;
 
-    const x1 = size * Math.cos(startAngle);
-    const y1 = size * Math.sin(startAngle);
-    const x2 = size * Math.cos(endAngle);
-    const y2 = size * Math.sin(endAngle);
-    const largeArc = sweep > Math.PI ? 1 : 0;
+    const [x1, y1] = hexBoundaryPt(startAngle);
+    const [x2, y2] = hexBoundaryPt(endAngle);
+
+    let d = `M0,0 L${x1.toFixed(2)},${y1.toFixed(2)}`;
+
+    // Add hex vertices that fall between startAngle and endAngle
+    const normStart = ((startAngle % TWO_PI) + TWO_PI) % TWO_PI;
+    const normEnd = normStart + sweep;
+
+    const vInSector: { angle: number; idx: number }[] = [];
+    for (let i = 0; i < 6; i++) {
+      for (const va of [vertexAngles[i], vertexAngles[i] + TWO_PI]) {
+        if (va > normStart + 1e-9 && va < normEnd - 1e-9) {
+          vInSector.push({ angle: va, idx: i });
+          break;
+        }
+      }
+    }
+    vInSector.sort((a, b) => a.angle - b.angle);
+
+    for (const v of vInSector) {
+      d += ` L${hexVertices[v.idx][0].toFixed(2)},${hexVertices[v.idx][1].toFixed(2)}`;
+    }
+
+    d += ` L${x2.toFixed(2)},${y2.toFixed(2)} Z`;
 
     paths.push({
       tuner: entry.tuner,
-      path: `M0,0 L${x1.toFixed(2)},${y1.toFixed(2)} A${size},${size} 0 ${largeArc} 1 ${x2.toFixed(2)},${y2.toFixed(2)} Z`,
+      path: d,
       color: TUNER_COLORS[entry.tuner as TunerType],
     });
 
@@ -290,7 +332,7 @@ export function ParameterHexMap({
   // ─── LoD Aggregation ───────────────────────────────────────────────────────
   const aggNodes = useMemo(() => {
     if (!data) return [];
-    return aggregateNodes(data.nodes, lodLevel);
+    return aggregateByLevel(data.nodes, data.lodLevels, lodLevel);
   }, [data, lodLevel]);
 
   // ─── Coverage scale ────────────────────────────────────────────────────────
@@ -392,16 +434,14 @@ export function ParameterHexMap({
           <input
             type="range"
             min={0}
-            max={5}
+            max={data.lodLevels ? data.lodLevels.length : 0}
             step={1}
             value={lodLevel}
             onChange={(e) => setLodLevel(Number(e.target.value))}
             className="range range-xs range-primary w-28"
           />
-          <span className="text-xs text-gray-500 w-12">
-            {lodLevel === 0
-              ? `${filteredNodes.length}`
-              : `${filteredNodes.length} agg`}
+          <span className="text-xs text-gray-500 w-20">
+            {filteredNodes.length} clusters
           </span>
         </div>
 
@@ -575,10 +615,10 @@ export function ParameterHexMap({
         {/* ── Tooltip ────────────────────────────────────────────────────── */}
         {tooltip && (
           <foreignObject
-            x={Math.min(tooltip.x + 12, width - 260)}
-            y={Math.min(tooltip.y + 12, height - 260)}
-            width={250}
-            height={240}
+            x={Math.min(tooltip.x + 12, width - 300)}
+            y={Math.min(tooltip.y + 12, height - 360)}
+            width={280}
+            height={340}
             style={{ pointerEvents: "none" }}
           >
             <div className="bg-gray-900 text-gray-100 rounded-lg shadow-lg p-3 text-xs border border-gray-700">
@@ -623,23 +663,22 @@ export function ParameterHexMap({
 
               {/* Parameter values (only for single hex nodes) */}
               {tooltip.node.hexNodes.length === 1 && data && (
-                <div className="border-t border-gray-700 pt-1.5 space-y-0.5">
-                  {data.shapParams.map((p, i) => {
+                <div className="border-t border-gray-700 pt-1.5 space-y-0.5 max-h-48 overflow-y-auto">
+                  {data.allParams.map((p, i) => {
                     const val = tooltip.node.hexNodes[0].discrete[i];
-                    const display =
-                      p === "sym-arg"
-                        ? data.symArgLabels[val as number] || String(val)
-                        : typeof val === "number"
-                        ? val === 1
-                          ? "true"
-                          : val === 0
-                          ? "false"
-                          : String(val)
-                        : String(val);
+                    const meta = data.paramMeta[p];
+                    let display: string;
+                    if (meta?.type === "boolean") {
+                      display = val === 1 ? "true" : "false";
+                    } else if (meta?.type === "numeric") {
+                      display = meta.binLabels?.[val as number] ?? String(val);
+                    } else {
+                      display = String(val);
+                    }
                     return (
-                      <div key={p} className="flex justify-between">
-                        <span className="text-gray-400">{p}</span>
-                        <span className="text-gray-200 font-mono">{display}</span>
+                      <div key={p} className="flex justify-between gap-2">
+                        <span className="text-gray-400 truncate">{p}</span>
+                        <span className="text-gray-200 font-mono whitespace-nowrap">{display}</span>
                       </div>
                     );
                   })}
@@ -652,7 +691,7 @@ export function ParameterHexMap({
 
       {/* ── Selected Node Detail Panel ───────────────────────────────────── */}
       {selectedNode && data && (
-        <div className="absolute bottom-4 right-4 bg-gray-900 text-gray-100 rounded-lg shadow-xl p-4 text-xs border border-gray-700 w-72 max-h-80 overflow-auto">
+        <div className="absolute bottom-4 right-4 bg-gray-900 text-gray-100 rounded-lg shadow-xl p-4 text-xs border border-gray-700 w-80 max-h-[28rem] overflow-auto">
           <div className="flex justify-between items-center mb-2">
             <span className="font-semibold">
               {selectedNode.hexNodes.length === 1
@@ -694,22 +733,21 @@ export function ParameterHexMap({
           {/* Parameters for single node */}
           {selectedNode.hexNodes.length === 1 && (
             <div className="space-y-1 border-t border-gray-700 pt-2">
-              {data.shapParams.map((p, i) => {
+              {data.allParams.map((p, i) => {
                 const val = selectedNode.hexNodes[0].discrete[i];
-                const display =
-                  p === "sym-arg"
-                    ? data.symArgLabels[val as number] || String(val)
-                    : typeof val === "number"
-                    ? val === 1
-                      ? "true"
-                      : val === 0
-                      ? "false"
-                      : String(val)
-                    : String(val);
+                const meta = data.paramMeta[p];
+                let display: string;
+                if (meta?.type === "boolean") {
+                  display = val === 1 ? "true" : "false";
+                } else if (meta?.type === "numeric") {
+                  display = meta.binLabels?.[val as number] ?? String(val);
+                } else {
+                  display = String(val);
+                }
                 return (
-                  <div key={p} className="flex justify-between">
-                    <span className="text-gray-400">{p}</span>
-                    <span className="text-gray-200 font-mono">{display}</span>
+                  <div key={p} className="flex justify-between gap-2">
+                    <span className="text-gray-400 truncate">{p}</span>
+                    <span className="text-gray-200 font-mono whitespace-nowrap">{display}</span>
                   </div>
                 );
               })}

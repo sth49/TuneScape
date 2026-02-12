@@ -177,6 +177,26 @@ function App() {
           )}
           {viewMode === "paramhex" && (
             <div className="flex flex-col h-full relative">
+              <div className="flex items-center gap-4 mb-4">
+                <span className="text-sm font-medium text-gray-600">
+                  Program:
+                </span>
+                <div className="flex gap-2">
+                  {(["gawk", "gcal", "grep"] as Program[]).map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => setMapProgram(p)}
+                      className={`px-3 py-1 text-sm rounded ${
+                        mapProgram === p
+                          ? "bg-indigo-600 text-white"
+                          : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                      }`}
+                    >
+                      {p}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <ParameterHexMap width={1200} height={800} program={mapProgram} />
             </div>
           )}
