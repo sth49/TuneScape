@@ -6,10 +6,11 @@ import { OverviewMap } from "./components/OverviewMap";
 import { HexMap } from "./components/HexMap";
 import { TrialGraph } from "./components/TrialGraph";
 import { ParameterHexMap } from "./components/ParameterHexMap";
+import { RegionMap } from "./components/RegionMap";
 import "./App.css";
 
 // type ViewMode = "overview" | "tree" | "timeline" | "map" | "hexmap";
-type ViewMode = "hexmap" | "graph" | "paramhex";
+type ViewMode = "hexmap" | "graph" | "paramhex" | "regionmap";
 type Program = "gawk" | "gcal" | "grep";
 
 function App() {
@@ -89,6 +90,13 @@ function App() {
               onClick={() => setViewMode("paramhex")}
             >
               Param Hex
+            </button>
+            <button
+              role="tab"
+              className={`tab ${viewMode === "regionmap" ? "tab-active" : ""}`}
+              onClick={() => setViewMode("regionmap")}
+            >
+              Region Map
             </button>
           </div>
         </div>
@@ -198,6 +206,33 @@ function App() {
                 </div>
               </div>
               <ParameterHexMap width={1200} height={800} program={mapProgram} />
+            </div>
+          )}
+          {viewMode === "regionmap" && (
+            <div className="flex flex-col h-full">
+              <div className="flex items-center gap-4 mb-3">
+                <span className="text-sm font-medium text-gray-600">
+                  Program:
+                </span>
+                <div className="flex gap-2">
+                  {(["gawk", "gcal", "grep"] as Program[]).map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => setMapProgram(p)}
+                      className={`px-3 py-1 text-sm rounded ${
+                        mapProgram === p
+                          ? "bg-indigo-600 text-white"
+                          : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                      }`}
+                    >
+                      {p}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="flex-1 overflow-hidden">
+                <RegionMap program={mapProgram} />
+              </div>
             </div>
           )}
         </section>

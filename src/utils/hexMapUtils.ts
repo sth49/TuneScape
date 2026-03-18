@@ -7,13 +7,26 @@
  * 4. Assign to hexagonal grid
  */
 
-import type { ProcessedData } from '../types/data';
+import type { ProcessedData } from "../types/data";
+
+// ============================================================
+// Seeded PRNG (mulberry32) — deterministic, no Math.random()
+// ============================================================
+function seededRng(seed: number): () => number {
+  let s = seed >>> 0;
+  return () => {
+    s += 0x6d2b79f5;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t ^= t + Math.imul(t ^ (t >>> 7), 61 | t);
+    return ((t ^ (t >>> 14)) >>> 0) / 0x100000000;
+  };
+}
 
 // ============================================================
 // Types
 // ============================================================
 
-export type TunerType = 'SymTuner' | 'CMA_ES' | 'Genetic' | 'SuccessiveHalving';
+export type TunerType = "SymTuner" | "CMA_ES" | "Genetic" | "SuccessiveHalving";
 
 export interface Trial {
   id: number;
@@ -26,10 +39,12 @@ export interface Trial {
 export interface Cluster {
   id: number;
   trials: Trial[];
-  centroid: Record<string, number>;  // normalized parameter values
+  centroid: Record<string, number>; // normalized parameter values
   tunerCounts: Record<TunerType, number>;
   totalTrials: number;
   avgCoverage: number;
+  meanBranchCoverage: number;
+  maxBranchCoverage: number;
   // Position after MDS
   x: number;
   y: number;
@@ -39,16 +54,50 @@ export interface Cluster {
 }
 
 export interface HexTile {
-  q: number;  // hex coordinate
-  r: number;  // hex coordinate
+  q: number; // hex coordinate
+  r: number; // hex coordinate
   cluster: Cluster | null;
-  x: number;  // pixel x
-  y: number;  // pixel y
+  x: number; // pixel x
+  y: number; // pixel y
+}
+
+/**
+ * Connected sub-group within a Territory.
+ * Label is contrastive vs parent territory (not global).
+ */
+export interface SubRegion {
+  id: number;
+  territoryId: number;
+  clusters: Cluster[];
+  tiles: HexTile[];
+  trials: Trial[];
+  totalTrials: number;
+  tunerCounts: Record<TunerType, number>;
+  pixelCentroidX: number;
+  pixelCentroidY: number;
+  label: string; // sub vs macro-rest (local contrast)
+}
+
+/** Spatially connected group of hex clusters (BFS on hex grid). */
+export interface Territory {
+  id: number;
+  clusters: Cluster[];
+  tiles: HexTile[];
+  trials: Trial[]; // flat list of all trials in this territory
+  totalTrials: number;
+  tunerCounts: Record<TunerType, number>;
+  centroidX: number; // MDS centroid (kept for voronoi compat)
+  centroidY: number;
+  pixelCentroidX: number; // tile pixel centroid (for label placement)
+  pixelCentroidY: number;
+  label: string; // macro label: territory vs global
+  subRegions: SubRegion[]; // internal sub-regions with local-contrast labels
 }
 
 export interface HexMapData {
   clusters: Cluster[];
   hexTiles: HexTile[];
+  territories: Territory[];
   gridRadius: number;
   paramImportance: { name: string; importance: number }[];
 }
@@ -58,13 +107,18 @@ export interface HexMapData {
 // ============================================================
 
 export const TUNER_COLORS: Record<TunerType, string> = {
-  'SymTuner': '#3B82F6',
-  'CMA_ES': '#10B981',
-  'Genetic': '#F59E0B',
-  'SuccessiveHalving': '#EF4444',
+  SymTuner: "#3B82F6",
+  CMA_ES: "#10B981",
+  Genetic: "#F59E0B",
+  SuccessiveHalving: "#EF4444",
 };
 
-export const TUNER_NAMES: TunerType[] = ['SymTuner', 'CMA_ES', 'Genetic', 'SuccessiveHalving'];
+export const TUNER_NAMES: TunerType[] = [
+  "SymTuner",
+  "CMA_ES",
+  "Genetic",
+  "SuccessiveHalving",
+];
 
 // ============================================================
 // Parameter Analysis
@@ -72,7 +126,7 @@ export const TUNER_NAMES: TunerType[] = ['SymTuner', 'CMA_ES', 'Genetic', 'Succe
 
 interface ParamStats {
   name: string;
-  type: 'numeric' | 'categorical' | 'binary';
+  type: "numeric" | "categorical" | "binary";
   min?: number;
   max?: number;
   categories?: (string | boolean)[];
@@ -85,19 +139,19 @@ function analyzeParams(trials: Trial[]): Map<string, ParamStats> {
   const paramNames = Object.keys(trials[0].parameters);
 
   for (const name of paramNames) {
-    const values = trials.map(t => t.parameters[name]);
+    const values = trials.map((t) => t.parameters[name]);
     const firstVal = values[0];
 
-    if (typeof firstVal === 'boolean') {
-      stats.set(name, { name, type: 'binary', categories: [true, false] });
-    } else if (typeof firstVal === 'string') {
+    if (typeof firstVal === "boolean") {
+      stats.set(name, { name, type: "binary", categories: [true, false] });
+    } else if (typeof firstVal === "string") {
       const unique = [...new Set(values)] as string[];
-      stats.set(name, { name, type: 'categorical', categories: unique });
+      stats.set(name, { name, type: "categorical", categories: unique });
     } else {
-      const nums = values.filter(v => typeof v === 'number') as number[];
+      const nums = values.filter((v) => typeof v === "number") as number[];
       stats.set(name, {
         name,
-        type: 'numeric',
+        type: "numeric",
         min: Math.min(...nums),
         max: Math.max(...nums),
       });
@@ -111,58 +165,145 @@ function analyzeParams(trials: Trial[]): Map<string, ParamStats> {
 // Feature Vector & Distance
 // ============================================================
 
+/**
+ * Trial → flat feature vector.
+ * - numeric  : min-max normalized scalar
+ * - binary   : 0 / 1
+ * - categorical : one-hot (one bit per category)
+ *
+ * The vector length is sum(1 for numeric/bool, n_cats for categorical).
+ */
 function trialToVector(
   trial: Trial,
   paramStats: Map<string, ParamStats>,
-  topParams: string[]
+  topParams: string[],
 ): number[] {
   const vec: number[] = [];
-
   for (const name of topParams) {
     const stat = paramStats.get(name);
     const val = trial.parameters[name];
-
-    if (!stat) {
-      vec.push(0);
-      continue;
-    }
-
-    if (stat.type === 'numeric' && stat.min !== undefined && stat.max !== undefined) {
+    if (!stat) { vec.push(0); continue; }
+    if (stat.type === "numeric" && stat.min !== undefined && stat.max !== undefined) {
       const range = stat.max - stat.min || 1;
-      vec.push(typeof val === 'number' ? (val - stat.min) / range : 0);
-    } else if (stat.type === 'categorical' && stat.categories) {
-      // One-hot encoding (simplified: just index / count)
-      const idx = stat.categories.indexOf(val as string);
-      vec.push(idx >= 0 ? idx / (stat.categories.length - 1 || 1) : 0);
-    } else if (stat.type === 'binary') {
+      vec.push(typeof val === "number" ? (val - stat.min) / range : 0);
+    } else if (stat.type === "binary") {
       vec.push(val === true ? 1 : 0);
+    } else if (stat.type === "categorical" && stat.categories) {
+      for (const cat of stat.categories) {
+        vec.push(String(val) === String(cat) ? 1 : 0);
+      }
     } else {
       vec.push(0);
     }
   }
-
   return vec;
 }
 
 function vectorDistance(a: number[], b: number[]): number {
   let sum = 0;
-  for (let i = 0; i < a.length; i++) {
-    sum += (a[i] - b[i]) ** 2;
-  }
+  for (let i = 0; i < a.length; i++) sum += (a[i] - b[i]) ** 2;
   return Math.sqrt(sum);
 }
 
+/**
+ * Cluster centroid stored as Record<string, number>:
+ * - numeric / binary : "paramName" → normalized mean / proportion-of-true
+ * - categorical      : "paramName__catValue" → proportion in cluster
+ */
+function computeClusterCentroid(
+  trials: Trial[],
+  paramStats: Map<string, ParamStats>,
+  topParams: string[],
+): Record<string, number> {
+  const n = trials.length;
+  const centroid: Record<string, number> = {};
+  if (n === 0) return centroid;
+  for (const name of topParams) {
+    const stat = paramStats.get(name);
+    if (!stat) continue;
+    if (stat.type === "numeric" && stat.min !== undefined && stat.max !== undefined) {
+      const range = stat.max - stat.min || 1;
+      let sum = 0;
+      for (const t of trials) {
+        const v = t.parameters[name];
+        sum += typeof v === "number" ? (v - stat.min) / range : 0;
+      }
+      centroid[name] = sum / n;
+    } else if (stat.type === "binary") {
+      centroid[name] = trials.filter(t => t.parameters[name] === true).length / n;
+    } else if (stat.type === "categorical" && stat.categories) {
+      for (const cat of stat.categories) {
+        const key = `${name}__${String(cat)}`;
+        centroid[key] = trials.filter(t => String(t.parameters[name]) === String(cat)).length / n;
+      }
+    }
+  }
+  return centroid;
+}
+
+/**
+ * Flatten centroid record → same one-hot layout as trialToVector.
+ * Used for sub-region k-means on cluster centroids.
+ */
+function clusterCentroidToVec(
+  centroid: Record<string, number>,
+  paramStats: Map<string, ParamStats>,
+  topParams: string[],
+): number[] {
+  const vec: number[] = [];
+  for (const name of topParams) {
+    const stat = paramStats.get(name);
+    if (!stat) { vec.push(0); continue; }
+    if (stat.type === "numeric" || stat.type === "binary") {
+      vec.push(centroid[name] ?? 0);
+    } else if (stat.type === "categorical" && stat.categories) {
+      for (const cat of stat.categories) {
+        vec.push(centroid[`${name}__${String(cat)}`] ?? 0);
+      }
+    }
+  }
+  return vec;
+}
+
+/**
+ * Per-param equal-weight distance between two cluster centroids.
+ *
+ * Each parameter contributes exactly one unit (d_i ∈ [0,1]):
+ *   numeric / binary  : d_i = |c1[p] - c2[p]|
+ *   categorical       : d_i = 0.5 * Σ_c |c1[p__c] - c2[p__c]|
+ *                       (total variation distance between two distributions → [0,1])
+ *
+ * Result = sqrt(Σ d_i² / nParams) so categorical params with 11 categories
+ * do not dominate over boolean params with 1 dimension.
+ */
 function centroidDistance(
   c1: Record<string, number>,
   c2: Record<string, number>,
-  topParams: string[]
+  paramStats: Map<string, ParamStats>,
+  topParams: string[],
 ): number {
-  let sum = 0;
-  for (const p of topParams) {
-    const diff = (c1[p] || 0) - (c2[p] || 0);
-    sum += diff * diff;
+  let sumSq = 0;
+  let nParams = 0;
+  for (const name of topParams) {
+    const stat = paramStats.get(name);
+    if (!stat) continue;
+    let d: number;
+    if (stat.type === "numeric" || stat.type === "binary") {
+      d = Math.abs((c1[name] ?? 0) - (c2[name] ?? 0));
+    } else if (stat.type === "categorical" && stat.categories) {
+      let l1 = 0;
+      for (const cat of stat.categories) {
+        const key = `${name}__${String(cat)}`;
+        l1 += Math.abs((c1[key] ?? 0) - (c2[key] ?? 0));
+      }
+      d = l1 / 2; // total variation: always in [0, 1] for probability distributions
+    } else {
+      d = 0;
+    }
+    sumSq += d * d;
+    nParams++;
   }
-  return Math.sqrt(sum);
+  return nParams > 0 ? Math.sqrt(sumSq / nParams) : 0;
 }
 
 // ============================================================
@@ -174,18 +315,19 @@ function kMeansClustering(
   k: number,
   paramStats: Map<string, ParamStats>,
   topParams: string[],
-  maxIter: number = 20
+  maxIter: number = 20,
 ): Cluster[] {
   const n = trials.length;
-  const vectors = trials.map(t => trialToVector(t, paramStats, topParams));
+  const vectors = trials.map((t) => trialToVector(t, paramStats, topParams));
 
-  // Initialize centroids randomly (k-means++)
+  // Initialize centroids (k-means++ with fixed seed)
+  const rng = seededRng(0x1a2b3c4d ^ (k * 6271) ^ (n * 9973 + 1));
   const centroidIndices: number[] = [];
-  centroidIndices.push(Math.floor(Math.random() * n));
+  centroidIndices.push(Math.floor(rng() * n));
 
   while (centroidIndices.length < k) {
     // Compute distances to nearest centroid
-    const dists = vectors.map((v, i) => {
+    const dists = vectors.map((v) => {
       let minD = Infinity;
       for (const ci of centroidIndices) {
         minD = Math.min(minD, vectorDistance(v, vectors[ci]));
@@ -195,7 +337,7 @@ function kMeansClustering(
 
     // Weighted random selection
     const totalDist = dists.reduce((a, b) => a + b, 0);
-    let r = Math.random() * totalDist;
+    let r = rng() * totalDist;
     for (let i = 0; i < n; i++) {
       r -= dists[i];
       if (r <= 0) {
@@ -206,8 +348,8 @@ function kMeansClustering(
   }
 
   // Initial centroids
-  let centroids = centroidIndices.map(i => [...vectors[i]]);
-  let assignments = new Array(n).fill(0);
+  let centroids = centroidIndices.map((i) => [...vectors[i]]);
+  const assignments = new Array(n).fill(0);
 
   // Iterate
   for (let iter = 0; iter < maxIter; iter++) {
@@ -231,28 +373,21 @@ function kMeansClustering(
 
     if (!changed) break;
 
-    // Update centroids
-    const newCentroids = Array.from({ length: k }, () =>
-      new Array(topParams.length).fill(0)
-    );
+    // Update centroids (use actual vector length, not topParams.length)
+    const vecLen = vectors[0]?.length ?? 0;
+    const newCentroids = Array.from({ length: k }, () => new Array(vecLen).fill(0));
     const counts = new Array(k).fill(0);
 
     for (let i = 0; i < n; i++) {
       const c = assignments[i];
       counts[c]++;
-      for (let j = 0; j < topParams.length; j++) {
-        newCentroids[c][j] += vectors[i][j];
-      }
+      for (let j = 0; j < vecLen; j++) newCentroids[c][j] += vectors[i][j];
     }
-
     for (let c = 0; c < k; c++) {
       if (counts[c] > 0) {
-        for (let j = 0; j < topParams.length; j++) {
-          newCentroids[c][j] /= counts[c];
-        }
+        for (let j = 0; j < vecLen; j++) newCentroids[c][j] /= counts[c];
       }
     }
-
     centroids = newCentroids;
   }
 
@@ -263,22 +398,20 @@ function kMeansClustering(
     if (clusterTrials.length === 0) continue;
 
     const tunerCounts: Record<TunerType, number> = {
-      'SymTuner': 0,
-      'CMA_ES': 0,
-      'Genetic': 0,
-      'SuccessiveHalving': 0,
+      SymTuner: 0, CMA_ES: 0, Genetic: 0, SuccessiveHalving: 0,
     };
     let totalMarginal = 0;
-
+    let totalBranchCoverage = 0;
+    let maxBranchCoverage = 0;
     for (const t of clusterTrials) {
       tunerCounts[t.tuner]++;
       totalMarginal += t.marginalCoverage;
+      totalBranchCoverage += t.coverage;
+      maxBranchCoverage = Math.max(maxBranchCoverage, t.coverage);
     }
 
-    const centroidObj: Record<string, number> = {};
-    for (let j = 0; j < topParams.length; j++) {
-      centroidObj[topParams[j]] = centroids[c][j];
-    }
+    // Centroid: per-param proportions computed from actual trials
+    const centroidObj = computeClusterCentroid(clusterTrials, paramStats, topParams);
 
     clusters.push({
       id: clusters.length,
@@ -286,7 +419,9 @@ function kMeansClustering(
       centroid: centroidObj,
       tunerCounts,
       totalTrials: clusterTrials.length,
-      avgCoverage: totalMarginal / clusterTrials.length,  // Now using marginal coverage
+      avgCoverage: totalMarginal / clusterTrials.length, // Now using marginal coverage
+      meanBranchCoverage: totalBranchCoverage / clusterTrials.length,
+      maxBranchCoverage,
       x: 0,
       y: 0,
       hexQ: 0,
@@ -303,14 +438,20 @@ function kMeansClustering(
 
 function computeClusterDistanceMatrix(
   clusters: Cluster[],
-  topParams: string[]
+  paramStats: Map<string, ParamStats>,
+  topParams: string[],
 ): number[][] {
   const n = clusters.length;
   const matrix: number[][] = Array.from({ length: n }, () => Array(n).fill(0));
 
   for (let i = 0; i < n; i++) {
     for (let j = i + 1; j < n; j++) {
-      const d = centroidDistance(clusters[i].centroid, clusters[j].centroid, topParams);
+      const d = centroidDistance(
+        clusters[i].centroid,
+        clusters[j].centroid,
+        paramStats,
+        topParams,
+      );
       matrix[i][j] = d;
       matrix[j][i] = d;
     }
@@ -324,10 +465,10 @@ function classicalMDS(distMatrix: number[][]): { x: number; y: number }[] {
   if (n === 0) return [];
 
   // Squared distances
-  const D2 = distMatrix.map(row => row.map(d => d * d));
+  const D2 = distMatrix.map((row) => row.map((d) => d * d));
 
   // Double centering
-  const rowMeans = D2.map(row => row.reduce((a, b) => a + b, 0) / n);
+  const rowMeans = D2.map((row) => row.reduce((a, b) => a + b, 0) / n);
   const colMeans = Array(n).fill(0);
   for (let j = 0; j < n; j++) {
     for (let i = 0; i < n; i++) {
@@ -337,28 +478,30 @@ function classicalMDS(distMatrix: number[][]): { x: number; y: number }[] {
   const grandMean = rowMeans.reduce((a, b) => a + b, 0) / n;
 
   const B = Array.from({ length: n }, (_, i) =>
-    Array.from({ length: n }, (_, j) =>
-      -0.5 * (D2[i][j] - rowMeans[i] - colMeans[j] + grandMean)
-    )
+    Array.from(
+      { length: n },
+      (_, j) => -0.5 * (D2[i][j] - rowMeans[i] - colMeans[j] + grandMean),
+    ),
   );
 
   // Power iteration for top 2 eigenvectors
   const eigenvalues: number[] = [];
   const eigenvectors: number[][] = [];
-  const A = B.map(row => [...row]);
+  const A = B.map((row) => [...row]);
 
   for (let eigen = 0; eigen < 2; eigen++) {
-    let v = Array.from({ length: n }, () => Math.random() - 0.5);
+    const eigRng = seededRng(0xdeadbeef ^ (eigen * 2654435761));
+    let v = Array.from({ length: n }, () => eigRng() - 0.5);
     let norm = Math.sqrt(v.reduce((s, x) => s + x * x, 0));
-    v = v.map(x => x / norm);
+    v = v.map((x) => x / norm);
 
     let eigenvalue = 0;
     for (let iter = 0; iter < 100; iter++) {
-      const Av = A.map(row => row.reduce((s, x, j) => s + x * v[j], 0));
+      const Av = A.map((row) => row.reduce((s, x, j) => s + x * v[j], 0));
       eigenvalue = Av.reduce((s, x, i) => s + x * v[i], 0);
       norm = Math.sqrt(Av.reduce((s, x) => s + x * x, 0));
       if (norm < 1e-10) break;
-      v = Av.map(x => x / norm);
+      v = Av.map((x) => x / norm);
     }
 
     eigenvalues.push(Math.max(0, eigenvalue));
@@ -391,24 +534,22 @@ function classicalMDS(distMatrix: number[][]): { x: number; y: number }[] {
 // Hexagonal Grid
 // ============================================================
 
-function axialToPixel(q: number, r: number, size: number): { x: number; y: number } {
+function axialToPixel(
+  q: number,
+  r: number,
+  size: number,
+): { x: number; y: number } {
   // Flat-top hexagon layout (traditional honeycomb)
   const x = size * 1.5 * q;
   const y = size * Math.sqrt(3) * (r + q / 2);
   return { x, y };
 }
 
-function pixelToAxial(x: number, y: number, size: number): { q: number; r: number } {
-  const q = (2 / 3 * x) / size;
-  const r = (-1 / 3 * x + Math.sqrt(3) / 3 * y) / size;
-  return axialRound(q, r);
-}
-
 function axialRound(q: number, r: number): { q: number; r: number } {
   const s = -q - r;
   let rq = Math.round(q);
   let rr = Math.round(r);
-  let rs = Math.round(s);
+  const rs = Math.round(s);
 
   const qDiff = Math.abs(rq - q);
   const rDiff = Math.abs(rr - r);
@@ -423,81 +564,24 @@ function axialRound(q: number, r: number): { q: number; r: number } {
   return { q: rq, r: rr };
 }
 
-function generateHexGrid(radius: number): { q: number; r: number }[] {
-  const hexes: { q: number; r: number }[] = [];
-
-  for (let q = -radius; q <= radius; q++) {
-    const r1 = Math.max(-radius, -q - radius);
-    const r2 = Math.min(radius, -q + radius);
-    for (let r = r1; r <= r2; r++) {
-      hexes.push({ q, r });
-    }
-  }
-
-  return hexes;
-}
-
-/**
- * Generate a compact honeycomb grid with exactly n hexagons
- * Fills from center outward in a spiral pattern
- */
-function generateCompactHexGrid(n: number): { q: number; r: number }[] {
-  const hexes: { q: number; r: number }[] = [];
-
-  if (n <= 0) return hexes;
-
-  // Start from center
-  hexes.push({ q: 0, r: 0 });
-
-  // Directions for hex neighbors (clockwise from right)
-  const directions = [
-    { q: 1, r: 0 },   // right
-    { q: 0, r: 1 },   // bottom-right
-    { q: -1, r: 1 },  // bottom-left
-    { q: -1, r: 0 },  // left
-    { q: 0, r: -1 },  // top-left
-    { q: 1, r: -1 },  // top-right
-  ];
-
-  let ring = 1;
-  while (hexes.length < n) {
-    // Start position for this ring
-    let q = ring;
-    let r = 0;
-
-    // Walk around the ring
-    for (let side = 0; side < 6 && hexes.length < n; side++) {
-      const dir = directions[(side + 2) % 6]; // Adjusted direction for walking
-      for (let step = 0; step < ring && hexes.length < n; step++) {
-        hexes.push({ q, r });
-        q += dir.q;
-        r += dir.r;
-      }
-    }
-
-    ring++;
-  }
-
-  return hexes.slice(0, n);
-}
-
-function pixelToAxialFloat(x: number, y: number, size: number): { q: number; r: number } {
+function pixelToAxialFloat(
+  x: number,
+  y: number,
+  size: number,
+): { q: number; r: number } {
   // Flat-top: inverse of axialToPixel
   const q = x / (size * 1.5);
-  const r = (y / (size * Math.sqrt(3))) - q / 2;
+  const r = y / (size * Math.sqrt(3)) - q / 2;
   return { q, r };
 }
 
-function assignClustersToHex(
-  clusters: Cluster[],
-  hexSize: number
-): HexTile[] {
+function assignClustersToHex(clusters: Cluster[], hexSize: number): HexTile[] {
   const n = clusters.length;
   if (n === 0) return [];
 
   // Get MDS positions
-  const xs = clusters.map(c => c.x);
-  const ys = clusters.map(c => c.y);
+  const xs = clusters.map((c) => c.x);
+  const ys = clusters.map((c) => c.y);
   const minX = Math.min(...xs);
   const maxX = Math.max(...xs);
   const minY = Math.min(...ys);
@@ -508,7 +592,7 @@ function assignClustersToHex(
   // Scale MDS positions to a reasonable pixel range
   const targetSize = Math.sqrt(n) * hexSize * 2;
 
-  const scaledClusters = clusters.map(c => ({
+  const scaledClusters = clusters.map((c) => ({
     cluster: c,
     px: ((c.x - minX) / rangeX - 0.5) * targetSize,
     py: ((c.y - minY) / rangeY - 0.5) * targetSize,
@@ -545,12 +629,15 @@ function assignClustersToHex(
     } else {
       // Spiral outward to find empty hex
       const directions = [
-        { dq: 1, dr: 0 }, { dq: 0, dr: 1 }, { dq: -1, dr: 1 },
-        { dq: -1, dr: 0 }, { dq: 0, dr: -1 }, { dq: 1, dr: -1 },
+        { dq: 1, dr: 0 },
+        { dq: 0, dr: 1 },
+        { dq: -1, dr: 1 },
+        { dq: -1, dr: 0 },
+        { dq: 0, dr: -1 },
+        { dq: 1, dr: -1 },
       ];
 
-      outer:
-      for (let ring = 1; ring <= 10; ring++) {
+      outer: for (let ring = 1; ring <= 10; ring++) {
         let q = rounded.q + ring;
         let r = rounded.r;
 
@@ -589,13 +676,631 @@ function assignClustersToHex(
 }
 
 // ============================================================
+// Territory Computation (BFS on hex grid)
+// ============================================================
+
+const HEX_DIRS = [
+  [1, 0],
+  [0, 1],
+  [-1, 1],
+  [-1, 0],
+  [0, -1],
+  [1, -1],
+] as const;
+
+function computeTerritories(
+  hexTiles: HexTile[],
+): Omit<Territory, "label" | "subRegions">[] {
+  const occupied = new Set<string>();
+  const tileMap = new Map<string, HexTile>();
+
+  for (const tile of hexTiles) {
+    if (!tile.cluster) continue;
+    const key = `${tile.q},${tile.r}`;
+    occupied.add(key);
+    tileMap.set(key, tile);
+  }
+
+  const visited = new Set<string>();
+  const components: HexTile[][] = [];
+
+  for (const key of occupied) {
+    if (visited.has(key)) continue;
+    const queue = [key];
+    visited.add(key);
+    const component: HexTile[] = [];
+
+    while (queue.length > 0) {
+      const curr = queue.shift()!;
+      component.push(tileMap.get(curr)!);
+      const [cq, cr] = curr.split(",").map(Number);
+      for (const [dq, dr] of HEX_DIRS) {
+        const nk = `${cq + dq},${cr + dr}`;
+        if (occupied.has(nk) && !visited.has(nk)) {
+          visited.add(nk);
+          queue.push(nk);
+        }
+      }
+    }
+
+    components.push(component);
+  }
+
+  return components
+    .map((tiles, idx) => {
+      const clusters = tiles.map((t) => t.cluster!);
+      const trials: Trial[] = clusters.flatMap((c) => c.trials);
+      const tunerCounts: Record<TunerType, number> = {
+        SymTuner: 0,
+        CMA_ES: 0,
+        Genetic: 0,
+        SuccessiveHalving: 0,
+      };
+      let totalTrials = 0;
+      let cx = 0,
+        cy = 0,
+        pcx = 0,
+        pcy = 0;
+
+      for (const c of clusters) {
+        totalTrials += c.totalTrials;
+        for (const tuner of TUNER_NAMES)
+          tunerCounts[tuner] += c.tunerCounts[tuner];
+        cx += c.x;
+        cy += c.y;
+      }
+      for (const t of tiles) {
+        pcx += t.x;
+        pcy += t.y;
+      }
+
+      return {
+        id: idx,
+        clusters,
+        tiles,
+        trials,
+        totalTrials,
+        tunerCounts,
+        centroidX: cx / clusters.length,
+        centroidY: cy / clusters.length,
+        pixelCentroidX: pcx / tiles.length,
+        pixelCentroidY: pcy / tiles.length,
+      };
+    })
+    .filter((t) => t.clusters.length > 0)
+    .sort((a, b) => b.totalTrials - a.totalTrials);
+}
+
+// ============================================================
+// Sub-Region Building (adjacency-constrained within each Territory)
+// ============================================================
+
+/**
+ * Minimal k-means on a small set of feature vectors.
+ * Uses farthest-point initialization (deterministic, spread-out).
+ */
+function smallKMeans(vecs: number[][], k: number, maxIter = 15): number[] {
+  const n = vecs.length;
+  if (n === 0) return [];
+  k = Math.min(k, n);
+  const dim = vecs[0].length;
+
+  // Farthest-point init
+  const centIdx: number[] = [0];
+  while (centIdx.length < k) {
+    let best = 0,
+      bestD = -1;
+    for (let i = 0; i < n; i++) {
+      const d = Math.min(
+        ...centIdx.map((ci) =>
+          vecs[i].reduce((s, v, j) => s + (v - vecs[ci][j]) ** 2, 0),
+        ),
+      );
+      if (d > bestD) {
+        bestD = d;
+        best = i;
+      }
+    }
+    centIdx.push(best);
+  }
+
+  const cents = centIdx.map((ci) => [...vecs[ci]]);
+  const assign = new Array<number>(n).fill(0);
+
+  for (let iter = 0; iter < maxIter; iter++) {
+    let changed = false;
+    for (let i = 0; i < n; i++) {
+      let best = 0,
+        bestD = Infinity;
+      for (let j = 0; j < k; j++) {
+        const d = vecs[i].reduce((s, v, di) => s + (v - cents[j][di]) ** 2, 0);
+        if (d < bestD) {
+          bestD = d;
+          best = j;
+        }
+      }
+      if (assign[i] !== best) {
+        assign[i] = best;
+        changed = true;
+      }
+    }
+    if (!changed) break;
+
+    const newCents = Array.from({ length: k }, () =>
+      new Array<number>(dim).fill(0),
+    );
+    const counts = new Array<number>(k).fill(0);
+    for (let i = 0; i < n; i++) {
+      counts[assign[i]]++;
+      for (let di = 0; di < dim; di++) newCents[assign[i]][di] += vecs[i][di];
+    }
+    for (let j = 0; j < k; j++) {
+      if (counts[j] > 0) cents[j] = newCents[j].map((v) => v / counts[j]);
+    }
+  }
+  return assign;
+}
+
+/** BFS connected components restricted to `subset`, using `terrHexMap` for lookup. */
+function hexConnectedComponentsSubset(
+  subset: Cluster[],
+  terrHexMap: Map<string, Cluster>,
+): Cluster[][] {
+  const subsetKeys = new Set(subset.map((c) => `${c.hexQ},${c.hexR}`));
+  const visited = new Set<string>();
+  const components: Cluster[][] = [];
+
+  for (const start of subset) {
+    const sk = `${start.hexQ},${start.hexR}`;
+    if (visited.has(sk)) continue;
+    const comp: Cluster[] = [];
+    const queue = [sk];
+    visited.add(sk);
+
+    while (queue.length > 0) {
+      const curr = queue.shift()!;
+      comp.push(terrHexMap.get(curr)!);
+      const [cq, cr] = curr.split(",").map(Number);
+      for (const [dq, dr] of HEX_DIRS) {
+        const nk = `${cq + dq},${cr + dr}`;
+        if (subsetKeys.has(nk) && !visited.has(nk)) {
+          visited.add(nk);
+          queue.push(nk);
+        }
+      }
+    }
+    components.push(comp);
+  }
+  return components;
+}
+
+/**
+ * Merge sub-region components smaller than `minSize` into their
+ * largest hex-adjacent neighbor component.
+ */
+function mergeSmallComponents(
+  components: Cluster[][],
+  terrHexMap: Map<string, Cluster>,
+  minSize: number,
+): Cluster[][] {
+  const keyToComp = new Map<string, number>();
+  const setKey = (c: Cluster, idx: number) =>
+    keyToComp.set(`${c.hexQ},${c.hexR}`, idx);
+  for (let ci = 0; ci < components.length; ci++) {
+    for (const c of components[ci]) setKey(c, ci);
+  }
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    let smallIdx = -1,
+      smallSize = Infinity;
+    for (let ci = 0; ci < components.length; ci++) {
+      if (
+        components[ci].length > 0 &&
+        components[ci].length < minSize &&
+        components[ci].length < smallSize
+      ) {
+        smallSize = components[ci].length;
+        smallIdx = ci;
+      }
+    }
+    if (smallIdx === -1) break;
+
+    const adj = new Set<number>();
+    for (const c of components[smallIdx]) {
+      for (const [dq, dr] of HEX_DIRS) {
+        const nk = `${c.hexQ + dq},${c.hexR + dr}`;
+        if (terrHexMap.has(nk)) {
+          const ni = keyToComp.get(nk);
+          if (ni !== undefined && ni !== smallIdx) adj.add(ni);
+        }
+      }
+    }
+    if (adj.size === 0) break; // isolated, keep
+
+    const targetIdx = [...adj].reduce((b, ci) =>
+      components[ci].length > components[b].length ? ci : b,
+    );
+    for (const c of components[smallIdx]) {
+      keyToComp.set(`${c.hexQ},${c.hexR}`, targetIdx);
+      components[targetIdx].push(c);
+    }
+    components[smallIdx] = [];
+    changed = true;
+  }
+  return components.filter((c) => c.length > 0);
+}
+
+function makeSubRegionObj(
+  id: number,
+  territoryId: number,
+  clusters: Cluster[],
+  tiles: HexTile[],
+): Omit<SubRegion, "label"> {
+  const tunerCounts: Record<TunerType, number> = {
+    SymTuner: 0,
+    CMA_ES: 0,
+    Genetic: 0,
+    SuccessiveHalving: 0,
+  };
+  let totalTrials = 0,
+    pcx = 0,
+    pcy = 0;
+  for (const c of clusters) {
+    totalTrials += c.totalTrials;
+    for (const t of TUNER_NAMES) tunerCounts[t] += c.tunerCounts[t];
+  }
+  for (const t of tiles) {
+    pcx += t.x;
+    pcy += t.y;
+  }
+  return {
+    id,
+    territoryId,
+    clusters,
+    tiles,
+    trials: clusters.flatMap((c) => c.trials),
+    totalTrials,
+    tunerCounts,
+    pixelCentroidX: tiles.length > 0 ? pcx / tiles.length : 0,
+    pixelCentroidY: tiles.length > 0 ? pcy / tiles.length : 0,
+  };
+}
+
+/**
+ * Divide a territory into spatially-connected sub-regions.
+ * Uses k-means on cluster centroids, then splits disconnected components,
+ * then merges any component below MIN_CLUSTER_SIZE.
+ */
+function buildSubRegionsForTerritory(
+  territory: Omit<Territory, "label" | "subRegions">,
+  topParams: string[],
+  paramStats: Map<string, ParamStats>,
+): Omit<SubRegion, "label">[] {
+  const clusters = territory.clusters;
+  const n = clusters.length;
+
+  const terrHexMap = new Map<string, Cluster>();
+  for (const c of clusters) terrHexMap.set(`${c.hexQ},${c.hexR}`, c);
+
+  const tileByKey = new Map<string, HexTile>();
+  for (const tile of territory.tiles)
+    tileByKey.set(`${tile.q},${tile.r}`, tile);
+
+  // Determine k: 1 for tiny territories, up to 4 for large
+  const k = n < 5 ? 1 : n <= 10 ? 2 : n <= 25 ? 3 : 4;
+
+  if (k === 1) {
+    return [makeSubRegionObj(0, territory.id, clusters, territory.tiles)];
+  }
+
+  // K-means on cluster centroids (feature space, one-hot expanded)
+  const vecs = clusters.map((c) => clusterCentroidToVec(c.centroid, paramStats, topParams));
+  const assigns = smallKMeans(vecs, k);
+
+  // Group by assignment
+  const groups: Cluster[][] = Array.from({ length: k }, () => []);
+  for (let i = 0; i < n; i++) groups[assigns[i]].push(clusters[i]);
+
+  // Split each group into connected components
+  const allComps: Cluster[][] = [];
+  for (const g of groups) {
+    if (g.length === 0) continue;
+    allComps.push(...hexConnectedComponentsSubset(g, terrHexMap));
+  }
+
+  // Merge tiny components (< 3 clusters) into largest adjacent component
+  const finalComps = mergeSmallComponents(allComps, terrHexMap, 3);
+
+  return finalComps.map((srClusters, idx) => {
+    const srTiles = srClusters
+      .map((c) => tileByKey.get(`${c.hexQ},${c.hexR}`))
+      .filter((t): t is HexTile => t !== undefined);
+    return makeSubRegionObj(idx, territory.id, srClusters, srTiles);
+  });
+}
+
+// ============================================================
+// Contrastive Predicate Label Generation
+// ============================================================
+
+/** Atomic condition that can be true/false for a given trial */
+interface Predicate {
+  param: string;
+  kind: "bool_true" | "bool_false" | "cat" | "num_low" | "num_mid" | "num_high";
+  value?: string; // for 'cat' kind
+  label: string; // human-readable: "watchdog=T", "search=random-path", "High seed-time"
+}
+
+interface ScoredPred {
+  pred: Predicate;
+  supportIn: number;
+  supportOut: number;
+  score: number;
+}
+
+/**
+ * Enumerate atomic predicates restricted to params in shapImportance.
+ * boolean → {param}=T / {param}=F
+ * categorical → {param}={each value}
+ * numeric → Low/Mid/High {param} (thirds of normalized range)
+ *
+ * Params NOT in shapImportance are silently skipped so unimportant
+ * settings cannot appear in labels.
+ */
+function buildPredicates(
+  paramStats: Map<string, ParamStats>,
+  labelParams: string[], // pre-filtered to shapImportance params
+): Predicate[] {
+  const preds: Predicate[] = [];
+  for (const name of labelParams) {
+    const stat = paramStats.get(name);
+    if (!stat) continue;
+    if (stat.type === "binary") {
+      preds.push({ param: name, kind: "bool_true", label: `${name}=T` });
+      preds.push({ param: name, kind: "bool_false", label: `${name}=F` });
+    } else if (stat.type === "categorical" && stat.categories) {
+      for (const cat of stat.categories) {
+        preds.push({
+          param: name,
+          kind: "cat",
+          value: String(cat),
+          label: `${name}=${cat}`,
+        });
+      }
+    } else if (stat.type === "numeric") {
+      preds.push({ param: name, kind: "num_low", label: `Low ${name}` });
+      preds.push({ param: name, kind: "num_mid", label: `Mid ${name}` });
+      preds.push({ param: name, kind: "num_high", label: `High ${name}` });
+    }
+  }
+  return preds;
+}
+
+function satisfiesPredicate(
+  trial: Trial,
+  pred: Predicate,
+  paramStats: Map<string, ParamStats>,
+): boolean {
+  const val = trial.parameters[pred.param];
+  switch (pred.kind) {
+    case "bool_true":
+      return val === true;
+    case "bool_false":
+      return val === false;
+    case "cat":
+      return String(val) === pred.value;
+    case "num_low":
+    case "num_mid":
+    case "num_high": {
+      const stat = paramStats.get(pred.param);
+      if (
+        !stat ||
+        stat.type !== "numeric" ||
+        stat.min === undefined ||
+        stat.max === undefined
+      )
+        return false;
+      const range = stat.max - stat.min || 1;
+      const norm = typeof val === "number" ? (val - stat.min) / range : 0;
+      if (pred.kind === "num_low") return norm < 1 / 3;
+      if (pred.kind === "num_mid") return norm >= 1 / 3 && norm < 2 / 3;
+      /* num_high */ return norm >= 2 / 3;
+    }
+    default:
+      return false;
+  }
+}
+
+/**
+ * Compute contrastive predicate labels for every territory.
+ *
+ * Score = support_in × log((support_in + ε) / (support_out + ε)) × importance_weight
+ *
+ * Filters:
+ *   support_in ≥ 0.55           (common inside the territory)
+ *   support_in − support_out ≥ 0.20  (notably more frequent than outside)
+ *
+ * Selection: greedy top-2 from distinct parameters.
+ *
+ * Fix — trial identity:
+ *   Uses Map<Trial, number> (object reference) as index key, so trials from
+ *   different tuners with the same numeric id cannot collide.
+ */
+function generateTerritoryLabels(
+  territories: Omit<Territory, "label" | "subRegions">[],
+  allTrials: Trial[],
+  paramStats: Map<string, ParamStats>,
+  labelParams: string[],
+  importanceMap: Map<string, number>,
+): string[] {
+  const predicates = buildPredicates(paramStats, labelParams);
+  if (predicates.length === 0) return territories.map(() => "");
+
+  const n = allTrials.length;
+  const nPred = predicates.length;
+
+  // FIX 1: object-reference key — avoids id collisions across tuners
+  const trialIdx = new Map<Trial, number>();
+  for (let i = 0; i < n; i++) trialIdx.set(allTrials[i], i);
+
+  // Precompute satisfaction matrix [predIdx × trialIdx] with global counts
+  const satisfies: Uint8Array[] = new Array(nPred);
+  const globalCount: number[] = new Array(nPred);
+  for (let pi = 0; pi < nPred; pi++) {
+    const row = new Uint8Array(n);
+    let cnt = 0;
+    for (let ti = 0; ti < n; ti++) {
+      if (satisfiesPredicate(allTrials[ti], predicates[pi], paramStats)) {
+        row[ti] = 1;
+        cnt++;
+      }
+    }
+    satisfies[pi] = row;
+    globalCount[pi] = cnt;
+  }
+
+  const EPS = 1e-6;
+
+  return territories.map((territory) => {
+    const terrTrials = territory.trials;
+    const nIn = terrTrials.length;
+    if (nIn === 0) return "";
+    const nOut = n - nIn;
+
+    // Resolve object-reference indices for this territory's trials
+    const idxs: number[] = [];
+    for (const t of terrTrials) {
+      const idx = trialIdx.get(t);
+      if (idx !== undefined) idxs.push(idx);
+    }
+
+    const scored: ScoredPred[] = [];
+    for (let pi = 0; pi < nPred; pi++) {
+      const row = satisfies[pi];
+      let inCnt = 0;
+      for (const idx of idxs) inCnt += row[idx];
+
+      const supportIn = inCnt / nIn;
+      if (supportIn < 0.55) continue;
+
+      const outCnt = globalCount[pi] - inCnt;
+      const supportOut = nOut > 0 ? outCnt / nOut : 0;
+      if (supportIn - supportOut < 0.2) continue;
+
+      const importance = importanceMap.get(predicates[pi].param) ?? 0;
+      const score =
+        supportIn *
+        Math.log((supportIn + EPS) / (supportOut + EPS)) *
+        importance;
+      scored.push({ pred: predicates[pi], supportIn, supportOut, score });
+    }
+
+    scored.sort((a, b) => b.score - a.score);
+    if (scored.length === 0) return "";
+
+    const first = scored[0];
+    const parts = [first.pred.label];
+    const second = scored.find((s) => s.pred.param !== first.pred.param);
+    if (second) parts.push(second.pred.label);
+    return parts.join(", ");
+  });
+}
+
+/**
+ * Score sub-region predicates vs macro-region-rest (local contrast).
+ * macroTrials = all trials in the parent territory.
+ * This gives much finer labels than global contrast inside large territories.
+ */
+function generateSubRegionLabels(
+  subRegions: Omit<SubRegion, "label">[],
+  macroTrials: Trial[],
+  paramStats: Map<string, ParamStats>,
+  labelParams: string[],
+  importanceMap: Map<string, number>,
+): string[] {
+  // No meaningful split → no sub-region labels
+  if (subRegions.length <= 1) return subRegions.map(() => "");
+
+  const predicates = buildPredicates(paramStats, labelParams);
+  if (predicates.length === 0) return subRegions.map(() => "");
+
+  const macroN = macroTrials.length;
+  const nPred = predicates.length;
+
+  // Object-reference index within macroTrials
+  const macroIdx = new Map<Trial, number>();
+  for (let i = 0; i < macroN; i++) macroIdx.set(macroTrials[i], i);
+
+  const satisfies: Uint8Array[] = new Array(nPred);
+  const macroCounts: number[] = new Array(nPred);
+  for (let pi = 0; pi < nPred; pi++) {
+    const row = new Uint8Array(macroN);
+    let cnt = 0;
+    for (let ti = 0; ti < macroN; ti++) {
+      if (satisfiesPredicate(macroTrials[ti], predicates[pi], paramStats)) {
+        row[ti] = 1;
+        cnt++;
+      }
+    }
+    satisfies[pi] = row;
+    macroCounts[pi] = cnt;
+  }
+
+  const EPS = 1e-6;
+
+  return subRegions.map((sub) => {
+    const nIn = sub.trials.length;
+    if (nIn === 0) return "";
+    const nOut = macroN - nIn;
+
+    const idxs: number[] = [];
+    for (const t of sub.trials) {
+      const idx = macroIdx.get(t);
+      if (idx !== undefined) idxs.push(idx);
+    }
+
+    const scored: ScoredPred[] = [];
+    for (let pi = 0; pi < nPred; pi++) {
+      const row = satisfies[pi];
+      let inCnt = 0;
+      for (const idx of idxs) inCnt += row[idx];
+
+      const supportIn = inCnt / nIn;
+      if (supportIn < 0.55) continue;
+
+      const outCnt = macroCounts[pi] - inCnt;
+      const supportOut = nOut > 0 ? outCnt / nOut : 0;
+      if (supportIn - supportOut < 0.2) continue;
+
+      const importance = importanceMap.get(predicates[pi].param) ?? 0;
+      const score =
+        supportIn *
+        Math.log((supportIn + EPS) / (supportOut + EPS)) *
+        importance;
+      scored.push({ pred: predicates[pi], supportIn, supportOut, score });
+    }
+
+    scored.sort((a, b) => b.score - a.score);
+    if (scored.length === 0) return "";
+
+    const first = scored[0];
+    const parts = [first.pred.label];
+    const second = scored.find((s) => s.pred.param !== first.pred.param);
+    if (second) parts.push(second.pred.label);
+    return parts.join(", ");
+  });
+}
+
+// ============================================================
 // Main Processing Function
 // ============================================================
 
 export function processHexMapData(
   tunerData: ProcessedData[],
   shapImportance: { name: string; importance: number }[],
-  numClusters: number = 100
+  numClusters: number = 100,
 ): HexMapData {
   // 1. Combine all trials
   const allTrials: Trial[] = [];
@@ -607,9 +1312,10 @@ export function processHexMapData(
         id: trial.trialId,
         tuner,
         parameters: trial.parameters,
-        coverage: data.totalUniqueBranches > 0
-          ? trial.cumulativeCoverage / data.totalUniqueBranches
-          : 0,
+        coverage:
+          data.totalUniqueBranches > 0
+            ? trial.cumulativeCoverage / data.totalUniqueBranches
+            : 0,
         marginalCoverage: trial.marginalCoverage,
       });
     }
@@ -617,15 +1323,20 @@ export function processHexMapData(
 
   // 2. Get all parameters (use all, not just top SHAP)
   const paramStats = analyzeParams(allTrials);
-  const topParams = Array.from(paramStats.keys());  // Use all parameters
+  const topParams = Array.from(paramStats.keys()); // Use all parameters
 
   // 3. Analyze parameters (already done above)
 
   // 4. K-means clustering
-  const clusters = kMeansClustering(allTrials, numClusters, paramStats, topParams);
+  const clusters = kMeansClustering(
+    allTrials,
+    numClusters,
+    paramStats,
+    topParams,
+  );
 
   // 5. Compute cluster distance matrix
-  const distMatrix = computeClusterDistanceMatrix(clusters, topParams);
+  const distMatrix = computeClusterDistanceMatrix(clusters, paramStats, topParams);
 
   // 6. MDS for 2D layout
   const coords = classicalMDS(distMatrix);
@@ -635,15 +1346,54 @@ export function processHexMapData(
   }
 
   // 7. Assign to hex grid (compact honeycomb)
-  const hexSize = 32;  // Must match HEX_SIZE in HexMap.tsx
+  const hexSize = 32; // Must match HEX_SIZE in HexMap.tsx
   const hexTiles = assignClustersToHex(clusters, hexSize);
 
+  // 8. Build territories (BFS connected components on hex grid) = macro-regions
+  const preLabelTerritories = computeTerritories(hexTiles);
+
+  // 9. 2-level label hierarchy — SHAP-filtered params only
+  const importanceMap = new Map(
+    shapImportance.map((s) => [s.name, s.importance]),
+  );
+  const labelParams = topParams.filter((p) => importanceMap.has(p));
+
+  // 9a. Macro labels: territory vs global (1 predicate only — brief)
+  const macroLabels = generateTerritoryLabels(
+    preLabelTerritories,
+    allTrials,
+    paramStats,
+    labelParams,
+    importanceMap,
+  );
+
+  // 9b. Sub-regions: adjacency-constrained k-means within each territory
+  //     Sub labels: sub vs macro-rest (local contrast — finer-grained)
+  const territories: Territory[] = preLabelTerritories.map((t, i) => {
+    const srRaws = buildSubRegionsForTerritory(t, topParams, paramStats);
+    const srLabels = generateSubRegionLabels(
+      srRaws,
+      t.trials,
+      paramStats,
+      labelParams,
+      importanceMap,
+    );
+    const subRegions: SubRegion[] = srRaws.map((sr, j) => ({
+      ...sr,
+      label: srLabels[j],
+    }));
+    return { ...t, label: macroLabels[i], subRegions };
+  });
+
   // Calculate grid radius from actual tiles
-  const gridRadius = Math.max(...hexTiles.map(t => Math.max(Math.abs(t.q), Math.abs(t.r))));
+  const gridRadius = Math.max(
+    ...hexTiles.map((t) => Math.max(Math.abs(t.q), Math.abs(t.r))),
+  );
 
   return {
     clusters,
     hexTiles,
+    territories,
     gridRadius,
     paramImportance: shapImportance.slice(0, 10),
   };
@@ -657,17 +1407,19 @@ export function getHexPath(size: number): string {
   // Flat-top hexagon (traditional honeycomb shape)
   const points: string[] = [];
   for (let i = 0; i < 6; i++) {
-    const angle = (Math.PI / 3) * i;  // Start at 0° (flat top)
+    const angle = (Math.PI / 3) * i; // Start at 0° (flat top)
     const x = size * Math.cos(angle);
     const y = size * Math.sin(angle);
     points.push(`${x},${y}`);
   }
-  return `M${points.join('L')}Z`;
+  return `M${points.join("L")}Z`;
 }
 
-export function getDominantTuner(tunerCounts: Record<TunerType, number>): TunerType {
+export function getDominantTuner(
+  tunerCounts: Record<TunerType, number>,
+): TunerType {
   let max = 0;
-  let dominant: TunerType = 'SymTuner';
+  let dominant: TunerType = "SymTuner";
   for (const [tuner, count] of Object.entries(tunerCounts)) {
     if (count > max) {
       max = count;
@@ -677,9 +1429,12 @@ export function getDominantTuner(tunerCounts: Record<TunerType, number>): TunerT
   return dominant;
 }
 
-export function getTunerRatios(tunerCounts: Record<TunerType, number>): Record<TunerType, number> {
+export function getTunerRatios(
+  tunerCounts: Record<TunerType, number>,
+): Record<TunerType, number> {
   const total = Object.values(tunerCounts).reduce((a, b) => a + b, 0);
-  if (total === 0) return { SymTuner: 0, CMA_ES: 0, Genetic: 0, SuccessiveHalving: 0 };
+  if (total === 0)
+    return { SymTuner: 0, CMA_ES: 0, Genetic: 0, SuccessiveHalving: 0 };
 
   return {
     SymTuner: tunerCounts.SymTuner / total,
