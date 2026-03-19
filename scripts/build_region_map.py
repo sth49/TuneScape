@@ -24,8 +24,8 @@ from sklearn.cluster import KMeans
 
 DATA_DIR = Path("public/data")
 PROGRAMS = ["gawk", "gcal", "grep"]
-TUNER_NAMES = ["SymTuner", "CMA_ES", "Genetic", "SuccessiveHalving"]
-TUNER_SHORT = {"SymTuner": "Sym", "CMA_ES": "CMA", "Genetic": "Gen", "SuccessiveHalving": "SH"}
+TUNER_NAMES = ["SymTuner", "CMA_ES", "Genetic", "SuccessiveHalving", "TPE", "BayesianOptimization"]
+TUNER_SHORT = {"SymTuner": "Sym", "CMA_ES": "CMA", "Genetic": "Gen", "SuccessiveHalving": "SH", "TPE": "TPE", "BayesianOptimization": "BO"}
 
 LOD_LEVEL_INDEX = 8
 N_REGIONS_B = 30

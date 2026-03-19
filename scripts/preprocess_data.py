@@ -19,10 +19,10 @@ from pathlib import Path
 import openpyxl
 
 # Configuration
-DATA_DIR = Path("data_VIS26/data_VIS26")
+DATA_DIR = Path("dataset_sample_methods")
 OUTPUT_DIR = Path("public/data")
 PROGRAMS = ["gawk", "gcal", "grep"]
-TUNERS = ["CMA_ES", "Genetic", "SuccessiveHalving", "SymTuner"]
+TUNERS = ["CMA_ES", "Genetic", "SuccessiveHalving", "SymTuner", "TPE", "BayesianOptimization"]
 
 # Output values to exclude from parameters
 EXCLUDE_FROM_PARAMS = ["Iteration Coverage", "Accumulative Coverage"]

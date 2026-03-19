@@ -18,7 +18,7 @@ from scipy.spatial.distance import squareform
 from scipy.cluster.hierarchy import linkage, fcluster
 
 # ─── Config ───────────────────────────────────────────────────────────────────
-TUNERS = ["SymTuner", "CMA_ES", "Genetic", "SuccessiveHalving"]
+TUNERS = ["SymTuner", "CMA_ES", "Genetic", "SuccessiveHalving", "TPE", "BayesianOptimization"]
 DATA_DIR = Path(__file__).parent.parent / "public" / "data"
 OUTPUT_DIR = Path(__file__).parent.parent / "public" / "data"
 

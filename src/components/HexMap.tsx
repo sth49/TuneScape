@@ -40,7 +40,6 @@ type ColorMode =
   | "dominant"
   | "territory"
   | "pixel"
-  | "hatching"
   | "density"
   | "coverage"
   | "marginal";
@@ -237,6 +236,8 @@ const TUNER_DISPLAY_NAMES: Record<TunerType, string> = {
   CMA_ES: "CMA-ES",
   Genetic: "Genetic",
   SuccessiveHalving: "Succ. Halving",
+  TPE: "TPE",
+  BayesianOptimization: "Bayesian Opt.",
 };
 
 const HEX_SIZE = 32;
@@ -355,6 +356,8 @@ export function HexMap({
   program = "gawk",
 }: HexMapProps) {
   const [data, setData] = useState<HexMapData | null>(null);
+  const [rawTunerData, setRawTunerData] = useState<ProcessedData[] | null>(null);
+  const [shapImportance, setShapImportance] = useState<{ name: string; importance: number }[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -383,9 +386,23 @@ export function HexMap({
   const [selectedTuners, setSelectedTuners] = useState<Set<TunerType>>(
     new Set(TUNER_NAMES),
   );
-  const [numClusters, setNumClusters] = useState<number>(100);
+  const [numClusters, setNumClusters] = useState<number>(160);
 
   const svgRef = useRef<SVGSVGElement>(null);
+  const workerRef = useRef<Worker | null>(null);
+  const computationIdRef = useRef(0);
+
+  // Initialize Web Worker once
+  useEffect(() => {
+    const worker = new Worker(
+      new URL("../workers/hexMapWorker.ts", import.meta.url),
+      { type: "module" },
+    );
+    workerRef.current = worker;
+    return () => {
+      worker.terminate();
+    };
+  }, []);
 
   // Create diverse texture instances - each tuner gets a distinct pattern type
   const textureInstances = useMemo(() => {
@@ -427,6 +444,24 @@ export function HexMap({
       .strokeWidth(2)
       .stroke(TUNER_COLORS.SuccessiveHalving);
 
+    // TPE: vertical lines
+    instances.TPE = textures
+      .lines()
+      .id("hatch-TPE")
+      .orientation("vertical")
+      .size(8)
+      .strokeWidth(2.5)
+      .stroke(TUNER_COLORS.TPE);
+
+    // BayesianOptimization: horizontal lines
+    instances.BayesianOptimization = textures
+      .lines()
+      .id("hatch-BayesianOptimization")
+      .orientation("horizontal")
+      .size(8)
+      .strokeWidth(2.5)
+      .stroke(TUNER_COLORS.BayesianOptimization);
+
     return instances;
   }, []);
 
@@ -449,20 +484,19 @@ export function HexMap({
     }
   }, [textureInstances]);
 
-  // Load data
+  // Effect 1: Fetch raw data when program changes
   useEffect(() => {
     let cancelled = false;
 
     async function loadData() {
       setLoading(true);
       setError(null);
+      setRawTunerData(null);
 
       try {
-        // Load all tuner files
         const tunerFiles = TUNER_NAMES.map(
           (tuner) => `/data/${program}_${tuner}_processed.json`,
         );
-
         const responses = await Promise.all(
           tunerFiles.map((url) =>
             fetch(url).then((r) => {
@@ -471,29 +505,17 @@ export function HexMap({
             }),
           ),
         );
-
         if (cancelled) return;
 
-        const tunerData: ProcessedData[] = responses;
-
-        // Load SHAP importance
         const decisionTreeData = await fetch(
           "/data/decision_tree_data.json",
         ).then((r) => r.json());
-        const shapImportance =
-          decisionTreeData[program]?.SymTuner?.param_importance || [];
-
         if (cancelled) return;
 
-        // Process data
-        const mapData = processHexMapData(
-          tunerData,
-          shapImportance,
-          numClusters,
+        setRawTunerData(responses);
+        setShapImportance(
+          decisionTreeData[program]?.SymTuner?.param_importance || [],
         );
-
-        setData(mapData);
-        setLoading(false);
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "Failed to load data");
@@ -503,11 +525,25 @@ export function HexMap({
     }
 
     loadData();
+    return () => { cancelled = true; };
+  }, [program]);
 
-    return () => {
-      cancelled = true;
+  // Effect 2: Re-process via Web Worker when raw data or numClusters changes (NOT selectedTuners)
+  useEffect(() => {
+    if (!rawTunerData || !workerRef.current) return;
+    setLoading(true);
+    const id = ++computationIdRef.current;
+    workerRef.current.postMessage({ id, tunerData: rawTunerData, shapImportance, numClusters });
+    workerRef.current.onmessage = (e: MessageEvent) => {
+      if (e.data.id !== computationIdRef.current) return; // stale result, discard
+      if (e.data.error) {
+        setError(e.data.error);
+      } else {
+        setData(e.data.result);
+      }
+      setLoading(false);
     };
-  }, [program, numClusters]);
+  }, [rawTunerData, numClusters, shapImportance]);
 
   // Compute transform to fit and center the honeycomb
   const { centerX, centerY, scale } = useMemo(() => {
@@ -1017,13 +1053,18 @@ export function HexMap({
     return rankMap;
   }, [data]);
 
-  // Density color scale: maps totalTrials → color
+  // Density color scale: maps selected-tuner trial count → color
   const densityScale = useMemo(() => {
     if (!data) return null;
-    const trials = data.clusters.map((c) => c.totalTrials);
+    const trials = data.clusters.map((c) =>
+      TUNER_NAMES.filter((t) => selectedTuners.has(t)).reduce(
+        (sum, t) => sum + c.tunerCounts[t],
+        0,
+      ),
+    );
     const maxTrials = d3.max(trials) ?? 1;
     return d3.scaleSequential(d3.interpolateYlOrRd).domain([0, maxTrials]);
-  }, [data]);
+  }, [data, selectedTuners]);
 
   const maxBranchCoverage = useMemo(() => {
     if (!data) return 1;
@@ -1112,14 +1153,20 @@ export function HexMap({
 
       switch (colorMode) {
         case "dominant": {
-          const dominant = getDominantTuner(tunerCounts);
+          const filteredCounts = Object.fromEntries(
+            TUNER_NAMES.filter((t) => selectedTuners.has(t)).map((t) => [t, tunerCounts[t]]),
+          ) as Record<TunerType, number>;
+          const dominant = getDominantTuner(filteredCounts);
           return TUNER_COLORS[dominant];
         }
 
-        case "density":
-          return densityScale
-            ? densityScale(tile.cluster.totalTrials)
-            : "#F8FAFC";
+        case "density": {
+          const selectedTotal = TUNER_NAMES.filter((t) => selectedTuners.has(t)).reduce(
+            (sum, t) => sum + tunerCounts[t],
+            0,
+          );
+          return densityScale ? densityScale(selectedTotal) : "#F8FAFC";
+        }
 
         case "coverage":
           return getCoverageColor(tile.cluster.meanBranchCoverage);
@@ -1131,7 +1178,6 @@ export function HexMap({
           return "#F8FAFC";
 
         case "pixel":
-        case "hatching":
         default:
           return subRegionVisual?.fill ?? "#F8FAFC";
       }
@@ -1142,6 +1188,7 @@ export function HexMap({
       densityScale,
       getCoverageColor,
       getMarginalCoverageColor,
+      selectedTuners,
     ],
   );
 
@@ -1162,6 +1209,12 @@ export function HexMap({
           : 0,
         SuccessiveHalving: selectedTuners.has("SuccessiveHalving")
           ? tile.cluster.tunerCounts.SuccessiveHalving
+          : 0,
+        TPE: selectedTuners.has("TPE")
+          ? tile.cluster.tunerCounts.TPE
+          : 0,
+        BayesianOptimization: selectedTuners.has("BayesianOptimization")
+          ? tile.cluster.tunerCounts.BayesianOptimization
           : 0,
       };
       const total = Object.values(filteredCounts).reduce((a, b) => a + b, 0);
@@ -1292,12 +1345,17 @@ export function HexMap({
       };
     }
 
-    // Build lookups: hex key → territoryId, sub-region key
+    // Build lookups: hex key → territoryId, sub-region key, visibility
     const hexToTerr = new Map<string, number>();
     const hexToSub = new Map<string, { tId: number; srId: number }>();
+    const visibleHex = new Set<string>();
     for (const terr of territories) {
-      for (const tile of terr.tiles)
-        hexToTerr.set(`${tile.q},${tile.r}`, terr.id);
+      for (const tile of terr.tiles) {
+        const k = `${tile.q},${tile.r}`;
+        hexToTerr.set(k, terr.id);
+        if (tile.cluster && TUNER_NAMES.some((t) => selectedTuners.has(t) && tile.cluster!.tunerCounts[t] > 0))
+          visibleHex.add(k);
+      }
       for (const sr of terr.subRegions) {
         for (const tile of sr.tiles)
           hexToSub.set(`${tile.q},${tile.r}`, { tId: terr.id, srId: sr.id });
@@ -1318,17 +1376,20 @@ export function HexMap({
       for (const sr of terr.subRegions) {
         let subD = "";
         for (const tile of sr.tiles) {
+          const tk = `${tile.q},${tile.r}`;
+          if (!visibleHex.has(tk)) continue; // skip hidden tiles entirely
           for (let ei = 0; ei < 6; ei++) {
             const dir = HEX_DIRECTIONS[ei];
             const nk = `${tile.q + dir.dq},${tile.r + dir.dr}`;
             const nTerr = hexToTerr.get(nk);
             const nSub = hexToSub.get(nk);
+            const neighborVisible = visibleHex.has(nk);
             const va = verts[ei];
             const vb = verts[(ei + 1) % 6];
             const seg = `M${tile.x + va.x},${tile.y + va.y}L${tile.x + vb.x},${tile.y + vb.y}`;
 
-            if (nTerr !== terr.id) {
-              macroD += seg; // outer territory edge
+            if (!neighborVisible || nTerr !== terr.id) {
+              macroD += seg; // outer territory edge (or edge of hidden neighbor)
             } else if (nSub && nSub.srId !== sr.id) {
               subD += seg; // inner sub-region edge
             }
@@ -1352,7 +1413,7 @@ export function HexMap({
         })),
       ),
     };
-  }, [data, territories, HEX_DIRECTIONS]);
+  }, [data, territories, HEX_DIRECTIONS, selectedTuners]);
 
   // ============================================================
   // Greedy label placement for sub-region labels (focus mode only)
@@ -1558,7 +1619,7 @@ export function HexMap({
   }, [data, territories, scale]);
 
   // Territory fills + borders: scaled hex fills, bridge quads between neighbors, boundary lines
-  const territoryScaleFactors = useMemo(() => [1.0, 0.82, 0.64, 0.5], []);
+  const territoryScaleFactors = useMemo(() => [1.0, 0.82, 0.64, 0.5, 0.38, 0.28], []);
   const renderTerritoryFillsAndBorders = useMemo(() => {
     if (!data || colorMode !== "territory") return null;
 
@@ -1740,6 +1801,8 @@ export function HexMap({
       CMA_ES: 0,
       Genetic: 0,
       SuccessiveHalving: 0,
+      TPE: 0,
+      BayesianOptimization: 0,
     };
 
     let totalTrials = 0;
@@ -1936,6 +1999,12 @@ export function HexMap({
               {data.hexTiles.map((tile) => {
                 if (!tile.cluster) return null;
 
+                // Hide tile if none of the selected tuners have any trials here
+                const hasSelectedTuner = TUNER_NAMES.some(
+                  (t) => selectedTuners.has(t) && tile.cluster!.tunerCounts[t] > 0,
+                );
+                if (!hasSelectedTuner) return null;
+
                 const fill = getHexFill(tile);
                 const isHovered = hoveredClusterId === tile.cluster.id;
                 const isInspected =
@@ -1981,7 +2050,6 @@ export function HexMap({
                       }
                       strokeWidth={isInspected ? 3 : isHovered ? 2.5 : 0.5}
                     />
-                    {colorMode === "hatching" && renderHatching(tile)}
                     {/* Qualitative region texture overlay */}
                     {(() => {
                       const qr = clusterToQualRegion.get(tile.cluster.id);
@@ -2351,7 +2419,7 @@ export function HexMap({
                       </g>
                     )}
 
-                    {colorMode === "hatching" && (
+                    {false && (
                       <g clipPath={`url(#voronoi-clip-${cell.cluster.id})`}>
                         <g transform={`translate(${cell.cx}, ${cell.cy})`}>
                           {(() => {
@@ -2922,7 +2990,6 @@ export function HexMap({
                   { mode: "pixel", label: "Sub-region" },
                   { mode: "coverage", label: "Branch Coverage" },
                   { mode: "marginal", label: "Marginal Coverage" },
-                  { mode: "hatching", label: "Hatching" },
                   { mode: "territory" as ColorMode, label: "Tuner Territory" },
                   { mode: "dominant", label: "Dominant Only" },
                   { mode: "density", label: "Trial Density" },
@@ -3174,67 +3241,6 @@ export function HexMap({
             </div>
           )}
 
-          {colorMode === "hatching" && (
-            <div style={{ marginBottom: 20 }}>
-              <div
-                style={{ fontWeight: 600, marginBottom: 8, color: "#374151" }}
-              >
-                Texture Pattern
-              </div>
-              <div style={{ fontSize: 10, color: "#6B7280", lineHeight: 1.6 }}>
-                <p style={{ margin: 0 }}>패턴 모양 = 튜너 종류</p>
-                <p style={{ margin: "4px 0 0 0" }}>투명도 = 해당 튜너 비율</p>
-                <p style={{ margin: "4px 0 0 0" }}>
-                  중첩 패턴 = 여러 튜너 공존
-                </p>
-              </div>
-              <div
-                style={{
-                  marginTop: 8,
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 4,
-                }}
-              >
-                {[
-                  { tuner: "SymTuner" as TunerType, label: "Diagonal Lines" },
-                  { tuner: "CMA_ES" as TunerType, label: "Dots" },
-                  { tuner: "Genetic" as TunerType, label: "Crosses" },
-                  { tuner: "SuccessiveHalving" as TunerType, label: "Waves" },
-                ].map(({ tuner, label }) => (
-                  <div
-                    key={tuner}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 6,
-                      fontSize: 10,
-                    }}
-                  >
-                    <svg
-                      width={20}
-                      height={14}
-                      style={{
-                        border: "1px solid #E5E7EB",
-                        borderRadius: 2,
-                        flexShrink: 0,
-                      }}
-                    >
-                      <rect
-                        width={20}
-                        height={14}
-                        fill={textureInstances[tuner]?.url() ?? "#ccc"}
-                      />
-                    </svg>
-                    <span style={{ color: "#374151" }}>
-                      {TUNER_DISPLAY_NAMES[tuner]}
-                    </span>
-                    <span style={{ color: "#9CA3AF" }}>({label})</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
 
           {colorMode === "density" && densityScale && data && (
             <div style={{ marginBottom: 20 }}>

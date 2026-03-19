@@ -26,7 +26,7 @@ function seededRng(seed: number): () => number {
 // Types
 // ============================================================
 
-export type TunerType = "SymTuner" | "CMA_ES" | "Genetic" | "SuccessiveHalving";
+export type TunerType = "SymTuner" | "CMA_ES" | "Genetic" | "SuccessiveHalving" | "TPE" | "BayesianOptimization";
 
 export interface Trial {
   id: number;
@@ -111,6 +111,8 @@ export const TUNER_COLORS: Record<TunerType, string> = {
   CMA_ES: "#10B981",
   Genetic: "#F59E0B",
   SuccessiveHalving: "#EF4444",
+  TPE: "#8B5CF6",
+  BayesianOptimization: "#EC4899",
 };
 
 export const TUNER_NAMES: TunerType[] = [
@@ -118,6 +120,8 @@ export const TUNER_NAMES: TunerType[] = [
   "CMA_ES",
   "Genetic",
   "SuccessiveHalving",
+  "TPE",
+  "BayesianOptimization",
 ];
 
 // ============================================================
@@ -398,7 +402,7 @@ function kMeansClustering(
     if (clusterTrials.length === 0) continue;
 
     const tunerCounts: Record<TunerType, number> = {
-      SymTuner: 0, CMA_ES: 0, Genetic: 0, SuccessiveHalving: 0,
+      SymTuner: 0, CMA_ES: 0, Genetic: 0, SuccessiveHalving: 0, TPE: 0, BayesianOptimization: 0,
     };
     let totalMarginal = 0;
     let totalBranchCoverage = 0;
@@ -735,6 +739,8 @@ function computeTerritories(
         CMA_ES: 0,
         Genetic: 0,
         SuccessiveHalving: 0,
+        TPE: 0,
+        BayesianOptimization: 0,
       };
       let totalTrials = 0;
       let cx = 0,
@@ -943,6 +949,8 @@ function makeSubRegionObj(
     CMA_ES: 0,
     Genetic: 0,
     SuccessiveHalving: 0,
+    TPE: 0,
+    BayesianOptimization: 0,
   };
   let totalTrials = 0,
     pcx = 0,
@@ -988,8 +996,8 @@ function buildSubRegionsForTerritory(
   for (const tile of territory.tiles)
     tileByKey.set(`${tile.q},${tile.r}`, tile);
 
-  // Determine k: 1 for tiny territories, up to 4 for large
-  const k = n < 5 ? 1 : n <= 10 ? 2 : n <= 25 ? 3 : 4;
+  // Determine k: 1 for tiny territories, up to 6 for large
+  const k = n < 5 ? 1 : n <= 10 ? 2 : n <= 25 ? 3 : n <= 60 ? 4 : n <= 120 ? 5 : 6;
 
   if (k === 1) {
     return [makeSubRegionObj(0, territory.id, clusters, territory.tiles)];
@@ -1183,11 +1191,11 @@ function generateTerritoryLabels(
       for (const idx of idxs) inCnt += row[idx];
 
       const supportIn = inCnt / nIn;
-      if (supportIn < 0.55) continue;
+      if (supportIn < 0.45) continue;
 
       const outCnt = globalCount[pi] - inCnt;
       const supportOut = nOut > 0 ? outCnt / nOut : 0;
-      if (supportIn - supportOut < 0.2) continue;
+      if (supportIn - supportOut < 0.13) continue;
 
       const importance = importanceMap.get(predicates[pi].param) ?? 0;
       const score =
@@ -1268,11 +1276,11 @@ function generateSubRegionLabels(
       for (const idx of idxs) inCnt += row[idx];
 
       const supportIn = inCnt / nIn;
-      if (supportIn < 0.55) continue;
+      if (supportIn < 0.45) continue;
 
       const outCnt = macroCounts[pi] - inCnt;
       const supportOut = nOut > 0 ? outCnt / nOut : 0;
-      if (supportIn - supportOut < 0.2) continue;
+      if (supportIn - supportOut < 0.13) continue;
 
       const importance = importanceMap.get(predicates[pi].param) ?? 0;
       const score =
@@ -1300,7 +1308,7 @@ function generateSubRegionLabels(
 export function processHexMapData(
   tunerData: ProcessedData[],
   shapImportance: { name: string; importance: number }[],
-  numClusters: number = 100,
+  numClusters: number = 160,
 ): HexMapData {
   // 1. Combine all trials
   const allTrials: Trial[] = [];
@@ -1434,12 +1442,14 @@ export function getTunerRatios(
 ): Record<TunerType, number> {
   const total = Object.values(tunerCounts).reduce((a, b) => a + b, 0);
   if (total === 0)
-    return { SymTuner: 0, CMA_ES: 0, Genetic: 0, SuccessiveHalving: 0 };
+    return { SymTuner: 0, CMA_ES: 0, Genetic: 0, SuccessiveHalving: 0, TPE: 0, BayesianOptimization: 0 };
 
   return {
     SymTuner: tunerCounts.SymTuner / total,
     CMA_ES: tunerCounts.CMA_ES / total,
     Genetic: tunerCounts.Genetic / total,
     SuccessiveHalving: tunerCounts.SuccessiveHalving / total,
+    TPE: tunerCounts.TPE / total,
+    BayesianOptimization: tunerCounts.BayesianOptimization / total,
   };
 }

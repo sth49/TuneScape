@@ -10,7 +10,7 @@ import type { ProcessedData } from '../types/data';
 // Types
 // ============================================================
 
-export type TunerType = 'SymTuner' | 'CMA_ES' | 'Genetic' | 'SuccessiveHalving';
+export type TunerType = 'SymTuner' | 'CMA_ES' | 'Genetic' | 'SuccessiveHalving' | 'TPE' | 'BayesianOptimization';
 
 export interface OverviewTrial {
   id: number;
@@ -50,9 +50,11 @@ export const TUNER_COLORS: Record<TunerType, string> = {
   'CMA_ES': '#10B981',
   'Genetic': '#F59E0B',
   'SuccessiveHalving': '#EF4444',
+  'TPE': '#8B5CF6',
+  'BayesianOptimization': '#EC4899',
 };
 
-export const TUNER_NAMES: TunerType[] = ['SymTuner', 'CMA_ES', 'Genetic', 'SuccessiveHalving'];
+export const TUNER_NAMES: TunerType[] = ['SymTuner', 'CMA_ES', 'Genetic', 'SuccessiveHalving', 'TPE', 'BayesianOptimization'];
 
 // ============================================================
 // Fast Processing (No Distance Matrix)

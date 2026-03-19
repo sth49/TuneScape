@@ -59,6 +59,8 @@ const TUNER_DISPLAY_NAMES: Record<TunerType, string> = {
   'CMA_ES': 'CMA-ES',
   'Genetic': 'Genetic',
   'SuccessiveHalving': 'Succ. Halving',
+  'TPE': 'TPE',
+  'BayesianOptimization': 'Bayesian Opt.',
 };
 
 // ============================================================
