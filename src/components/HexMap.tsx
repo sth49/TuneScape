@@ -28,6 +28,7 @@ import {
   type Cluster,
   type Territory,
   type SubRegion,
+  type Trial,
   type TunerType,
 } from "../utils/hexMapUtils";
 
@@ -81,6 +82,41 @@ interface VoronoiMapData {
   territoryBorderPaths: string[];
   cellTerritoryIds: number[];
   neighborEdges: NeighborEdge[];
+}
+
+interface SubRegionVisual {
+  territoryId: number;
+  subRegionId: number;
+  fill: string;
+  stroke: string;
+}
+
+// ── Qualitative label types ──────────────────────────────────
+type QualitativeLabel =
+  | "Failure-prone"
+  | "High Novelty"
+  | "Saturated"
+  | "High Coverage"
+  | "Volatile";
+
+interface QualLabelResult {
+  primary: QualitativeLabel | null;
+  hasSupport: boolean;
+}
+
+interface SRMetrics {
+  trialCount: number;
+  meanCoverage: number;
+  meanMarginalCoverage: number;
+  failureRate: number;
+  coverageIqr: number;
+}
+
+/** Spatially connected group of clusters sharing the same qualitative class */
+interface QualRegion {
+  id: number;
+  label: QualitativeLabel;
+  clusterIds: Set<number>;
 }
 
 // ============================================================
@@ -204,6 +240,110 @@ const TUNER_DISPLAY_NAMES: Record<TunerType, string> = {
 };
 
 const HEX_SIZE = 32;
+
+const QUAL_LABEL_COLORS: Record<QualitativeLabel, string> = {
+  "Failure-prone": "#EF4444",
+  "High Novelty": "#8B5CF6",
+  Saturated: "#F59E0B",
+  "High Coverage": "#10B981",
+  Volatile: "#3B82F6",
+};
+
+const QUAL_TEXTURE_ID: Record<QualitativeLabel, string> = {
+  "Failure-prone": "qual-tex-failure",
+  "High Novelty": "qual-tex-novelty",
+  Saturated: "qual-tex-saturated",
+  "High Coverage": "qual-tex-coverage",
+  Volatile: "qual-tex-volatile",
+};
+
+const QUAL_LABEL_RATIONALE: Record<QualitativeLabel, string> = {
+  "Failure-prone": "High zero-coverage rate (>20%)",
+  "High Novelty": "High marginal coverage gain",
+  Saturated: "High total coverage, low marginal gain",
+  "High Coverage": "High total branch coverage",
+  Volatile: "High coverage variance across trials",
+};
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+function mixHexColors(colorA: string, colorB: string, t: number): string {
+  const a = d3.color(colorA);
+  const b = d3.color(colorB);
+  if (!a || !b) return colorA;
+
+  const ratio = clamp01(t);
+  return d3.rgb(
+    a.r + (b.r - a.r) * ratio,
+    a.g + (b.g - a.g) * ratio,
+    a.b + (b.b - a.b) * ratio,
+  ).formatHex();
+}
+
+function getSubRegionPaletteColor(
+  territoryColor: string,
+  index: number,
+  count: number,
+): { fill: string; stroke: string } {
+  const base = d3.hsl(territoryColor);
+  const safeCount = Math.max(count, 1);
+  const ratio = safeCount === 1 ? 0.5 : index / (safeCount - 1);
+  const hueShift = (ratio - 0.5) * 28;
+  const lightnessTargets = [0.84, 0.72, 0.6, 0.5];
+  const saturationTargets = [0.52, 0.62, 0.7, 0.78];
+  const targetIdx = Math.min(index, lightnessTargets.length - 1);
+
+  const fill = d3
+    .hsl(
+      (base.h + hueShift + 360) % 360,
+      Math.max(base.s * 0.7, saturationTargets[targetIdx]),
+      lightnessTargets[targetIdx],
+    )
+    .formatHex();
+
+  return {
+    fill,
+    stroke: mixHexColors(fill, territoryColor, 0.45),
+  };
+}
+
+// ── Qualitative label helpers ────────────────────────────────
+function qualPct(arr: number[], p: number): number {
+  if (arr.length === 0) return 0;
+  const sorted = [...arr].sort((a, b) => a - b);
+  const idx = (p / 100) * (sorted.length - 1);
+  const lo = Math.floor(idx);
+  const hi = Math.ceil(idx);
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
+}
+
+function computeSRMetrics(trials: Trial[]): SRMetrics {
+  const n = trials.length;
+  if (n === 0)
+    return {
+      trialCount: 0,
+      meanCoverage: 0,
+      meanMarginalCoverage: 0,
+      failureRate: 0,
+      coverageIqr: 0,
+    };
+  const coverages = trials.map((t) => t.coverage);
+  const marginals = trials.map((t) => t.marginalCoverage);
+  const meanCoverage = coverages.reduce((a, b) => a + b, 0) / n;
+  const meanMarginalCoverage = marginals.reduce((a, b) => a + b, 0) / n;
+  const failureRate = coverages.filter((c) => c === 0).length / n;
+  const coverageIqr =
+    n >= 2 ? qualPct(coverages, 75) - qualPct(coverages, 25) : 0;
+  return {
+    trialCount: n,
+    meanCoverage,
+    meanMarginalCoverage,
+    failureRate,
+    coverageIqr,
+  };
+}
 
 // ============================================================
 // Component
@@ -448,6 +588,105 @@ export function HexMap({
     }
     return map;
   }, [territories, focusedTerritoryId]);
+
+  const clusterToSubRegionVisual = useMemo(() => {
+    const map = new Map<number, SubRegionVisual>();
+
+    for (const terr of territories) {
+      const territoryColor = TUNER_COLORS[getDominantTuner(terr.tunerCounts)];
+      const sortedSubRegions = [...terr.subRegions].sort(
+        (a, b) => b.totalTrials - a.totalTrials,
+      );
+
+      sortedSubRegions.forEach((sr, index) => {
+        const palette = getSubRegionPaletteColor(
+          territoryColor,
+          index,
+          sortedSubRegions.length,
+        );
+
+        for (const cluster of sr.clusters) {
+          map.set(cluster.id, {
+            territoryId: terr.id,
+            subRegionId: sr.id,
+            fill: palette.fill,
+            stroke: palette.stroke,
+          });
+        }
+      });
+    }
+
+    return map;
+  }, [territories]);
+
+  // ── Qualitative: per-cluster metrics & class (independent of parameter sub-regions) ──
+  // Step 1: per-cluster metrics from cluster.trials directly
+  const clusterQualMetrics = useMemo((): Map<number, SRMetrics> => {
+    if (!data) return new Map();
+    const map = new Map<number, SRMetrics>();
+    for (const cluster of data.clusters) {
+      map.set(cluster.id, computeSRMetrics(cluster.trials));
+    }
+    return map;
+  }, [data]);
+
+  // Step 2: thresholds from all clusters with trialCount >= 2 (program-wide)
+  const clusterQualThresholds = useMemo(() => {
+    const supported = [...clusterQualMetrics.values()].filter(
+      (m) => m.trialCount >= 2,
+    );
+    if (supported.length === 0)
+      return { p75Coverage: 0, p75Marginal: 0, p25Marginal: 0, p75Iqr: 0 };
+    return {
+      p75Coverage: qualPct(
+        supported.map((m) => m.meanCoverage),
+        75,
+      ),
+      p75Marginal: qualPct(
+        supported.map((m) => m.meanMarginalCoverage),
+        75,
+      ),
+      p25Marginal: qualPct(
+        supported.map((m) => m.meanMarginalCoverage),
+        25,
+      ),
+      p75Iqr: qualPct(
+        supported.map((m) => m.coverageIqr),
+        75,
+      ),
+    };
+  }, [clusterQualMetrics]);
+
+  // Step 3: per-cluster qualitative class (null = no label / low support)
+  const clusterQualClass = useMemo((): Map<number, QualitativeLabel | null> => {
+    const map = new Map<number, QualitativeLabel | null>();
+    for (const [cid, m] of clusterQualMetrics) {
+      if (m.trialCount === 0) {
+        map.set(cid, null);
+        continue;
+      }
+      const hasSupport = m.trialCount >= 2;
+      let label: QualitativeLabel | null = null;
+      if (m.failureRate > 0.2) {
+        label = "Failure-prone";
+      } else if (hasSupport) {
+        if (m.meanMarginalCoverage > clusterQualThresholds.p75Marginal) {
+          label = "High Novelty";
+        } else if (
+          m.meanCoverage > clusterQualThresholds.p75Coverage &&
+          m.meanMarginalCoverage < clusterQualThresholds.p25Marginal
+        ) {
+          label = "Saturated";
+        } else if (m.meanCoverage > clusterQualThresholds.p75Coverage) {
+          label = "High Coverage";
+        } else if (m.coverageIqr > clusterQualThresholds.p75Iqr) {
+          label = "Volatile";
+        }
+      }
+      map.set(cid, label);
+    }
+    return map;
+  }, [clusterQualMetrics, clusterQualThresholds]);
 
   // Metrics for the focused territory + its sub-regions
   const focusedTerritoryMetrics = useMemo(() => {
@@ -869,6 +1108,7 @@ export function HexMap({
       if (!tile.cluster) return "#F1F5F9";
 
       const { tunerCounts } = tile.cluster;
+      const subRegionVisual = clusterToSubRegionVisual.get(tile.cluster.id);
 
       switch (colorMode) {
         case "dominant": {
@@ -893,92 +1133,16 @@ export function HexMap({
         case "pixel":
         case "hatching":
         default:
-          return "#F8FAFC";
+          return subRegionVisual?.fill ?? "#F8FAFC";
       }
     },
-    [colorMode, densityScale, getCoverageColor, getMarginalCoverageColor],
-  );
-
-  // Seeded random for consistent pixel placement
-  const seededRandom = useCallback((seed: number) => {
-    const x = Math.sin(seed) * 10000;
-    return x - Math.floor(x);
-  }, []);
-
-  // Render Pixel Scatter mode
-  const renderPixelScatter = useCallback(
-    (tile: HexTile) => {
-      if (!tile.cluster) return null;
-
-      const filteredCounts: Record<TunerType, number> = {
-        SymTuner: selectedTuners.has("SymTuner")
-          ? tile.cluster.tunerCounts.SymTuner
-          : 0,
-        CMA_ES: selectedTuners.has("CMA_ES")
-          ? tile.cluster.tunerCounts.CMA_ES
-          : 0,
-        Genetic: selectedTuners.has("Genetic")
-          ? tile.cluster.tunerCounts.Genetic
-          : 0,
-        SuccessiveHalving: selectedTuners.has("SuccessiveHalving")
-          ? tile.cluster.tunerCounts.SuccessiveHalving
-          : 0,
-      };
-      const total = Object.values(filteredCounts).reduce((a, b) => a + b, 0);
-      if (total === 0) return null;
-
-      const dots: React.ReactElement[] = [];
-      const numDots = 60;
-      const radius = HEX_SIZE * 0.75;
-
-      // Create color pool based on ratios
-      const colorPool: string[] = [];
-      for (const tuner of TUNER_NAMES) {
-        const count = Math.round((filteredCounts[tuner] / total) * numDots);
-        for (let i = 0; i < count; i++) {
-          colorPool.push(TUNER_COLORS[tuner]);
-        }
-      }
-
-      // Shuffle with seeded random
-      const seed = tile.q * 1000 + tile.r;
-      for (let i = colorPool.length - 1; i > 0; i--) {
-        const j = Math.floor(seededRandom(seed + i) * (i + 1));
-        [colorPool[i], colorPool[j]] = [colorPool[j], colorPool[i]];
-      }
-
-      // Place dots in hex shape
-      for (let i = 0; i < Math.min(colorPool.length, numDots); i++) {
-        const angle = seededRandom(seed + i * 100) * Math.PI * 2;
-        const r = Math.sqrt(seededRandom(seed + i * 200)) * radius;
-        const x = r * Math.cos(angle);
-        const y = r * Math.sin(angle);
-
-        // Check if inside hexagon
-        const hexRadius = HEX_SIZE * 0.85;
-        const ax = Math.abs(x);
-        const ay = Math.abs(y);
-        if (
-          ax <= hexRadius &&
-          ay <= hexRadius * 0.866 &&
-          ax + ay * 0.577 <= hexRadius
-        ) {
-          dots.push(
-            <circle
-              key={i}
-              cx={x}
-              cy={y}
-              r={3}
-              fill={colorPool[i]}
-              opacity={0.85}
-            />,
-          );
-        }
-      }
-
-      return <g>{dots}</g>;
-    },
-    [selectedTuners, seededRandom],
+    [
+      colorMode,
+      clusterToSubRegionVisual,
+      densityScale,
+      getCoverageColor,
+      getMarginalCoverageColor,
+    ],
   );
 
   // Render Hatching mode (using textures.js patterns)
@@ -1059,6 +1223,62 @@ export function HexMap({
     }
     return vertices;
   }, []);
+
+  // ── Qualitative: Step 4 — BFS spatial segmentation ──────────
+  // Adjacent clusters sharing the same qualitative class form a QualRegion.
+  // This is independent of parameter sub-regions: one param sub-region can
+  // contain multiple qual regions, and one qual region can span sub-regions.
+  const qualRegions = useMemo((): QualRegion[] => {
+    if (!data) return [];
+    const visited = new Set<number>(); // cluster ids
+    const regions: QualRegion[] = [];
+    let regionId = 0;
+
+    for (const tile of data.hexTiles) {
+      if (!tile.cluster) continue;
+      const cid = tile.cluster.id;
+      if (visited.has(cid)) continue;
+      const label = clusterQualClass.get(cid);
+      if (!label) {
+        visited.add(cid);
+        continue;
+      }
+
+      // BFS: grow region from this seed
+      const region: QualRegion = { id: regionId++, label, clusterIds: new Set() };
+      const queue: HexTile[] = [tile];
+      visited.add(cid);
+      region.clusterIds.add(cid);
+
+      while (queue.length > 0) {
+        const cur = queue.shift()!;
+        for (const { dq, dr } of HEX_DIRECTIONS) {
+          const neighbor = hexLookup.get(`${cur.q + dq},${cur.r + dr}`);
+          if (!neighbor?.cluster) continue;
+          const nid = neighbor.cluster.id;
+          if (visited.has(nid)) continue;
+          if (clusterQualClass.get(nid) !== label) continue;
+          visited.add(nid);
+          region.clusterIds.add(nid);
+          queue.push(neighbor);
+        }
+      }
+
+      regions.push(region);
+    }
+
+    return regions;
+  }, [data, clusterQualClass, hexLookup, HEX_DIRECTIONS]);
+
+  const clusterToQualRegion = useMemo((): Map<number, QualRegion> => {
+    const map = new Map<number, QualRegion>();
+    for (const region of qualRegions) {
+      for (const cid of region.clusterIds) {
+        map.set(cid, region);
+      }
+    }
+    return map;
+  }, [qualRegions]);
 
   // ============================================================
   // 2-level boundary data: macro (territory outer edge) + sub (sub-region inner edge)
@@ -1607,6 +1827,92 @@ export function HexMap({
           height={height}
           style={{ flexShrink: 0 }}
         >
+          {/* ── Qualitative texture patterns ───────────────────── */}
+          <defs>
+            {/* Failure-prone: dense red dots */}
+            <pattern
+              id="qual-tex-failure"
+              patternUnits="userSpaceOnUse"
+              width={HEX_SIZE * 0.5}
+              height={HEX_SIZE * 0.5}
+            >
+              <circle
+                cx={HEX_SIZE * 0.25}
+                cy={HEX_SIZE * 0.25}
+                r={HEX_SIZE * 0.09}
+                fill="#EF4444"
+              />
+            </pattern>
+            {/* High Novelty: cross hatch purple */}
+            <pattern
+              id="qual-tex-novelty"
+              patternUnits="userSpaceOnUse"
+              width={HEX_SIZE * 0.6}
+              height={HEX_SIZE * 0.6}
+            >
+              <line
+                x1="0"
+                y1="0"
+                x2={HEX_SIZE * 0.6}
+                y2={HEX_SIZE * 0.6}
+                stroke="#8B5CF6"
+                strokeWidth={1.2}
+              />
+              <line
+                x1={HEX_SIZE * 0.6}
+                y1="0"
+                x2="0"
+                y2={HEX_SIZE * 0.6}
+                stroke="#8B5CF6"
+                strokeWidth={1.2}
+              />
+            </pattern>
+            {/* Saturated: sparse amber dots */}
+            <pattern
+              id="qual-tex-saturated"
+              patternUnits="userSpaceOnUse"
+              width={HEX_SIZE * 0.9}
+              height={HEX_SIZE * 0.9}
+            >
+              <circle
+                cx={HEX_SIZE * 0.45}
+                cy={HEX_SIZE * 0.45}
+                r={HEX_SIZE * 0.1}
+                fill="#F59E0B"
+              />
+            </pattern>
+            {/* High Coverage: diagonal green lines */}
+            <pattern
+              id="qual-tex-coverage"
+              patternUnits="userSpaceOnUse"
+              width={HEX_SIZE * 0.55}
+              height={HEX_SIZE * 0.55}
+            >
+              <line
+                x1="0"
+                y1={HEX_SIZE * 0.55}
+                x2={HEX_SIZE * 0.55}
+                y2="0"
+                stroke="#10B981"
+                strokeWidth={1.4}
+              />
+            </pattern>
+            {/* Volatile: wavy blue lines */}
+            <pattern
+              id="qual-tex-volatile"
+              patternUnits="userSpaceOnUse"
+              width={HEX_SIZE * 0.8}
+              height={HEX_SIZE * 0.5}
+            >
+              <path
+                d={`M0,${HEX_SIZE * 0.25} Q${HEX_SIZE * 0.2},0 ${HEX_SIZE * 0.4},${HEX_SIZE * 0.25} Q${HEX_SIZE * 0.6},${HEX_SIZE * 0.5} ${HEX_SIZE * 0.8},${HEX_SIZE * 0.25}`}
+                fill="none"
+                stroke="#3B82F6"
+                strokeWidth={1.3}
+              />
+            </pattern>
+          </defs>
+
           {layoutMode === "hex" && (
             /* ===== HEX GRID MODE ===== */
             <g
@@ -1670,32 +1976,31 @@ export function HexMap({
                           ? "#4F46E5"
                           : isHovered
                             ? "#1E293B"
-                            : "#E2E8F0"
+                            : (clusterToSubRegionVisual.get(tile.cluster.id)
+                                ?.stroke ?? "#E2E8F0")
                       }
                       strokeWidth={isInspected ? 3 : isHovered ? 2.5 : 0.5}
                     />
-
-                    {/* Dots: detail-on-demand
-                        overview → nearly hidden (0.05)
-                        focus, outside territory → hide (0)
-                        focus, inside territory → restored (0.9)
-                        inspected cluster → full (1) */}
-                    {colorMode === "pixel" &&
-                      (() => {
-                        const dotOpacity =
-                          focusedTerritoryId === null
-                            ? 0.05
-                            : isInspected
-                              ? 1
-                              : isMuted
-                                ? 0
-                                : 0.9;
-                        if (dotOpacity === 0) return null;
-                        return (
-                          <g opacity={dotOpacity}>{renderPixelScatter(tile)}</g>
-                        );
-                      })()}
                     {colorMode === "hatching" && renderHatching(tile)}
+                    {/* Qualitative region texture overlay */}
+                    {(() => {
+                      const qr = clusterToQualRegion.get(tile.cluster.id);
+                      if (!qr) return null;
+                      const m = clusterQualMetrics.get(tile.cluster.id);
+                      const hasSupport = (m?.trialCount ?? 0) >= 2;
+                      return (
+                        <path
+                          d={hexPath}
+                          fill={`url(#${QUAL_TEXTURE_ID[qr.label]})`}
+                          stroke={
+                            qr.label === "Failure-prone" ? "#EF4444" : "none"
+                          }
+                          strokeWidth={qr.label === "Failure-prone" ? 1.5 : 0}
+                          opacity={hasSupport ? 0.65 : 0.38}
+                          pointerEvents="none"
+                        />
+                      );
+                    })()}
                   </g>
                 );
               })}
@@ -2046,91 +2351,6 @@ export function HexMap({
                       </g>
                     )}
 
-                    {/* Overlay modes clipped to cluster shape */}
-                    {colorMode === "pixel" && (
-                      <g clipPath={`url(#voronoi-clip-${cell.cluster.id})`}>
-                        {(() => {
-                          const cluster = cell.cluster;
-                          const filteredCounts: Record<TunerType, number> = {
-                            SymTuner: selectedTuners.has("SymTuner")
-                              ? cluster.tunerCounts.SymTuner
-                              : 0,
-                            CMA_ES: selectedTuners.has("CMA_ES")
-                              ? cluster.tunerCounts.CMA_ES
-                              : 0,
-                            Genetic: selectedTuners.has("Genetic")
-                              ? cluster.tunerCounts.Genetic
-                              : 0,
-                            SuccessiveHalving: selectedTuners.has(
-                              "SuccessiveHalving",
-                            )
-                              ? cluster.tunerCounts.SuccessiveHalving
-                              : 0,
-                          };
-                          const total = Object.values(filteredCounts).reduce(
-                            (a, b) => a + b,
-                            0,
-                          );
-                          if (total === 0) return null;
-
-                          // Consistent dot size, number proportional to cell area
-                          const cellArea = bw * bh;
-                          const dotR = 2.5;
-                          const numDots = Math.max(
-                            12,
-                            Math.round(cellArea / 80),
-                          );
-                          const minX = Math.min(...xs);
-                          const minY = Math.min(...ys);
-
-                          // Build color pool
-                          const colorPool: string[] = [];
-                          for (const tuner of TUNER_NAMES) {
-                            const count = Math.round(
-                              (filteredCounts[tuner] / total) * numDots,
-                            );
-                            for (let j = 0; j < count; j++) {
-                              colorPool.push(TUNER_COLORS[tuner]);
-                            }
-                          }
-                          // Pad or trim to numDots
-                          while (colorPool.length < numDots) {
-                            const dom = getDominantTuner(filteredCounts);
-                            colorPool.push(TUNER_COLORS[dom]);
-                          }
-
-                          // Shuffle with seeded random
-                          const seed = cluster.id * 7919;
-                          for (let k = colorPool.length - 1; k > 0; k--) {
-                            const j = Math.floor(
-                              seededRandom(seed + k) * (k + 1),
-                            );
-                            [colorPool[k], colorPool[j]] = [
-                              colorPool[j],
-                              colorPool[k],
-                            ];
-                          }
-
-                          // Place dots within bounding box (clipPath handles actual shape)
-                          const dots: React.ReactElement[] = [];
-                          for (let i = 0; i < numDots; i++) {
-                            const dx = seededRandom(seed + i * 100) * bw + minX;
-                            const dy = seededRandom(seed + i * 200) * bh + minY;
-                            dots.push(
-                              <circle
-                                key={i}
-                                cx={dx}
-                                cy={dy}
-                                r={dotR}
-                                fill={colorPool[i]}
-                                opacity={0.85}
-                              />,
-                            );
-                          }
-                          return <g>{dots}</g>;
-                        })()}
-                      </g>
-                    )}
                     {colorMode === "hatching" && (
                       <g clipPath={`url(#voronoi-clip-${cell.cluster.id})`}>
                         <g transform={`translate(${cell.cx}, ${cell.cy})`}>
@@ -2394,6 +2614,34 @@ export function HexMap({
                                       >
                                         {sr.label || `Sub ${sr.id}`}
                                       </span>
+                                      {(() => {
+                                        // dominant qualitative class among clusters in this sub-region
+                                        const counts = new Map<QualitativeLabel, number>();
+                                        for (const c of sr.clusters) {
+                                          const qr = clusterToQualRegion.get(c.id);
+                                          if (!qr) continue;
+                                          counts.set(qr.label, (counts.get(qr.label) ?? 0) + 1);
+                                        }
+                                        if (counts.size === 0) return null;
+                                        const dominant = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+                                        return (
+                                          <span
+                                            style={{
+                                              display: "inline-block",
+                                              padding: "0px 4px",
+                                              borderRadius: 3,
+                                              fontSize: 8,
+                                              fontWeight: 600,
+                                              background:
+                                                QUAL_LABEL_COLORS[dominant] + "22",
+                                              color: QUAL_LABEL_COLORS[dominant],
+                                              marginLeft: 4,
+                                            }}
+                                          >
+                                            {dominant}
+                                          </span>
+                                        );
+                                      })()}
                                     </div>
                                     <span
                                       style={{ fontSize: 9, color: "#94A3B8" }}
@@ -2671,7 +2919,7 @@ export function HexMap({
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
               {(
                 [
-                  { mode: "pixel", label: "Pixel Scatter" },
+                  { mode: "pixel", label: "Sub-region" },
                   { mode: "coverage", label: "Branch Coverage" },
                   { mode: "marginal", label: "Marginal Coverage" },
                   { mode: "hatching", label: "Hatching" },
@@ -2752,15 +3000,15 @@ export function HexMap({
               <div
                 style={{ fontWeight: 600, marginBottom: 8, color: "#374151" }}
               >
-                Pixel Scatter
+                Sub-region Overview
               </div>
               <div style={{ fontSize: 10, color: "#6B7280", lineHeight: 1.6 }}>
-                <p style={{ margin: 0 }}>각 점 = 해당 튜너의 trial</p>
+                <p style={{ margin: 0 }}>색상 = territory 내부의 sub-region</p>
                 <p style={{ margin: "4px 0 0 0" }}>
-                  점 분포 = 튜너 비율을 직관적으로 표현
+                  같은 territory는 같은 계열 색을 공유
                 </p>
                 <p style={{ margin: "4px 0 0 0" }}>
-                  혼합된 색상 = 여러 튜너가 탐색
+                  더 진한 경계색으로 sub-region 분할을 읽기 쉽게 표시
                 </p>
               </div>
             </div>
@@ -3048,6 +3296,239 @@ export function HexMap({
             </div>
           )}
 
+          {/* Qualitative texture legend — always visible */}
+          <div style={{ marginBottom: 20 }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                marginBottom: 8,
+              }}
+            >
+              <div style={{ fontWeight: 600, color: "#374151" }}>
+                Texture Legend
+              </div>
+              <div
+                style={{
+                  fontSize: 9,
+                  color: "#9CA3AF",
+                  background: "#F3F4F6",
+                  padding: "1px 5px",
+                  borderRadius: 3,
+                }}
+              >
+                qual. region
+              </div>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+              {(
+                [
+                  {
+                    label: "Failure-prone" as QualitativeLabel,
+                    desc: "Zero-coverage rate >20%",
+                    svg: (
+                      <svg width={22} height={14}>
+                        <defs>
+                          <pattern
+                            id="leg-failure"
+                            patternUnits="userSpaceOnUse"
+                            width={5}
+                            height={5}
+                          >
+                            <circle cx={2.5} cy={2.5} r={1.1} fill="#EF4444" />
+                          </pattern>
+                        </defs>
+                        <rect
+                          width={22}
+                          height={14}
+                          rx={2}
+                          fill="url(#leg-failure)"
+                          stroke="#EF444455"
+                          strokeWidth={1}
+                        />
+                      </svg>
+                    ),
+                  },
+                  {
+                    label: "High Novelty" as QualitativeLabel,
+                    desc: "High marginal gain",
+                    svg: (
+                      <svg width={22} height={14}>
+                        <defs>
+                          <pattern
+                            id="leg-novelty"
+                            patternUnits="userSpaceOnUse"
+                            width={7}
+                            height={7}
+                          >
+                            <line
+                              x1="0"
+                              y1="0"
+                              x2="7"
+                              y2="7"
+                              stroke="#8B5CF6"
+                              strokeWidth={1.2}
+                            />
+                            <line
+                              x1="7"
+                              y1="0"
+                              x2="0"
+                              y2="7"
+                              stroke="#8B5CF6"
+                              strokeWidth={1.2}
+                            />
+                          </pattern>
+                        </defs>
+                        <rect
+                          width={22}
+                          height={14}
+                          rx={2}
+                          fill="url(#leg-novelty)"
+                          stroke="#8B5CF655"
+                          strokeWidth={1}
+                        />
+                      </svg>
+                    ),
+                  },
+                  {
+                    label: "Saturated" as QualitativeLabel,
+                    desc: "High cov, low marginal",
+                    svg: (
+                      <svg width={22} height={14}>
+                        <defs>
+                          <pattern
+                            id="leg-saturated"
+                            patternUnits="userSpaceOnUse"
+                            width={9}
+                            height={9}
+                          >
+                            <circle cx={4.5} cy={4.5} r={1.4} fill="#F59E0B" />
+                          </pattern>
+                        </defs>
+                        <rect
+                          width={22}
+                          height={14}
+                          rx={2}
+                          fill="url(#leg-saturated)"
+                          stroke="#F59E0B55"
+                          strokeWidth={1}
+                        />
+                      </svg>
+                    ),
+                  },
+                  {
+                    label: "High Coverage" as QualitativeLabel,
+                    desc: "High total branch coverage",
+                    svg: (
+                      <svg width={22} height={14}>
+                        <defs>
+                          <pattern
+                            id="leg-coverage"
+                            patternUnits="userSpaceOnUse"
+                            width={6}
+                            height={6}
+                          >
+                            <line
+                              x1="0"
+                              y1="6"
+                              x2="6"
+                              y2="0"
+                              stroke="#10B981"
+                              strokeWidth={1.4}
+                            />
+                          </pattern>
+                        </defs>
+                        <rect
+                          width={22}
+                          height={14}
+                          rx={2}
+                          fill="url(#leg-coverage)"
+                          stroke="#10B98155"
+                          strokeWidth={1}
+                        />
+                      </svg>
+                    ),
+                  },
+                  {
+                    label: "Volatile" as QualitativeLabel,
+                    desc: "High coverage variance",
+                    svg: (
+                      <svg width={22} height={14}>
+                        <defs>
+                          <pattern
+                            id="leg-volatile"
+                            patternUnits="userSpaceOnUse"
+                            width={10}
+                            height={6}
+                          >
+                            <path
+                              d="M0,3 Q2.5,0 5,3 Q7.5,6 10,3"
+                              fill="none"
+                              stroke="#3B82F6"
+                              strokeWidth={1.3}
+                            />
+                          </pattern>
+                        </defs>
+                        <rect
+                          width={22}
+                          height={14}
+                          rx={2}
+                          fill="url(#leg-volatile)"
+                          stroke="#3B82F655"
+                          strokeWidth={1}
+                        />
+                      </svg>
+                    ),
+                  },
+                ] as Array<{
+                  label: QualitativeLabel;
+                  desc: string;
+                  svg: React.ReactNode;
+                }>
+              ).map(({ label, desc, svg }) => (
+                <div
+                  key={label}
+                  style={{ display: "flex", alignItems: "center", gap: 7 }}
+                >
+                  {svg}
+                  <div>
+                    <div
+                      style={{
+                        fontSize: 10,
+                        fontWeight: 600,
+                        color: QUAL_LABEL_COLORS[label],
+                        lineHeight: 1.2,
+                      }}
+                    >
+                      {label}
+                    </div>
+                    <div style={{ fontSize: 9, color: "#9CA3AF", lineHeight: 1.2 }}>
+                      {desc}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div
+              style={{
+                marginTop: 8,
+                paddingTop: 8,
+                borderTop: "1px solid #F3F4F6",
+                fontSize: 9,
+                color: "#9CA3AF",
+                lineHeight: 1.5,
+              }}
+            >
+              <p style={{ margin: 0 }}>
+                Texture = qualitative region (independent of color)
+              </p>
+              <p style={{ margin: "2px 0 0 0" }}>
+                Adjacent same-class clusters form one region
+              </p>
+            </div>
+          </div>
+
           {/* Info — only in overview */}
           {focusedTerritoryId === null && (
             <div style={{ fontSize: 10, color: "#9CA3AF", lineHeight: 1.5 }}>
@@ -3106,6 +3587,31 @@ export function HexMap({
               {tooltip.cluster.avgCoverage.toFixed(1)}
             </span>
           </div>
+          {(() => {
+            const qr = clusterToQualRegion.get(tooltip.cluster.id);
+            if (!qr) return null;
+            return (
+              <div style={{ marginBottom: 8 }}>
+                <span
+                  style={{
+                    display: "inline-block",
+                    padding: "1px 6px",
+                    borderRadius: 4,
+                    fontSize: 10,
+                    fontWeight: 600,
+                    background: QUAL_LABEL_COLORS[qr.label] + "22",
+                    color: QUAL_LABEL_COLORS[qr.label],
+                    border: `1px solid ${QUAL_LABEL_COLORS[qr.label]}55`,
+                  }}
+                >
+                  {qr.label}
+                </span>
+                <span style={{ fontSize: 9, color: "#94A3B8", marginLeft: 6 }}>
+                  {QUAL_LABEL_RATIONALE[qr.label]}
+                </span>
+              </div>
+            );
+          })()}
           <div style={{ borderTop: "1px solid #E5E7EB", paddingTop: 8 }}>
             <div style={{ fontWeight: 500, marginBottom: 4, color: "#374151" }}>
               Tuner Distribution

@@ -16,6 +16,27 @@ import {
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+type QualitativeLabel =
+  | "Failure-prone"
+  | "High Novelty"
+  | "Saturated"
+  | "High Coverage"
+  | "Volatile";
+
+interface LabelResult {
+  primary: QualitativeLabel | null;
+  secondary: string[];
+  hasSupport: boolean;
+}
+
+interface Thresholds {
+  p75_coverage: number;
+  p75_marginal_ratio: number;
+  p25_marginal_ratio: number;
+  p75_iqr: number;
+  p25_iqr: number;
+}
+
 interface HexNode {
   idx: number;
   q: number;
@@ -26,6 +47,9 @@ interface HexNode {
   meanCoverage: number;
   maxCoverage: number;
   minCoverage: number;
+  meanMarginalCoverage: number;
+  failureRate: number;
+  coverageIqr: number;
   trialIndices: number[];
 }
 
@@ -63,6 +87,9 @@ interface AggNode {
   tunerCounts: Record<string, number>;
   meanCoverage: number;
   maxCoverage: number;
+  meanMarginalCoverage: number;
+  failureRate: number;
+  coverageIqr: number;
 }
 
 interface TooltipData {
@@ -78,6 +105,70 @@ interface ParameterHexMapProps {
   height?: number;
   program?: string;
 }
+
+// ─── Qualitative label constants ─────────────────────────────────────────────
+
+const LABEL_COLORS: Record<QualitativeLabel, string> = {
+  "Failure-prone": "#ef4444",
+  "High Novelty":  "#22c55e",
+  "Saturated":     "#a855f7",
+  "High Coverage": "#3b82f6",
+  "Volatile":      "#f59e0b",
+};
+
+const TEXTURE_ID: Record<QualitativeLabel, string> = {
+  "Failure-prone": "tex-failure",
+  "High Novelty":  "tex-novelty",
+  "Saturated":     "tex-saturated",
+  "High Coverage": "tex-coverage",
+  "Volatile":      "tex-volatile",
+};
+
+// Metric labels shown in tooltip per label type
+const LABEL_METRIC_KEYS: Record<QualitativeLabel, (n: AggNode) => string[]> = {
+  "Failure-prone": (n) => [
+    `Failure rate: ${(n.failureRate * 100).toFixed(0)}%`,
+    `Trials: ${n.trialCount}`,
+  ],
+  "High Novelty": (n) => {
+    const r = n.meanMarginalCoverage / (n.meanCoverage + 1e-6);
+    return [
+      `Marginal ratio: ${(r * 100).toFixed(1)}%`,
+      `Mean marginal: ${n.meanMarginalCoverage.toFixed(1)}`,
+      `Trials: ${n.trialCount}`,
+    ];
+  },
+  "Saturated": (n) => {
+    const r = n.meanMarginalCoverage / (n.meanCoverage + 1e-6);
+    return [
+      `Mean coverage: ${n.meanCoverage.toFixed(0)}`,
+      `Marginal ratio: ${(r * 100).toFixed(1)}%`,
+      `Trials: ${n.trialCount}`,
+    ];
+  },
+  "High Coverage": (n) => [
+    `Mean coverage: ${n.meanCoverage.toFixed(0)}`,
+    `Max coverage: ${n.maxCoverage}`,
+    `Trials: ${n.trialCount}`,
+  ],
+  "Volatile": (n) => [
+    `Coverage IQR: ${n.coverageIqr.toFixed(0)}`,
+    `Mean coverage: ${n.meanCoverage.toFixed(0)}`,
+    `Trials: ${n.trialCount}`,
+  ],
+};
+
+const LABEL_RATIONALE: Record<QualitativeLabel, (n: AggNode) => string> = {
+  "Failure-prone": (n) =>
+    `${(n.failureRate * 100).toFixed(0)}% of trials failed to execute in this regime.`,
+  "High Novelty": (n) => {
+    const r = n.meanMarginalCoverage / (n.meanCoverage + 1e-6);
+    return `Trials here still find new branches (marginal ratio: ${(r * 100).toFixed(1)}%).`;
+  },
+  "High Coverage": () => "Consistently high coverage — good reference region.",
+  "Saturated":     () => "High coverage but marginal gains are negligible — this region is exhausted.",
+  "Volatile":      (n) => `High variance (IQR ${n.coverageIqr.toFixed(0)}) — results unstable across trials.`,
+};
 
 // ─── Hex geometry helpers ────────────────────────────────────────────────────
 
@@ -123,6 +214,9 @@ function aggregateByLevel(
       tunerCounts: { ...n.tunerCounts },
       meanCoverage: n.meanCoverage,
       maxCoverage: n.maxCoverage,
+      meanMarginalCoverage: n.meanMarginalCoverage ?? 0,
+      failureRate: n.failureRate ?? 0,
+      coverageIqr: n.coverageIqr ?? 0,
     }));
   }
 
@@ -154,6 +248,16 @@ function aggregateByLevel(
 
     const [q, r] = positions[c];
 
+    const weightedMarginal = members.reduce(
+      (s, m) => s + (m.meanMarginalCoverage ?? 0) * m.trialCount, 0
+    );
+    const totalFailures = members.reduce(
+      (s, m) => s + (m.failureRate ?? 0) * m.trialCount, 0
+    );
+    const weightedIqr = members.reduce(
+      (s, m) => s + (m.coverageIqr ?? 0) * m.trialCount, 0
+    );
+
     clusters.push({
       id: clusters.length,
       hexNodes: members,
@@ -164,6 +268,9 @@ function aggregateByLevel(
       meanCoverage:
         members.reduce((s, m) => s + m.meanCoverage * m.trialCount, 0) / totalTrials,
       maxCoverage: Math.max(...members.map((m) => m.maxCoverage)),
+      meanMarginalCoverage: weightedMarginal / totalTrials,
+      failureRate: totalFailures / totalTrials,
+      coverageIqr: weightedIqr / totalTrials,
     });
   }
 
@@ -342,6 +449,70 @@ export function ParameterHexMap({
     return [Math.min(...vals), Math.max(...vals)];
   }, [aggNodes]);
 
+  // ─── Percentile thresholds (support-filtered, per LoD level) ───────────────
+  // Population: only aggNodes with trialCount >= 2 (sufficient support).
+  // Recomputed on every LoD change so thresholds always reflect current granularity.
+  const thresholds = useMemo((): Thresholds | null => {
+    const eligible = aggNodes.filter((n) => n.trialCount >= 2);
+    if (eligible.length < 4) return null;
+
+    const pct = (arr: number[], p: number) => {
+      const sorted = [...arr].sort((a, b) => a - b);
+      return sorted[Math.max(0, Math.floor(sorted.length * p / 100) - 1)];
+    };
+
+    const covVals   = eligible.map((n) => n.meanCoverage);
+    const margRatios = eligible.map((n) =>
+      n.meanMarginalCoverage / (n.meanCoverage + 1e-6)
+    );
+    const iqrVals   = eligible.map((n) => n.coverageIqr);
+
+    return {
+      p75_coverage:       pct(covVals,    75),
+      p75_marginal_ratio: pct(margRatios, 75),
+      p25_marginal_ratio: pct(margRatios, 25),
+      p75_iqr:            pct(iqrVals,    75),
+      p25_iqr:            pct(iqrVals,    25),
+    };
+  }, [aggNodes]);
+
+  // ─── Qualitative label assignment ─────────────────────────────────────────
+  // - Failure-prone: singleton-safe (trialCount >= 1, failureRate > 0.20)
+  // - All other labels: require support gate (trialCount >= 2) + thresholds
+  const qualitativeLabels = useMemo(() => {
+    const map = new Map<number, LabelResult>();
+
+    for (const node of aggNodes) {
+      const hasSupport = node.trialCount >= 2;
+      const margRatio  = node.meanMarginalCoverage / (node.meanCoverage + 1e-6);
+      let   primary: QualitativeLabel | null = null;
+      const secondary: string[] = [];
+
+      if (node.failureRate > 0.20) {
+        // Failure-prone: allowed even for singletons
+        primary = "Failure-prone";
+      } else if (hasSupport && thresholds) {
+        if (margRatio > thresholds.p75_marginal_ratio) {
+          primary = "High Novelty";
+        } else if (
+          node.meanCoverage > thresholds.p75_coverage &&
+          margRatio < thresholds.p25_marginal_ratio
+        ) {
+          primary = "Saturated";
+          if (node.coverageIqr < thresholds.p25_iqr) secondary.push("Stable");
+        } else if (node.meanCoverage > thresholds.p75_coverage) {
+          primary = "High Coverage";
+        } else if (node.coverageIqr > thresholds.p75_iqr) {
+          primary = "Volatile";
+        }
+      }
+
+      map.set(node.id, { primary, secondary, hasSupport });
+    }
+
+    return map;
+  }, [aggNodes, thresholds]);
+
   // ─── Mouse handlers ───────────────────────────────────────────────────────
   const handleWheel = useCallback(
     (e: React.WheelEvent) => {
@@ -514,9 +685,65 @@ export function ParameterHexMap({
           setTooltip(null);
         }}
       >
+        {/* ── SVG Texture Pattern Defs ─────────────────────────────────── */}
+        <defs>
+          {/* High Coverage — diagonal lines (/) */}
+          <pattern id="tex-coverage" patternUnits="userSpaceOnUse"
+            width={hexSize * 0.75} height={hexSize * 0.75}>
+            <line x1="0" y1={hexSize * 0.75} x2={hexSize * 0.75} y2="0"
+              stroke="rgba(255,255,255,0.35)" strokeWidth={hexSize * 0.12} />
+          </pattern>
+          {/* High Novelty — cross hatch (X) */}
+          <pattern id="tex-novelty" patternUnits="userSpaceOnUse"
+            width={hexSize} height={hexSize}>
+            <line x1="0" y1={hexSize} x2={hexSize} y2="0"
+              stroke="rgba(255,255,255,0.3)" strokeWidth={hexSize * 0.1} />
+            <line x1="0" y1="0" x2={hexSize} y2={hexSize}
+              stroke="rgba(255,255,255,0.3)" strokeWidth={hexSize * 0.1} />
+          </pattern>
+          {/* Saturated — sparse dots */}
+          <pattern id="tex-saturated" patternUnits="userSpaceOnUse"
+            width={hexSize * 1.4} height={hexSize * 1.4}>
+            <circle cx={hexSize * 0.7} cy={hexSize * 0.7} r={hexSize * 0.15}
+              fill="rgba(255,255,255,0.4)" />
+          </pattern>
+          {/* Failure-prone — dense dots */}
+          <pattern id="tex-failure" patternUnits="userSpaceOnUse"
+            width={hexSize * 0.8} height={hexSize * 0.8}>
+            <circle cx={hexSize * 0.4} cy={hexSize * 0.4} r={hexSize * 0.18}
+              fill="rgba(255,120,120,0.55)" />
+          </pattern>
+          {/* Volatile — wavy lines */}
+          <pattern id="tex-volatile" patternUnits="userSpaceOnUse"
+            width={hexSize * 1.5} height={hexSize * 0.9}>
+            <path
+              d={`M0,${hexSize * 0.45} Q${hexSize * 0.375},${hexSize * 0.1} ${hexSize * 0.75},${hexSize * 0.45} Q${hexSize * 1.125},${hexSize * 0.8} ${hexSize * 1.5},${hexSize * 0.45}`}
+              fill="none" stroke="rgba(255,255,255,0.35)" strokeWidth={hexSize * 0.1} />
+          </pattern>
+        </defs>
+
         <g transform={`translate(${transform.x},${transform.y}) scale(${transform.k})`}>
           {filteredNodes.map((node) => {
             const [px, py] = hexToPixel(node.q, node.r, hexSize);
+            const label = qualitativeLabels.get(node.id);
+
+            // Opacity: low-support nodes dimmed; Failure-prone singletons slightly dimmed
+            const opacity = !label?.hasSupport
+              ? (label?.primary === "Failure-prone" ? 0.65 : 0.35)
+              : 0.92;
+
+            // Border highlight for Failure-prone
+            const stroke = label?.primary === "Failure-prone"
+              ? "rgba(255,80,80,0.6)"
+              : "rgba(255,255,255,0.08)";
+            const strokeWidth = label?.primary === "Failure-prone" ? 0.5 : 0.3;
+
+            // Texture overlay (only when label exists and support gate passed)
+            const showTexture = label?.primary != null &&
+              (label.hasSupport || label.primary === "Failure-prone");
+            const texturePath = showTexture
+              ? `url(#${TEXTURE_ID[label!.primary!]})`
+              : undefined;
 
             // Size scaling based on trial count
             const sizeScale =
@@ -524,9 +751,18 @@ export function ParameterHexMap({
                 ? 0.5 + 0.5 * Math.sqrt(node.trialCount / maxTrialCount)
                 : 1;
             const displaySize = hexSize * sizeScale;
+            const hexOutline = getHexPath(displaySize);
+
+            const mouseHandlers = {
+              onMouseEnter: (e: React.MouseEvent) => {
+                const rect = svgRef.current?.getBoundingClientRect();
+                if (rect) setTooltip({ node, x: e.clientX - rect.left, y: e.clientY - rect.top });
+              },
+              onMouseLeave: () => setTooltip(null),
+              onClick: () => setSelectedNode(node),
+            };
 
             if (colorMode === "tuner") {
-              // Pie chart for mixed tuner hexes
               const filteredCounts: Record<string, number> = {};
               for (const t of TUNER_NAMES) {
                 if (enabledTuners.has(t) && node.tunerCounts[t]) {
@@ -539,29 +775,17 @@ export function ParameterHexMap({
                 <g
                   key={node.id}
                   transform={`translate(${px},${py})`}
-                  onMouseEnter={(e) => {
-                    const rect = svgRef.current?.getBoundingClientRect();
-                    if (rect) {
-                      setTooltip({
-                        node,
-                        x: e.clientX - rect.left,
-                        y: e.clientY - rect.top,
-                      });
-                    }
-                  }}
-                  onMouseLeave={() => setTooltip(null)}
-                  onClick={() => setSelectedNode(node)}
+                  opacity={opacity}
                   className="cursor-pointer"
+                  {...mouseHandlers}
                 >
                   {pies.map((p, i) => (
-                    <path
-                      key={i}
-                      d={p.path}
-                      fill={p.color}
-                      stroke="rgba(255,255,255,0.1)"
-                      strokeWidth={0.3}
-                    />
+                    <path key={i} d={p.path} fill={p.color}
+                      stroke={stroke} strokeWidth={strokeWidth} />
                   ))}
+                  {texturePath && (
+                    <path d={hexOutline} fill={texturePath} pointerEvents="none" />
+                  )}
                 </g>
               );
             }
@@ -572,13 +796,11 @@ export function ParameterHexMap({
               const t =
                 (node.meanCoverage - coverageExtent[0]) /
                 (coverageExtent[1] - coverageExtent[0] + 1e-6);
-              // Viridis-like: dark blue → green → yellow
               const r = Math.round(68 + 187 * t);
               const g = Math.round(1 + 180 * Math.sqrt(t));
               const b = Math.round(84 + 100 * (1 - t));
               fill = `rgb(${r},${g},${b})`;
             } else {
-              // trialCount → density heatmap
               const t = Math.sqrt(node.trialCount / maxTrialCount);
               const r = Math.round(255 * t);
               const g = Math.round(80 * t);
@@ -587,124 +809,174 @@ export function ParameterHexMap({
             }
 
             return (
-              <path
+              <g
                 key={node.id}
-                d={getHexPath(displaySize)}
                 transform={`translate(${px},${py})`}
-                fill={fill}
-                stroke="rgba(255,255,255,0.08)"
-                strokeWidth={0.3}
-                onMouseEnter={(e) => {
-                  const rect = svgRef.current?.getBoundingClientRect();
-                  if (rect) {
-                    setTooltip({
-                      node,
-                      x: e.clientX - rect.left,
-                      y: e.clientY - rect.top,
-                    });
-                  }
-                }}
-                onMouseLeave={() => setTooltip(null)}
-                onClick={() => setSelectedNode(node)}
+                opacity={opacity}
                 className="cursor-pointer"
-              />
+                {...mouseHandlers}
+              >
+                <path d={hexOutline} fill={fill}
+                  stroke={stroke} strokeWidth={strokeWidth} />
+                {texturePath && (
+                  <path d={hexOutline} fill={texturePath} pointerEvents="none" />
+                )}
+              </g>
             );
           })}
         </g>
 
         {/* ── Tooltip ────────────────────────────────────────────────────── */}
-        {tooltip && (
-          <foreignObject
-            x={Math.min(tooltip.x + 12, width - 300)}
-            y={Math.min(tooltip.y + 12, height - 360)}
-            width={280}
-            height={340}
-            style={{ pointerEvents: "none" }}
-          >
-            <div className="bg-gray-900 text-gray-100 rounded-lg shadow-lg p-3 text-xs border border-gray-700">
-              <div className="font-semibold mb-1.5">
-                {tooltip.node.hexNodes.length === 1
-                  ? `Hex Node #${tooltip.node.hexNodes[0].idx}`
-                  : `Cluster (${tooltip.node.hexNodes.length} combos)`}
-              </div>
+        {tooltip && (() => {
+          const tNode = tooltip.node;
+          const tLabel = qualitativeLabels.get(tNode.id);
+          return (
+            <foreignObject
+              x={Math.min(tooltip.x + 12, width - 300)}
+              y={Math.min(tooltip.y + 12, height - 400)}
+              width={280}
+              height={380}
+              style={{ pointerEvents: "none" }}
+            >
+              <div className="bg-gray-900 text-gray-100 rounded-lg shadow-lg p-3 text-xs border border-gray-700">
 
-              <div className="text-gray-400 mb-2">
-                Trials: <span className="text-white">{tooltip.node.trialCount}</span>
-                {" | "}
-                Coverage: <span className="text-white">{tooltip.node.meanCoverage.toFixed(0)}</span>
-                {tooltip.node.maxCoverage !== tooltip.node.meanCoverage && (
-                  <span className="text-gray-500">
-                    {" "}(max {tooltip.node.maxCoverage})
+                {/* ── Label badge row ──────────────────────────────────── */}
+                <div className="flex items-center gap-1.5 mb-1.5">
+                  {tLabel?.primary ? (
+                    <span
+                      className="px-1.5 py-0.5 rounded text-white font-semibold text-[10px]"
+                      style={{ backgroundColor: LABEL_COLORS[tLabel.primary] }}
+                    >
+                      {tLabel.primary}
+                    </span>
+                  ) : (
+                    <span className="px-1.5 py-0.5 rounded bg-gray-700 text-gray-400 font-semibold text-[10px]">
+                      {tLabel?.hasSupport ? "—" : "low support"}
+                    </span>
+                  )}
+                  {tLabel?.secondary.map((s) => (
+                    <span key={s} className="px-1.5 py-0.5 rounded bg-gray-700 text-gray-300 text-[10px]">
+                      {s}
+                    </span>
+                  ))}
+                  <span className="ml-auto text-gray-500 font-normal">
+                    {tNode.hexNodes.length === 1
+                      ? `#${tNode.hexNodes[0].idx}`
+                      : `${tNode.hexNodes.length} combos`}
                   </span>
+                </div>
+
+                {/* ── Rationale ───────────────────────────────────────── */}
+                {tLabel?.primary && (
+                  <div className="text-gray-400 italic mb-2 leading-tight">
+                    {LABEL_RATIONALE[tLabel.primary](tNode)}
+                  </div>
                 )}
-              </div>
 
-              {/* Tuner breakdown */}
-              <div className="space-y-1 mb-2">
-                {TUNER_NAMES.filter(
-                  (t) => (tooltip.node.tunerCounts[t] || 0) > 0
-                ).map((t) => {
-                  const count = tooltip.node.tunerCounts[t] || 0;
-                  const pct = ((count / tooltip.node.trialCount) * 100).toFixed(0);
-                  return (
-                    <div key={t} className="flex items-center gap-1.5">
-                      <span
-                        className="w-2 h-2 rounded-full"
-                        style={{ backgroundColor: TUNER_COLORS[t as TunerType] }}
-                      />
-                      <span className="text-gray-300">{t}</span>
-                      <span className="ml-auto text-gray-400">
-                        {count} ({pct}%)
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
+                {/* ── Key metrics for this label ───────────────────────── */}
+                {tLabel?.primary && (
+                  <div className="space-y-0.5 mb-2 border-b border-gray-700 pb-2">
+                    {LABEL_METRIC_KEYS[tLabel.primary](tNode).map((m) => (
+                      <div key={m} className="text-gray-300">{m}</div>
+                    ))}
+                  </div>
+                )}
 
-              {/* Parameter values (only for single hex nodes) */}
-              {tooltip.node.hexNodes.length === 1 && data && (
-                <div className="border-t border-gray-700 pt-1.5 space-y-0.5 max-h-48 overflow-y-auto">
-                  {data.allParams.map((p, i) => {
-                    const val = tooltip.node.hexNodes[0].discrete[i];
-                    const meta = data.paramMeta[p];
-                    let display: string;
-                    if (meta?.type === "boolean") {
-                      display = val === 1 ? "true" : "false";
-                    } else if (meta?.type === "numeric") {
-                      display = meta.binLabels?.[val as number] ?? String(val);
-                    } else {
-                      display = String(val);
-                    }
+                {/* ── Coverage summary ────────────────────────────────── */}
+                <div className="text-gray-400 mb-2">
+                  Trials: <span className="text-white">{tNode.trialCount}</span>
+                  {" | "}
+                  Coverage: <span className="text-white">{tNode.meanCoverage.toFixed(0)}</span>
+                  {tNode.maxCoverage !== tNode.meanCoverage && (
+                    <span className="text-gray-500"> (max {tNode.maxCoverage})</span>
+                  )}
+                </div>
+
+                {/* ── Tuner breakdown ─────────────────────────────────── */}
+                <div className="space-y-1 mb-2">
+                  {TUNER_NAMES.filter(
+                    (t) => (tNode.tunerCounts[t] || 0) > 0
+                  ).map((t) => {
+                    const count = tNode.tunerCounts[t] || 0;
+                    const pct = ((count / tNode.trialCount) * 100).toFixed(0);
                     return (
-                      <div key={p} className="flex justify-between gap-2">
-                        <span className="text-gray-400 truncate">{p}</span>
-                        <span className="text-gray-200 font-mono whitespace-nowrap">{display}</span>
+                      <div key={t} className="flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full"
+                          style={{ backgroundColor: TUNER_COLORS[t as TunerType] }} />
+                        <span className="text-gray-300">{t}</span>
+                        <span className="ml-auto text-gray-400">{count} ({pct}%)</span>
                       </div>
                     );
                   })}
                 </div>
-              )}
-            </div>
-          </foreignObject>
-        )}
+
+                {/* ── Parameter values (single node only) ─────────────── */}
+                {tNode.hexNodes.length === 1 && data && (
+                  <div className="border-t border-gray-700 pt-1.5 space-y-0.5 max-h-36 overflow-y-auto">
+                    {data.allParams.map((p, i) => {
+                      const val = tNode.hexNodes[0].discrete[i];
+                      const meta = data.paramMeta[p];
+                      let display: string;
+                      if (meta?.type === "boolean") {
+                        display = val === 1 ? "true" : "false";
+                      } else if (meta?.type === "numeric") {
+                        display = meta.binLabels?.[val as number] ?? String(val);
+                      } else {
+                        display = String(val);
+                      }
+                      return (
+                        <div key={p} className="flex justify-between gap-2">
+                          <span className="text-gray-400 truncate">{p}</span>
+                          <span className="text-gray-200 font-mono whitespace-nowrap">{display}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </foreignObject>
+          );
+        })()}
       </svg>
 
       {/* ── Selected Node Detail Panel ───────────────────────────────────── */}
-      {selectedNode && data && (
+      {selectedNode && data && (() => {
+        const sLabel = qualitativeLabels.get(selectedNode.id);
+        return (
         <div className="absolute bottom-4 right-4 bg-gray-900 text-gray-100 rounded-lg shadow-xl p-4 text-xs border border-gray-700 w-80 max-h-[28rem] overflow-auto">
           <div className="flex justify-between items-center mb-2">
-            <span className="font-semibold">
-              {selectedNode.hexNodes.length === 1
-                ? `Node #${selectedNode.hexNodes[0].idx}`
-                : `Cluster (${selectedNode.hexNodes.length} combos)`}
-            </span>
-            <button
-              onClick={() => setSelectedNode(null)}
-              className="text-gray-400 hover:text-white"
-            >
-              ✕
-            </button>
+            <div className="flex items-center gap-1.5">
+              {sLabel?.primary ? (
+                <span
+                  className="px-1.5 py-0.5 rounded text-white font-semibold text-[10px]"
+                  style={{ backgroundColor: LABEL_COLORS[sLabel.primary] }}
+                >
+                  {sLabel.primary}
+                </span>
+              ) : (
+                <span className="text-gray-500 text-[10px]">
+                  {sLabel?.hasSupport ? "no label" : "low support"}
+                </span>
+              )}
+              {sLabel?.secondary.map((s) => (
+                <span key={s} className="px-1.5 py-0.5 rounded bg-gray-700 text-gray-300 text-[10px]">{s}</span>
+              ))}
+              <span className="font-semibold text-gray-100">
+                {selectedNode.hexNodes.length === 1
+                  ? `Node #${selectedNode.hexNodes[0].idx}`
+                  : `Cluster (${selectedNode.hexNodes.length} combos)`}
+              </span>
+            </div>
+            <button onClick={() => setSelectedNode(null)} className="text-gray-400 hover:text-white">✕</button>
           </div>
+
+          {/* Rationale */}
+          {sLabel?.primary && (
+            <div className="text-gray-400 italic mb-2 leading-tight border-b border-gray-700 pb-2">
+              {LABEL_RATIONALE[sLabel.primary](selectedNode)}
+            </div>
+          )}
+
           <div className="text-gray-400 mb-2">
             {selectedNode.trialCount} trials | coverage{" "}
             {selectedNode.meanCoverage.toFixed(0)}
@@ -754,7 +1026,8 @@ export function ParameterHexMap({
             </div>
           )}
         </div>
-      )}
+        );
+      })()}
     </div>
   );
 }

@@ -146,14 +146,22 @@ def aggregate_unique(trials, discretized):
     for combo, trial_indices in combo_map.items():
         tuner_counts = Counter(trials[i]["tuner"] for i in trial_indices)
         coverages = [trials[i]["totalCovered"] for i in trial_indices]
+        marginals = [trials[i]["marginalCoverage"] for i in trial_indices]
+        failure_count = sum(1 for c in coverages if c == 0)
+        n = len(trial_indices)
+        iqr = (float(np.percentile(coverages, 75) - np.percentile(coverages, 25))
+               if n >= 2 else 0.0)
         unique_nodes.append({
             "discrete": combo,
-            "trialCount": len(trial_indices),
+            "trialCount": n,
             "trialIndices": trial_indices,
             "tunerCounts": dict(tuner_counts),
-            "meanCoverage": np.mean(coverages),
+            "meanCoverage": float(np.mean(coverages)),
             "maxCoverage": max(coverages),
             "minCoverage": min(coverages),
+            "meanMarginalCoverage": float(np.mean(marginals)),
+            "failureRate": round(failure_count / n, 4),
+            "coverageIqr": round(iqr, 2),
         })
 
     # Sort by trial count descending for visibility
@@ -549,7 +557,7 @@ def mds_placement(unique_nodes, n):
     print(f"\n=== MDS (SMACOF, {m} components) ===")
     start = time.time()
     mds = MDS(n_components=2, metric=True, dissimilarity='precomputed',
-              max_iter=100, n_init=1, random_state=42, normalized_stress=False)
+              max_iter=100, n_init=1, random_state=42)
     coords_2d = mds.fit_transform(comp_dist)
     elapsed = time.time() - start
     print(f"  MDS completed in {elapsed:.1f}s (stress={mds.stress_:.2f})")
@@ -798,6 +806,9 @@ def run_pipeline(program):
             "meanCoverage": round(node["meanCoverage"], 1),
             "maxCoverage": node["maxCoverage"],
             "minCoverage": node["minCoverage"],
+            "meanMarginalCoverage": round(node["meanMarginalCoverage"], 2),
+            "failureRate": node["failureRate"],
+            "coverageIqr": node["coverageIqr"],
             "trialIndices": node["trialIndices"],
         })
 
