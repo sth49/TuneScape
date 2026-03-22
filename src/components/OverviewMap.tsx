@@ -52,6 +52,8 @@ const TUNER_BORDER_COLORS: Record<TunerType, string> = {
   'CMA_ES': '#047857',
   'Genetic': '#B45309',
   'SuccessiveHalving': '#B91C1C',
+  'TPE': '#6D28D9',
+  'BayesianOptimization': '#0369A1',
 };
 
 const TUNER_DISPLAY_NAMES: Record<TunerType, string> = {

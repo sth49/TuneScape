@@ -32,8 +32,7 @@
     "d3-scale-chromatic": "^3.1.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "tailwindcss": "^4.1.18",
-    "textures": "^1.2.3"
+    "tailwindcss": "^4.1.18"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.2",

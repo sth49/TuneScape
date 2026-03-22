@@ -62,6 +62,24 @@ export interface HexTile {
 }
 
 /**
+ * Fine-grained unit within a SubRegion, for zoom-in detail view.
+ * Label is contrastive vs sibling detail regions (local contrast).
+ */
+export interface DetailRegion {
+  id: number;
+  territoryId: number;
+  parentSubRegionId: number;
+  clusters: Cluster[];
+  tiles: HexTile[];
+  trials: Trial[];
+  totalTrials: number;
+  tunerCounts: Record<TunerType, number>;
+  pixelCentroidX: number;
+  pixelCentroidY: number;
+  label: string;
+}
+
+/**
  * Connected sub-group within a Territory.
  * Label is contrastive vs parent territory (not global).
  */
@@ -76,6 +94,7 @@ export interface SubRegion {
   pixelCentroidX: number;
   pixelCentroidY: number;
   label: string; // sub vs macro-rest (local contrast)
+  detailRegions: DetailRegion[]; // zoom-in level; populated in processHexMapData
 }
 
 /** Spatially connected group of hex clusters (BFS on hex grid). */
@@ -100,6 +119,8 @@ export interface HexMapData {
   territories: Territory[];
   gridRadius: number;
   paramImportance: { name: string; importance: number }[];
+  paramStats: Map<string, ParamStats>;
+  labelParams: string[];
 }
 
 // ============================================================
@@ -128,7 +149,7 @@ export const TUNER_NAMES: TunerType[] = [
 // Parameter Analysis
 // ============================================================
 
-interface ParamStats {
+export interface ParamStats {
   name: string;
   type: "numeric" | "categorical" | "binary";
   min?: number;
@@ -943,7 +964,7 @@ function makeSubRegionObj(
   territoryId: number,
   clusters: Cluster[],
   tiles: HexTile[],
-): Omit<SubRegion, "label"> {
+): Omit<SubRegion, "label" | "detailRegions"> {
   const tunerCounts: Record<TunerType, number> = {
     SymTuner: 0,
     CMA_ES: 0,
@@ -976,16 +997,106 @@ function makeSubRegionObj(
   };
 }
 
+function makeDetailRegionObj(
+  id: number,
+  territoryId: number,
+  parentSubRegionId: number,
+  clusters: Cluster[],
+  tiles: HexTile[],
+): Omit<DetailRegion, "label"> {
+  const tunerCounts: Record<TunerType, number> = {
+    SymTuner: 0, CMA_ES: 0, Genetic: 0,
+    SuccessiveHalving: 0, TPE: 0, BayesianOptimization: 0,
+  };
+  let totalTrials = 0, pcx = 0, pcy = 0;
+  for (const c of clusters) {
+    totalTrials += c.totalTrials;
+    for (const t of TUNER_NAMES) tunerCounts[t] += c.tunerCounts[t];
+  }
+  for (const t of tiles) { pcx += t.x; pcy += t.y; }
+  return {
+    id, territoryId, parentSubRegionId, clusters, tiles,
+    trials: clusters.flatMap((c) => c.trials),
+    totalTrials, tunerCounts,
+    pixelCentroidX: tiles.length > 0 ? pcx / tiles.length : 0,
+    pixelCentroidY: tiles.length > 0 ? pcy / tiles.length : 0,
+  };
+}
+
+/**
+ * Divide a sub-region into detail regions for zoom-in display.
+ * Finer than sub-regions but still coarse: small SRs stay as 1,
+ * large SRs split into 2–4 spatially-connected detail regions.
+ */
+function buildDetailRegionsForSubRegion(
+  sr: Omit<SubRegion, "label" | "detailRegions">,
+  labelParams: string[],
+  paramStats: Map<string, ParamStats>,
+): Omit<DetailRegion, "label">[] {
+  const clusters = sr.clusters;
+  const m = clusters.length;
+
+  const srHexMap = new Map<string, Cluster>();
+  for (const c of clusters) srHexMap.set(`${c.hexQ},${c.hexR}`, c);
+
+  const tileByKey = new Map<string, HexTile>();
+  for (const tile of sr.tiles) tileByKey.set(`${tile.q},${tile.r}`, tile);
+
+  // Small SRs: single detail region (no benefit in splitting further)
+  const k = m < 4 ? 1 : m < 12 ? 2 : m < 30 ? 3 : 4;
+
+  if (k === 1) {
+    return [makeDetailRegionObj(0, sr.territoryId, sr.id, clusters, sr.tiles)];
+  }
+
+  const vecs = clusters.map((c) => {
+    const v = clusterCentroidToVec(c.centroid, paramStats, labelParams);
+    return v.length > 0 ? v : [c.hexQ, c.hexR];
+  });
+  const assigns = smallKMeans(vecs, k);
+
+  const groups: Cluster[][] = Array.from({ length: k }, () => []);
+  for (let i = 0; i < m; i++) groups[assigns[i]].push(clusters[i]);
+
+  const allComps: Cluster[][] = [];
+  for (const g of groups) {
+    if (g.length === 0) continue;
+    allComps.push(...hexConnectedComponentsSubset(g, srHexMap));
+  }
+
+  // Merge only isolated singletons (threshold=2), keep meaningful fragments
+  let finalComps = mergeSmallComponents(allComps, srHexMap, 2);
+
+  // Spatial fallback if collapsed to 1
+  if (finalComps.length === 1 && m >= 4) {
+    const spatialVecs = clusters.map((c) => [c.hexQ, c.hexR]);
+    const sa = smallKMeans(spatialVecs, 2);
+    const g0: Cluster[] = [], g1: Cluster[] = [];
+    for (let i = 0; i < m; i++) (sa[i] === 0 ? g0 : g1).push(clusters[i]);
+    const sc: Cluster[][] = [];
+    if (g0.length > 0) sc.push(...hexConnectedComponentsSubset(g0, srHexMap));
+    if (g1.length > 0) sc.push(...hexConnectedComponentsSubset(g1, srHexMap));
+    if (sc.length > 1) finalComps = mergeSmallComponents(sc, srHexMap, 2);
+  }
+
+  return finalComps.map((drClusters, idx) => {
+    const drTiles = drClusters
+      .map((c) => tileByKey.get(`${c.hexQ},${c.hexR}`))
+      .filter((t): t is HexTile => t !== undefined);
+    return makeDetailRegionObj(idx, sr.territoryId, sr.id, drClusters, drTiles);
+  });
+}
+
 /**
  * Divide a territory into spatially-connected sub-regions.
  * Uses k-means on cluster centroids, then splits disconnected components,
  * then merges any component below MIN_CLUSTER_SIZE.
  */
-function buildSubRegionsForTerritory(
+export function buildSubRegionsForTerritory(
   territory: Omit<Territory, "label" | "subRegions">,
   topParams: string[],
   paramStats: Map<string, ParamStats>,
-): Omit<SubRegion, "label">[] {
+): Omit<SubRegion, "label" | "detailRegions">[] {
   const clusters = territory.clusters;
   const n = clusters.length;
 
@@ -996,15 +1107,20 @@ function buildSubRegionsForTerritory(
   for (const tile of territory.tiles)
     tileByKey.set(`${tile.q},${tile.r}`, tile);
 
-  // Determine k: 1 for tiny territories, up to 6 for large
-  const k = n < 5 ? 1 : n <= 10 ? 2 : n <= 25 ? 3 : n <= 60 ? 4 : n <= 120 ? 5 : 6;
+  // Determine k: balanced — small territories 1~2, medium 2~3, large up to 4
+  const k = n < 5 ? 1 : n <= 15 ? 2 : n <= 50 ? 3 : 4;
 
   if (k === 1) {
     return [makeSubRegionObj(0, territory.id, clusters, territory.tiles)];
   }
 
-  // K-means on cluster centroids (feature space, one-hot expanded)
-  const vecs = clusters.map((c) => clusterCentroidToVec(c.centroid, paramStats, topParams));
+  // K-means on cluster centroids using provided (SHAP-filtered) params.
+  // If params produce empty vectors (no SHAP data available), fall back to
+  // hex grid coordinates so spatial splitting still works.
+  const vecs = clusters.map((c) => {
+    const v = clusterCentroidToVec(c.centroid, paramStats, topParams);
+    return v.length > 0 ? v : [c.hexQ, c.hexR];
+  });
   const assigns = smallKMeans(vecs, k);
 
   // Group by assignment
@@ -1018,8 +1134,23 @@ function buildSubRegionsForTerritory(
     allComps.push(...hexConnectedComponentsSubset(g, terrHexMap));
   }
 
-  // Merge tiny components (< 3 clusters) into largest adjacent component
-  const finalComps = mergeSmallComponents(allComps, terrHexMap, 3);
+  // Merge only genuinely tiny fragments: at most 8% of territory, capped at 4 clusters.
+  // Keeping the cap low prevents large territories from collapsing to a single component.
+  const mergeThreshold = Math.min(4, Math.ceil(n * 0.08));
+  let finalComps = mergeSmallComponents(allComps, terrHexMap, mergeThreshold);
+
+  // Safety net: if everything collapsed to 1 component on a large territory,
+  // fall back to a pure spatial split (hex coords) with k=2.
+  if (finalComps.length === 1 && n >= 8) {
+    const spatialVecs = clusters.map((c) => [c.hexQ, c.hexR]);
+    const spatialAssigns = smallKMeans(spatialVecs, 2);
+    const g0: Cluster[] = [], g1: Cluster[] = [];
+    for (let i = 0; i < n; i++) (spatialAssigns[i] === 0 ? g0 : g1).push(clusters[i]);
+    const spatialComps: Cluster[][] = [];
+    if (g0.length > 0) spatialComps.push(...hexConnectedComponentsSubset(g0, terrHexMap));
+    if (g1.length > 0) spatialComps.push(...hexConnectedComponentsSubset(g1, terrHexMap));
+    if (spatialComps.length > 1) finalComps = mergeSmallComponents(spatialComps, terrHexMap, 2);
+  }
 
   return finalComps.map((srClusters, idx) => {
     const srTiles = srClusters
@@ -1221,15 +1352,15 @@ function generateTerritoryLabels(
  * macroTrials = all trials in the parent territory.
  * This gives much finer labels than global contrast inside large territories.
  */
-function generateSubRegionLabels(
-  subRegions: Omit<SubRegion, "label">[],
+export function generateSubRegionLabels(
+  subRegions: Array<{ trials: Trial[] }>,
   macroTrials: Trial[],
   paramStats: Map<string, ParamStats>,
   labelParams: string[],
   importanceMap: Map<string, number>,
 ): string[] {
-  // No meaningful split → no sub-region labels
-  if (subRegions.length <= 1) return subRegions.map(() => "");
+  // Single sub-region still gets a label (territory summary vs global)
+  if (subRegions.length === 0) return [];
 
   const predicates = buildPredicates(paramStats, labelParams);
   if (predicates.length === 0) return subRegions.map(() => "");
@@ -1303,6 +1434,238 @@ function generateSubRegionLabels(
 
 // ============================================================
 // Main Processing Function
+// ============================================================
+// Local Detail Re-Clustering
+// ============================================================
+
+/**
+ * Re-cluster the trials of a single subRegion into finer local clusters.
+ * Runs k-means on the raw trials using SHAP-filtered params (or all params
+ * if shapImportance is empty). Returns clusters only — no MDS/hex layout yet.
+ *
+ * Target k = clamp(ceil(sqrt(trials.length) * 0.6), 8, 60)
+ * so small SRs get fewer clusters and large SRs get proportionally more.
+ */
+export interface LocalDetailData {
+  clusters: Cluster[];
+  clusterCount: number;
+  totalTrials: number;
+  paramStats: Map<string, ParamStats>;
+  topParams: string[];
+}
+
+export function buildLocalDetailClusters(
+  trials: Trial[],
+  shapImportance: { name: string; importance: number }[] = [],
+): LocalDetailData | null {
+  if (trials.length === 0) return null;
+
+  const paramStats = analyzeParams(trials);
+  const allParams = Array.from(paramStats.keys());
+
+  // Use SHAP-filtered params when available, fall back to all params
+  const importanceMap = new Map(shapImportance.map((s) => [s.name, s.importance]));
+  const topParams = importanceMap.size > 0
+    ? allParams.filter((p) => importanceMap.has(p))
+    : allParams;
+  const useParams = topParams.length > 0 ? topParams : allParams;
+
+  // Target k: proportional to sqrt(n), conservative bounds
+  const k = Math.min(60, Math.max(8, Math.ceil(Math.sqrt(trials.length) * 0.6)));
+
+  const clusters = kMeansClustering(trials, k, paramStats, useParams);
+
+  return {
+    clusters,
+    clusterCount: clusters.length,
+    totalTrials: trials.length,
+    paramStats,
+    topParams: useParams,
+  };
+}
+
+// ============================================================
+// Coarse Level Building
+// Produces progressively fewer, spatially-merged "super-clusters"
+// by running k-means on cluster pixel-centroid positions.
+// Level 4 = current (finest), levels 3-0 = progressively coarser.
+// ============================================================
+
+export interface CoarseCluster {
+  id: number;
+  memberClusterIds: number[];      // original cluster.id values
+  tunerCounts: Record<TunerType, number>;
+  totalTrials: number;
+  pixelCentroidX: number;          // average of member tile pixel positions
+  pixelCentroidY: number;
+  label: string;                   // dominant tuner name
+}
+
+export interface CoarseLevel {
+  level: number;                   // 3, 2, 1, or 0
+  k: number;                       // number of coarse clusters
+  clusters: CoarseCluster[];
+  clusterIdToCoarseId: Map<number, number>; // original cluster.id → coarse id
+}
+
+/** Simple k-means on 2-D points. Returns point.id → centroid index. */
+function kMeansPositions(
+  points: { id: number; x: number; y: number }[],
+  k: number,
+  maxIter = 40,
+): Map<number, number> {
+  const safeK = Math.min(k, points.length);
+  if (safeK === 0) return new Map();
+
+  // Init: pick evenly spaced points as seeds
+  const step = Math.floor(points.length / safeK);
+  let centroids = Array.from({ length: safeK }, (_, i) => ({
+    x: points[(i * step) % points.length].x,
+    y: points[(i * step) % points.length].y,
+  }));
+
+  let assignments = new Map<number, number>();
+
+  for (let iter = 0; iter < maxIter; iter++) {
+    const next = new Map<number, number>();
+    for (const pt of points) {
+      let best = 0, bestDist = Infinity;
+      for (let ci = 0; ci < safeK; ci++) {
+        const dx = pt.x - centroids[ci].x;
+        const dy = pt.y - centroids[ci].y;
+        const d = dx * dx + dy * dy;
+        if (d < bestDist) { bestDist = d; best = ci; }
+      }
+      next.set(pt.id, best);
+    }
+
+    let changed = false;
+    for (const pt of points) {
+      if (next.get(pt.id) !== assignments.get(pt.id)) { changed = true; break; }
+    }
+    assignments = next;
+    if (!changed && iter > 0) break;
+
+    // Recompute centroids
+    const sums = Array.from({ length: safeK }, () => ({ x: 0, y: 0, n: 0 }));
+    for (const pt of points) {
+      const ci = assignments.get(pt.id)!;
+      sums[ci].x += pt.x; sums[ci].y += pt.y; sums[ci].n++;
+    }
+    centroids = sums.map((s, i) =>
+      s.n > 0 ? { x: s.x / s.n, y: s.y / s.n } : centroids[i],
+    );
+  }
+  return assignments;
+}
+
+/**
+ * Build 4 progressively coarser cluster levels from the finest (level 4) data.
+ * Level 3 ≈ 50% of level-4 clusters, level 2 ≈ 25%, level 1 ≈ 12%, level 0 ≈ 6%.
+ * Merging is purely spatial (k-means on pixel centroids), so positions are preserved.
+ */
+export function buildCoarseLevels(data: HexMapData): CoarseLevel[] {
+  const { clusters, hexTiles } = data;
+  const n = clusters.length;
+  if (n === 0) return [];
+
+  // Build pixel centroid for each cluster from its hex tiles
+  const tilePixels = new Map<number, { sumX: number; sumY: number; count: number }>();
+  for (const tile of hexTiles) {
+    if (!tile.cluster) continue;
+    const cid = tile.cluster.id;
+    if (!tilePixels.has(cid)) tilePixels.set(cid, { sumX: 0, sumY: 0, count: 0 });
+    const e = tilePixels.get(cid)!;
+    e.sumX += tile.x; e.sumY += tile.y; e.count++;
+  }
+
+  const clusterPoints = clusters.map((c) => {
+    const px = tilePixels.get(c.id);
+    return {
+      id: c.id,
+      x: px ? px.sumX / px.count : c.x,
+      y: px ? px.sumY / px.count : c.y,
+    };
+  });
+
+  const ratios = [0.5, 0.25, 0.12, 0.06];
+  const levels: CoarseLevel[] = [];
+
+  for (let li = 0; li < ratios.length; li++) {
+    const targetK = Math.max(2, Math.round(n * ratios[li]));
+    const assignments = kMeansPositions(clusterPoints, targetK);
+
+    // Remap centroid indices to compact 0..actualK-1 ids
+    const centroidSet = new Set(assignments.values());
+    const centroidRemap = new Map<number, number>();
+    let cid = 0;
+    for (const ci of centroidSet) centroidRemap.set(ci, cid++);
+
+    const coarseMap = new Map<number, {
+      memberClusterIds: number[];
+      tunerCounts: Record<TunerType, number>;
+      totalTrials: number;
+      pixelXs: number[]; pixelYs: number[];
+    }>();
+
+    for (const cluster of clusters) {
+      const rawCi = assignments.get(cluster.id) ?? 0;
+      const ci = centroidRemap.get(rawCi) ?? 0;
+      if (!coarseMap.has(ci)) {
+        coarseMap.set(ci, {
+          memberClusterIds: [],
+          tunerCounts: { SymTuner: 0, CMA_ES: 0, Genetic: 0, SuccessiveHalving: 0, TPE: 0, BayesianOptimization: 0 },
+          totalTrials: 0,
+          pixelXs: [], pixelYs: [],
+        });
+      }
+      const cc = coarseMap.get(ci)!;
+      cc.memberClusterIds.push(cluster.id);
+      for (const t of TUNER_NAMES) cc.tunerCounts[t] += cluster.tunerCounts[t];
+      cc.totalTrials += cluster.totalTrials;
+      const px = tilePixels.get(cluster.id);
+      if (px) { cc.pixelXs.push(px.sumX / px.count); cc.pixelYs.push(px.sumY / px.count); }
+    }
+
+    const coarseClusters: CoarseCluster[] = [];
+    const clusterIdToCoarseId = new Map<number, number>();
+
+    // Build cluster → trials lookup
+    const clusterTrials = new Map<number, Trial[]>();
+    for (const c of clusters) clusterTrials.set(c.id, c.trials);
+
+    for (const [ci, cc] of coarseMap) {
+      coarseClusters.push({
+        id: ci,
+        memberClusterIds: cc.memberClusterIds,
+        tunerCounts: cc.tunerCounts,
+        totalTrials: cc.totalTrials,
+        pixelCentroidX: cc.pixelXs.length > 0 ? cc.pixelXs.reduce((a, b) => a + b, 0) / cc.pixelXs.length : 0,
+        pixelCentroidY: cc.pixelYs.length > 0 ? cc.pixelYs.reduce((a, b) => a + b, 0) / cc.pixelYs.length : 0,
+        label: '', // filled below after contrastive labeling
+      });
+      for (const origId of cc.memberClusterIds) clusterIdToCoarseId.set(origId, ci);
+    }
+
+    // Compute contrastive parameter labels (each coarse cluster vs all trials)
+    const allTrials = clusters.flatMap(c => c.trials);
+    const importanceMap = new Map(data.paramImportance.map(p => [p.name, p.importance]));
+    const coarseAsSubRegions = coarseClusters.map(cc => ({
+      trials: cc.memberClusterIds.flatMap(cid => clusterTrials.get(cid) ?? []),
+    }));
+    const coarseLabels = generateSubRegionLabels(
+      coarseAsSubRegions, allTrials, data.paramStats, data.labelParams, importanceMap,
+    );
+    for (let i = 0; i < coarseClusters.length; i++) {
+      coarseClusters[i].label = coarseLabels[i] || getDominantTuner(coarseClusters[i].tunerCounts);
+    }
+
+    levels.push({ level: 3 - li, k: coarseClusters.length, clusters: coarseClusters, clusterIdToCoarseId });
+  }
+
+  return levels; // [level3, level2, level1, level0]
+}
+
 // ============================================================
 
 export function processHexMapData(
@@ -1378,7 +1741,7 @@ export function processHexMapData(
   // 9b. Sub-regions: adjacency-constrained k-means within each territory
   //     Sub labels: sub vs macro-rest (local contrast — finer-grained)
   const territories: Territory[] = preLabelTerritories.map((t, i) => {
-    const srRaws = buildSubRegionsForTerritory(t, topParams, paramStats);
+    const srRaws = buildSubRegionsForTerritory(t, labelParams, paramStats);
     const srLabels = generateSubRegionLabels(
       srRaws,
       t.trials,
@@ -1386,10 +1749,16 @@ export function processHexMapData(
       labelParams,
       importanceMap,
     );
-    const subRegions: SubRegion[] = srRaws.map((sr, j) => ({
-      ...sr,
-      label: srLabels[j],
-    }));
+    // 9c. Detail regions: finer split within each sub-region (for future zoom-in)
+    const subRegions: SubRegion[] = srRaws.map((sr, j) => {
+      const drRaws = buildDetailRegionsForSubRegion(sr, labelParams, paramStats);
+      const drLabels = generateSubRegionLabels(drRaws, sr.trials, paramStats, labelParams, importanceMap);
+      const detailRegions: DetailRegion[] = drRaws.map((dr, di) => ({
+        ...dr,
+        label: drLabels[di] ?? "",
+      }));
+      return { ...sr, label: srLabels[j], detailRegions };
+    });
     return { ...t, label: macroLabels[i], subRegions };
   });
 
@@ -1404,6 +1773,8 @@ export function processHexMapData(
     territories,
     gridRadius,
     paramImportance: shapImportance.slice(0, 10),
+    paramStats,
+    labelParams,
   };
 }
 

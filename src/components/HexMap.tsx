@@ -15,19 +15,21 @@ import React, {
   useRef,
 } from "react";
 import * as d3 from "d3";
-import textures from "textures";
 import type { ProcessedData } from "../types/data";
 import {
-  processHexMapData,
   getHexPath,
   getDominantTuner,
   TUNER_COLORS,
   TUNER_NAMES,
+  buildCoarseLevels,
+  buildSubRegionsForTerritory,
+  generateSubRegionLabels,
   type HexMapData,
   type HexTile,
   type Cluster,
   type Territory,
   type SubRegion,
+  type CoarseLevel,
   type Trial,
   type TunerType,
 } from "../utils/hexMapUtils";
@@ -250,14 +252,6 @@ const QUAL_LABEL_COLORS: Record<QualitativeLabel, string> = {
   Volatile: "#3B82F6",
 };
 
-const QUAL_TEXTURE_ID: Record<QualitativeLabel, string> = {
-  "Failure-prone": "qual-tex-failure",
-  "High Novelty": "qual-tex-novelty",
-  Saturated: "qual-tex-saturated",
-  "High Coverage": "qual-tex-coverage",
-  Volatile: "qual-tex-volatile",
-};
-
 const QUAL_LABEL_RATIONALE: Record<QualitativeLabel, string> = {
   "Failure-prone": "High zero-coverage rate (>20%)",
   "High Novelty": "High marginal coverage gain",
@@ -276,11 +270,15 @@ function mixHexColors(colorA: string, colorB: string, t: number): string {
   if (!a || !b) return colorA;
 
   const ratio = clamp01(t);
-  return d3.rgb(
-    a.r + (b.r - a.r) * ratio,
-    a.g + (b.g - a.g) * ratio,
-    a.b + (b.b - a.b) * ratio,
-  ).formatHex();
+  const ra = d3.rgb(a);
+  const rb = d3.rgb(b);
+  return d3
+    .rgb(
+      ra.r + (rb.r - ra.r) * ratio,
+      ra.g + (rb.g - ra.g) * ratio,
+      ra.b + (rb.b - ra.b) * ratio,
+    )
+    .formatHex();
 }
 
 function getSubRegionPaletteColor(
@@ -356,8 +354,12 @@ export function HexMap({
   program = "gawk",
 }: HexMapProps) {
   const [data, setData] = useState<HexMapData | null>(null);
-  const [rawTunerData, setRawTunerData] = useState<ProcessedData[] | null>(null);
-  const [shapImportance, setShapImportance] = useState<{ name: string; importance: number }[]>([]);
+  const [rawTunerData, setRawTunerData] = useState<ProcessedData[] | null>(
+    null,
+  );
+  const [shapImportance, setShapImportance] = useState<
+    { name: string; importance: number }[]
+  >([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -386,7 +388,9 @@ export function HexMap({
   const [selectedTuners, setSelectedTuners] = useState<Set<TunerType>>(
     new Set(TUNER_NAMES),
   );
-  const [numClusters, setNumClusters] = useState<number>(160);
+  const [numClusters, setNumClusters] = useState<number>(200);
+  // 4 = finest (current clusters), 3/2/1/0 = progressively coarser merged levels
+  const [detailLevel, setDetailLevel] = useState<number>(4);
 
   const svgRef = useRef<SVGSVGElement>(null);
   const workerRef = useRef<Worker | null>(null);
@@ -403,86 +407,6 @@ export function HexMap({
       worker.terminate();
     };
   }, []);
-
-  // Create diverse texture instances - each tuner gets a distinct pattern type
-  const textureInstances = useMemo(() => {
-    const instances: Record<string, { url(): string; (sel: any): void }> = {};
-
-    // SymTuner: diagonal hatching lines
-    instances.SymTuner = textures
-      .lines()
-      .id("hatch-SymTuner")
-      .orientation("diagonal")
-      .size(8)
-      .strokeWidth(2.5)
-      .stroke(TUNER_COLORS.SymTuner);
-
-    // CMA_ES: dot / circle pattern
-    instances.CMA_ES = textures
-      .circles()
-      .id("hatch-CMA_ES")
-      .size(10)
-      .radius(3)
-      .fill(TUNER_COLORS.CMA_ES)
-      .complement();
-
-    // Genetic: cross pattern
-    instances.Genetic = textures
-      .paths()
-      .id("hatch-Genetic")
-      .d("crosses")
-      .size(10)
-      .strokeWidth(2)
-      .stroke(TUNER_COLORS.Genetic);
-
-    // SuccessiveHalving: wave pattern
-    instances.SuccessiveHalving = textures
-      .paths()
-      .id("hatch-SuccessiveHalving")
-      .d("waves")
-      .size(10)
-      .strokeWidth(2)
-      .stroke(TUNER_COLORS.SuccessiveHalving);
-
-    // TPE: vertical lines
-    instances.TPE = textures
-      .lines()
-      .id("hatch-TPE")
-      .orientation("vertical")
-      .size(8)
-      .strokeWidth(2.5)
-      .stroke(TUNER_COLORS.TPE);
-
-    // BayesianOptimization: horizontal lines
-    instances.BayesianOptimization = textures
-      .lines()
-      .id("hatch-BayesianOptimization")
-      .orientation("horizontal")
-      .size(8)
-      .strokeWidth(2.5)
-      .stroke(TUNER_COLORS.BayesianOptimization);
-
-    return instances;
-  }, []);
-
-  // Apply textures to SVG <defs> imperatively
-  useEffect(() => {
-    if (!svgRef.current) return;
-    const svg = d3.select(svgRef.current);
-
-    // Clean up old texture patterns by ID
-    for (const tuner of TUNER_NAMES) {
-      const existing = svgRef.current.querySelector(`#hatch-${tuner}`);
-      if (existing?.parentElement?.tagName.toLowerCase() === "defs") {
-        existing.parentElement.remove();
-      }
-    }
-
-    // Let textures.js inject <defs><pattern>...</pattern></defs> the standard way
-    for (const tuner of TUNER_NAMES) {
-      svg.call(textureInstances[tuner] as any);
-    }
-  }, [textureInstances]);
 
   // Effect 1: Fetch raw data when program changes
   useEffect(() => {
@@ -525,7 +449,9 @@ export function HexMap({
     }
 
     loadData();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [program]);
 
   // Effect 2: Re-process via Web Worker when raw data or numClusters changes (NOT selectedTuners)
@@ -533,7 +459,12 @@ export function HexMap({
     if (!rawTunerData || !workerRef.current) return;
     setLoading(true);
     const id = ++computationIdRef.current;
-    workerRef.current.postMessage({ id, tunerData: rawTunerData, shapImportance, numClusters });
+    workerRef.current.postMessage({
+      id,
+      tunerData: rawTunerData,
+      shapImportance,
+      numClusters,
+    });
     workerRef.current.onmessage = (e: MessageEvent) => {
       if (e.data.id !== computationIdRef.current) return; // stale result, discard
       if (e.data.error) {
@@ -596,7 +527,587 @@ export function HexMap({
   const hexPath = useMemo(() => getHexPath(HEX_SIZE), []);
 
   // Territories are pre-computed in processHexMapData (hexMapUtils.ts)
-  const territories: Territory[] = data?.territories ?? [];
+  // Wrapped in useMemo so the array reference is stable across renders.
+  const territories = useMemo<Territory[]>(() => data?.territories ?? [], [data]);
+
+  // ── Coarse levels: 4 levels built by merging clusters spatially ─
+  // coarseLevels[0] = level3 (≈50% of clusters), ..., [3] = level0 (≈6%)
+  const coarseLevels = useMemo<CoarseLevel[]>(() => {
+    if (!data) return [];
+    return buildCoarseLevels(data);
+  }, [data]);
+
+  // Active coarse level data when detailLevel < 4
+  const activeCoarseLevel = useMemo<CoarseLevel | null>(() => {
+    if (detailLevel === 4) return null;
+    return coarseLevels[3 - detailLevel] ?? null; // level3→idx0, ..., level0→idx3
+  }, [detailLevel, coarseLevels]);
+
+  // Each coarse cluster → one hex at its centroid, snapped to a coarser hex grid.
+  // hexSize scales up so the cluster count × hex area ≈ the fine level's total area.
+  const coarseHexLayout = useMemo<{
+    coarseId: number; q: number; r: number; x: number; y: number;
+    hexSize: number; color: string; tuner: TunerType; label: string;
+  }[]>(() => {
+    if (!activeCoarseLevel || !data) return [];
+
+    const { clusters: coarseClusters } = activeCoarseLevel;
+    const k = coarseClusters.length;
+    const n = data.clusters.length;
+    // Hex size grows so that k coarse hexes fill the same visual area as n fine hexes
+    const hexSize = HEX_SIZE * Math.sqrt(n / Math.max(k, 1));
+
+    // flat-top axial ↔ pixel helpers
+    const pixelToAxial = (px: number, py: number, s: number) => ({
+      fq: (2 / 3) * px / s,
+      fr: (-1 / 3) * px / s + (Math.sqrt(3) / 3) * py / s,
+    });
+    const hexRound = (fq: number, fr: number) => {
+      const fs = -fq - fr;
+      let rq = Math.round(fq), rr = Math.round(fr);
+      const rs = Math.round(fs);
+      const dq = Math.abs(rq - fq), dr = Math.abs(rr - fr), ds = Math.abs(rs - fs);
+      if (dq > dr && dq > ds) rq = -rr - rs;
+      else if (dr > ds) rr = -rq - rs;
+      return { q: rq, r: rr };
+    };
+    const axialToPixel = (q: number, r: number, s: number) => ({
+      x: s * 1.5 * q,
+      y: s * (Math.sqrt(3) / 2 * q + Math.sqrt(3) * r),
+    });
+
+    const HEX_DIRS = [
+      { dq: 1, dr: 0 }, { dq: 0, dr: 1 }, { dq: -1, dr: 1 },
+      { dq: -1, dr: 0 }, { dq: 0, dr: -1 }, { dq: 1, dr: -1 },
+    ];
+
+    // Largest clusters get first pick of hex positions
+    const sorted = [...coarseClusters].sort((a, b) => b.totalTrials - a.totalTrials);
+    const usedPositions = new Map<string, true>();
+    const result: {
+      coarseId: number; q: number; r: number; x: number; y: number;
+      hexSize: number; color: string; tuner: TunerType; label: string;
+    }[] = [];
+
+    for (const cc of sorted) {
+      const tuner = getDominantTuner(cc.tunerCounts);
+      const color = TUNER_COLORS[tuner];
+      const { fq, fr } = pixelToAxial(cc.pixelCentroidX, cc.pixelCentroidY, hexSize);
+      let { q, r } = hexRound(fq, fr);
+
+      // Spiral outward until an empty hex position is found
+      if (usedPositions.has(`${q},${r}`)) {
+        const tried = new Set([`${q},${r}`]);
+        const queue = [{ q, r }];
+        let placed = false;
+        outer: while (queue.length > 0) {
+          const cur = queue.shift()!;
+          for (const { dq, dr } of HEX_DIRS) {
+            const nq = cur.q + dq, nr = cur.r + dr;
+            const nk = `${nq},${nr}`;
+            if (tried.has(nk)) continue;
+            tried.add(nk);
+            if (!usedPositions.has(nk)) {
+              q = nq; r = nr; placed = true; break outer;
+            }
+            queue.push({ q: nq, r: nr });
+          }
+        }
+        if (!placed) continue;
+      }
+
+      usedPositions.set(`${q},${r}`, true);
+      const { x, y } = axialToPixel(q, r, hexSize);
+      result.push({ coarseId: cc.id, q, r, x, y, hexSize, color, tuner, label: cc.label });
+    }
+
+    return result;
+  }, [activeCoarseLevel, data]);
+
+  // Territory/sub-region structure for coarse levels (L0–L3)
+  // - Territory = BFS connected component of same-tuner coarse hexes
+  // - Sub-region border = internal edge between two adjacent coarse hexes of the same territory
+  // - Territory border = external edge toward a different tuner or empty
+  const coarseTerritoryData = useMemo(() => {
+    if (detailLevel === 4 || coarseHexLayout.length === 0) return null;
+
+    const hexSize = coarseHexLayout[0].hexSize;
+    const DIRS = [
+      { dq: 1, dr: 0 }, { dq: 0, dr: 1 }, { dq: -1, dr: 1 },
+      { dq: -1, dr: 0 }, { dq: 0, dr: -1 }, { dq: 1, dr: -1 },
+    ];
+    const verts = Array.from({ length: 6 }, (_, i) => ({
+      x: hexSize * Math.cos((i * Math.PI) / 3),
+      y: hexSize * Math.sin((i * Math.PI) / 3),
+    }));
+
+    type CoarseHex = typeof coarseHexLayout[0];
+    const hexMap = new Map<string, CoarseHex>();
+    for (const h of coarseHexLayout) hexMap.set(`${h.q},${h.r}`, h);
+
+    // BFS: find connected occupied components, matching L4 territory logic.
+    type Component = {
+      tuner: TunerType;
+      hexes: CoarseHex[];
+      cx: number;
+      cy: number;
+    };
+    const visited = new Set<string>();
+    const components: Component[] = [];
+
+    for (const h of coarseHexLayout) {
+      const k = `${h.q},${h.r}`;
+      if (visited.has(k)) continue;
+      const group: CoarseHex[] = [];
+      const queue: CoarseHex[] = [h];
+      visited.add(k);
+      while (queue.length > 0) {
+        const cur = queue.shift()!;
+        group.push(cur);
+        for (const { dq, dr } of DIRS) {
+          const nk = `${cur.q + dq},${cur.r + dr}`;
+          if (visited.has(nk)) continue;
+          const nb = hexMap.get(nk);
+          if (!nb) continue;
+          visited.add(nk);
+          queue.push(nb);
+        }
+      }
+      const tunerCounts = {
+        SymTuner: 0,
+        CMA_ES: 0,
+        Genetic: 0,
+        SuccessiveHalving: 0,
+        TPE: 0,
+        BayesianOptimization: 0,
+      } as Record<TunerType, number>;
+      for (const member of group) {
+        tunerCounts[member.tuner] += 1;
+      }
+      const tuner = getDominantTuner(tunerCounts);
+      components.push({
+        tuner,
+        hexes: group,
+        cx: group.reduce((s, x) => s + x.x, 0) / group.length,
+        cy: group.reduce((s, x) => s + x.y, 0) / group.length,
+      });
+    }
+
+    // Map each hex to its component index
+    const hexToComp = new Map<string, number>();
+    components.forEach((comp, idx) => {
+      for (const h of comp.hexes) hexToComp.set(`${h.q},${h.r}`, idx);
+    });
+
+    // Build border paths
+    let terrBorderD = '';
+    let subBorderD = '';
+
+    for (const h of coarseHexLayout) {
+      const myComp = hexToComp.get(`${h.q},${h.r}`)!;
+      for (let ei = 0; ei < 6; ei++) {
+        const { dq, dr } = DIRS[ei];
+        const nk = `${h.q + dq},${h.r + dr}`;
+        const nb = hexMap.get(nk);
+        const va = verts[ei], vb = verts[(ei + 1) % 6];
+        const seg = `M${h.x + va.x},${h.y + va.y}L${h.x + vb.x},${h.y + vb.y}`;
+        if (!nb || hexToComp.get(nk) !== myComp) {
+          terrBorderD += seg;
+        } else if (nb.tuner !== h.tuner) {
+          subBorderD += seg;
+        }
+      }
+    }
+
+    const terrLabels: {
+      tuner: TunerType;
+      x: number;
+      y: number;
+      color: string;
+      text: string;
+      weight: number;
+    }[] = [];
+
+    // Sub-region labels: same approach as L4 — buildSubRegionsForTerritory per component,
+    // then generateSubRegionLabels for contrastive parameter labels.
+    const srLabels: { x: number; y: number; text: string; weight: number }[] =
+      [];
+    if (data && activeCoarseLevel) {
+      const clusterById = new Map<number, Cluster>();
+      for (const c of data.clusters) clusterById.set(c.id, c);
+      const tileByClusterId = new Map<number, HexTile>();
+      for (const tile of data.hexTiles) {
+        if (tile.cluster) tileByClusterId.set(tile.cluster.id, tile);
+      }
+      const coarseClusterById = new Map<number, typeof activeCoarseLevel.clusters[0]>();
+      for (const cc of activeCoarseLevel.clusters) coarseClusterById.set(cc.id, cc);
+      const importanceMap = new Map(data.paramImportance.map(p => [p.name, p.importance]));
+
+      const allTrials = data.clusters.flatMap((c) => c.trials);
+
+      // orig cluster id → coarse hex position (for label placement at coarse level coords)
+      const origClusterToCoarsePos = new Map<number, { x: number; y: number }>();
+      for (const h of coarseHexLayout) {
+        const cc = coarseClusterById.get(h.coarseId);
+        if (!cc) continue;
+        for (const cid of cc.memberClusterIds) origClusterToCoarsePos.set(cid, { x: h.x, y: h.y });
+      }
+
+      const componentRegions = components.map((comp) => {
+        const origClusters: Cluster[] = [];
+        const origTiles: HexTile[] = [];
+        for (const h of comp.hexes) {
+          const cc = coarseClusterById.get(h.coarseId);
+          if (!cc) continue;
+          for (const cid of cc.memberClusterIds) {
+            const c = clusterById.get(cid);
+            if (c) origClusters.push(c);
+            const tile = tileByClusterId.get(cid);
+            if (tile) origTiles.push(tile);
+          }
+        }
+
+        const compTrials = origClusters.flatMap((c) => c.trials);
+        const tunerCounts = {
+          SymTuner: 0,
+          CMA_ES: 0,
+          Genetic: 0,
+          SuccessiveHalving: 0,
+          TPE: 0,
+          BayesianOptimization: 0,
+        } as Record<TunerType, number>;
+        for (const c of origClusters) {
+          for (const t of TUNER_NAMES) tunerCounts[t] += c.tunerCounts[t];
+        }
+
+        return {
+          comp,
+          origClusters,
+          origTiles,
+          compTrials,
+          tunerCounts,
+        };
+      });
+
+      const terrLabelTexts = generateSubRegionLabels(
+        componentRegions.map((region) => ({ trials: region.compTrials })),
+        allTrials,
+        data.paramStats,
+        data.labelParams,
+        importanceMap,
+      );
+
+      componentRegions.forEach(
+        ({ comp, origClusters, origTiles, compTrials, tunerCounts }, compIdx) => {
+          const terrText = terrLabelTexts[compIdx];
+          if (terrText) {
+            terrLabels.push({
+              tuner: comp.tuner,
+              x: comp.cx,
+              y: comp.cy,
+              color: TUNER_COLORS[comp.tuner],
+              text: terrText,
+              weight: comp.hexes.length,
+            });
+          }
+
+          if (origClusters.length === 0) return;
+
+          const pseudoTerritory: Omit<Territory, "label" | "subRegions"> = {
+            id: compIdx,
+            clusters: origClusters,
+            tiles: origTiles,
+            trials: compTrials,
+            totalTrials: compTrials.length,
+            tunerCounts,
+            centroidX: comp.cx,
+            centroidY: comp.cy,
+            pixelCentroidX: comp.cx,
+            pixelCentroidY: comp.cy,
+          };
+
+          const srRaws = buildSubRegionsForTerritory(
+            pseudoTerritory,
+            data.labelParams,
+            data.paramStats,
+          );
+          const srLabelTexts = generateSubRegionLabels(
+            srRaws,
+            compTrials,
+            data.paramStats,
+            data.labelParams,
+            importanceMap,
+          );
+
+          for (let i = 0; i < srRaws.length; i++) {
+            const text = srLabelTexts[i];
+            if (!text) continue;
+            // Recompute centroid using coarse hex positions (not fine-level tile positions)
+            const srClusters = srRaws[i].clusters;
+            let cx = 0,
+              cy = 0,
+              n = 0;
+            for (const c of srClusters) {
+              const pos = origClusterToCoarsePos.get(c.id);
+              if (pos) {
+                cx += pos.x;
+                cy += pos.y;
+                n++;
+              }
+            }
+            if (n === 0) continue;
+            srLabels.push({
+              x: cx / n,
+              y: cy / n,
+              text,
+              weight: srClusters.length,
+            });
+          }
+        },
+      );
+    }
+
+    return { terrBorderD, subBorderD, terrLabels, srLabels, hexSize };
+  }, [coarseHexLayout, detailLevel, data, activeCoarseLevel]);
+
+  const coarseMacroLabelPositions = useMemo(() => {
+    if (detailLevel === 4 || !coarseTerritoryData) return [];
+
+    const fs = 11 / scale;
+    const pad = 5 / scale;
+    const charW = fs * 0.58;
+    const rh = fs + pad * 2;
+    const gap = rh * 0.45;
+
+    type Bbox = { x: number; y: number; w: number; h: number };
+    const placed: Bbox[] = [];
+    const results: {
+      tuner: TunerType;
+      x: number;
+      y: number;
+      rw: number;
+      rh: number;
+      color: string;
+      label: string;
+    }[] = [];
+
+    const sorted = [...coarseTerritoryData.terrLabels]
+      .filter((terr) => terr.text.trim().length > 0)
+      .sort((a, b) => b.weight - a.weight);
+
+    for (const terr of sorted) {
+      const label = terr.text;
+      const rw = label.length * charW + pad * 2;
+      const candidates = [
+        { x: terr.x, y: terr.y },
+        { x: terr.x, y: terr.y - rh * 1.3 },
+        { x: terr.x, y: terr.y + rh * 1.3 },
+      ];
+
+      let chosen: { x: number; y: number } | null = null;
+      for (const c of candidates) {
+        const bb: Bbox = {
+          x: c.x - rw / 2 - gap / 2,
+          y: c.y - rh / 2 - gap / 2,
+          w: rw + gap,
+          h: rh + gap,
+        };
+        const overlaps = placed.some(
+          (p) =>
+            bb.x < p.x + p.w &&
+            bb.x + bb.w > p.x &&
+            bb.y < p.y + p.h &&
+            bb.y + bb.h > p.y,
+        );
+        if (!overlaps) {
+          chosen = c;
+          placed.push(bb);
+          break;
+        }
+      }
+
+      if (chosen) {
+        results.push({
+          tuner: terr.tuner,
+          x: chosen.x,
+          y: chosen.y,
+          rw,
+          rh,
+          color: terr.color,
+          label,
+        });
+      }
+    }
+
+    return results;
+  }, [coarseTerritoryData, detailLevel, scale]);
+
+  const coarseHexVisuals = useMemo(() => {
+    const map = new Map<number, { fill: string; stroke: string }>();
+    if (
+      detailLevel === 4 ||
+      coarseHexLayout.length === 0 ||
+      !data ||
+      !activeCoarseLevel
+    ) {
+      return map;
+    }
+
+    type CoarseHex = (typeof coarseHexLayout)[number];
+    const dirs = [
+      { dq: 1, dr: 0 },
+      { dq: 0, dr: 1 },
+      { dq: -1, dr: 1 },
+      { dq: -1, dr: 0 },
+      { dq: 0, dr: -1 },
+      { dq: 1, dr: -1 },
+    ];
+
+    const hexMap = new Map<string, CoarseHex>();
+    for (const h of coarseHexLayout) hexMap.set(`${h.q},${h.r}`, h);
+
+    const visited = new Set<string>();
+    const components: CoarseHex[][] = [];
+    for (const h of coarseHexLayout) {
+      const startKey = `${h.q},${h.r}`;
+      if (visited.has(startKey)) continue;
+      const group: CoarseHex[] = [];
+      const queue: CoarseHex[] = [h];
+      visited.add(startKey);
+      while (queue.length > 0) {
+        const cur = queue.shift()!;
+        group.push(cur);
+        for (const { dq, dr } of dirs) {
+          const nk = `${cur.q + dq},${cur.r + dr}`;
+          if (visited.has(nk)) continue;
+          const nb = hexMap.get(nk);
+          if (!nb) continue;
+          visited.add(nk);
+          queue.push(nb);
+        }
+      }
+      components.push(group);
+    }
+
+    const clusterById = new Map<number, Cluster>();
+    for (const c of data.clusters) clusterById.set(c.id, c);
+
+    const tileByClusterId = new Map<number, HexTile>();
+    for (const tile of data.hexTiles) {
+      if (tile.cluster) tileByClusterId.set(tile.cluster.id, tile);
+    }
+
+    const coarseClusterById = new Map<
+      number,
+      (typeof activeCoarseLevel.clusters)[number]
+    >();
+    for (const cc of activeCoarseLevel.clusters) coarseClusterById.set(cc.id, cc);
+
+    for (const component of components) {
+      const tunerCounts = {
+        SymTuner: 0,
+        CMA_ES: 0,
+        Genetic: 0,
+        SuccessiveHalving: 0,
+        TPE: 0,
+        BayesianOptimization: 0,
+      } as Record<TunerType, number>;
+      for (const coarseHex of component) {
+        tunerCounts[coarseHex.tuner] += 1;
+      }
+      const territoryColor = TUNER_COLORS[getDominantTuner(tunerCounts)];
+
+      const origClusters: Cluster[] = [];
+      const origTiles: HexTile[] = [];
+      for (const coarseHex of component) {
+        const cc = coarseClusterById.get(coarseHex.coarseId);
+        if (!cc) continue;
+        for (const cid of cc.memberClusterIds) {
+          const cluster = clusterById.get(cid);
+          if (cluster) origClusters.push(cluster);
+          const tile = tileByClusterId.get(cid);
+          if (tile) origTiles.push(tile);
+        }
+      }
+
+      const compTrials = origClusters.flatMap((cluster) => cluster.trials);
+      if (origClusters.length === 0) continue;
+
+      const pseudoTerritory: Omit<Territory, "label" | "subRegions"> = {
+        id: component[0].coarseId,
+        clusters: origClusters,
+        tiles: origTiles,
+        trials: compTrials,
+        totalTrials: compTrials.length,
+        tunerCounts: origClusters.reduce(
+          (acc, cluster) => {
+            for (const tuner of TUNER_NAMES) acc[tuner] += cluster.tunerCounts[tuner];
+            return acc;
+          },
+          {
+            SymTuner: 0,
+            CMA_ES: 0,
+            Genetic: 0,
+            SuccessiveHalving: 0,
+            TPE: 0,
+            BayesianOptimization: 0,
+          } as Record<TunerType, number>,
+        ),
+        centroidX: component.reduce((sum, h) => sum + h.x, 0) / component.length,
+        centroidY: component.reduce((sum, h) => sum + h.y, 0) / component.length,
+        pixelCentroidX:
+          component.reduce((sum, h) => sum + h.x, 0) / component.length,
+        pixelCentroidY:
+          component.reduce((sum, h) => sum + h.y, 0) / component.length,
+      };
+
+      const sortedSubRegions = [...buildSubRegionsForTerritory(
+        pseudoTerritory,
+        data.labelParams,
+        data.paramStats,
+      )].sort((a, b) => b.totalTrials - a.totalTrials);
+
+      if (sortedSubRegions.length === 0) {
+        for (const coarseHex of component) {
+          map.set(coarseHex.coarseId, {
+            fill: mixHexColors(territoryColor, "#FFFFFF", 0.65),
+            stroke: mixHexColors(territoryColor, "#475569", 0.2),
+          });
+        }
+        continue;
+      }
+
+      const coarseVotes = new Map<number, Map<number, number>>();
+      sortedSubRegions.forEach((sr, srIndex) => {
+        for (const cluster of sr.clusters) {
+          const coarseId = activeCoarseLevel.clusterIdToCoarseId.get(cluster.id);
+          if (coarseId === undefined) continue;
+          let votes = coarseVotes.get(coarseId);
+          if (!votes) {
+            votes = new Map<number, number>();
+            coarseVotes.set(coarseId, votes);
+          }
+          votes.set(srIndex, (votes.get(srIndex) ?? 0) + 1);
+        }
+      });
+
+      for (const coarseHex of component) {
+        const votes = coarseVotes.get(coarseHex.coarseId);
+        let chosenIndex = 0;
+        if (votes && votes.size > 0) {
+          chosenIndex = [...votes.entries()].sort((a, b) => b[1] - a[1])[0][0];
+        }
+        const palette = getSubRegionPaletteColor(
+          territoryColor,
+          chosenIndex,
+          sortedSubRegions.length,
+        );
+        map.set(coarseHex.coarseId, palette);
+      }
+    }
+
+    return map;
+  }, [activeCoarseLevel, coarseHexLayout, data, detailLevel]);
 
   // cluster.id → territory.id (used for focus-mode opacity and click routing)
   const clusterToTerrId = useMemo(() => {
@@ -954,7 +1465,7 @@ export function HexMap({
       cellTerritoryIds,
       neighborEdges,
     };
-  }, [data, layoutMode, width, height]);
+  }, [data, territories, layoutMode, width, height]);
 
   // Synthetic HexTile lookup for map mode (for reusing tooltip / click handlers)
   const voronoiTileMap = useMemo(() => {
@@ -1096,10 +1607,7 @@ export function HexMap({
       }
 
       const idx = d3.bisectRight(positiveBranchCoverages, coverage);
-      const t = Math.max(
-        0,
-        Math.min(1, idx / positiveBranchCoverages.length),
-      );
+      const t = Math.max(0, Math.min(1, idx / positiveBranchCoverages.length));
       return d3.interpolateRgb(white, green)(t);
     },
     [positiveBranchCoverages],
@@ -1154,17 +1662,19 @@ export function HexMap({
       switch (colorMode) {
         case "dominant": {
           const filteredCounts = Object.fromEntries(
-            TUNER_NAMES.filter((t) => selectedTuners.has(t)).map((t) => [t, tunerCounts[t]]),
+            TUNER_NAMES.filter((t) => selectedTuners.has(t)).map((t) => [
+              t,
+              tunerCounts[t],
+            ]),
           ) as Record<TunerType, number>;
           const dominant = getDominantTuner(filteredCounts);
           return TUNER_COLORS[dominant];
         }
 
         case "density": {
-          const selectedTotal = TUNER_NAMES.filter((t) => selectedTuners.has(t)).reduce(
-            (sum, t) => sum + tunerCounts[t],
-            0,
-          );
+          const selectedTotal = TUNER_NAMES.filter((t) =>
+            selectedTuners.has(t),
+          ).reduce((sum, t) => sum + tunerCounts[t], 0);
           return densityScale ? densityScale(selectedTotal) : "#F8FAFC";
         }
 
@@ -1190,55 +1700,6 @@ export function HexMap({
       getMarginalCoverageColor,
       selectedTuners,
     ],
-  );
-
-  // Render Hatching mode (using textures.js patterns)
-  const renderHatching = useCallback(
-    (tile: HexTile) => {
-      if (!tile.cluster) return null;
-
-      const filteredCounts: Record<TunerType, number> = {
-        SymTuner: selectedTuners.has("SymTuner")
-          ? tile.cluster.tunerCounts.SymTuner
-          : 0,
-        CMA_ES: selectedTuners.has("CMA_ES")
-          ? tile.cluster.tunerCounts.CMA_ES
-          : 0,
-        Genetic: selectedTuners.has("Genetic")
-          ? tile.cluster.tunerCounts.Genetic
-          : 0,
-        SuccessiveHalving: selectedTuners.has("SuccessiveHalving")
-          ? tile.cluster.tunerCounts.SuccessiveHalving
-          : 0,
-        TPE: selectedTuners.has("TPE")
-          ? tile.cluster.tunerCounts.TPE
-          : 0,
-        BayesianOptimization: selectedTuners.has("BayesianOptimization")
-          ? tile.cluster.tunerCounts.BayesianOptimization
-          : 0,
-      };
-      const total = Object.values(filteredCounts).reduce((a, b) => a + b, 0);
-      if (total === 0) return null;
-
-      return (
-        <g>
-          {TUNER_NAMES.filter((t) => filteredCounts[t] / total >= 0.05).map(
-            (tuner) => {
-              const ratio = filteredCounts[tuner] / total;
-              return (
-                <path
-                  key={tuner}
-                  d={hexPath}
-                  fill={textureInstances[tuner].url()}
-                  opacity={Math.min(1, ratio + 0.3)}
-                />
-              );
-            },
-          )}
-        </g>
-      );
-    },
-    [selectedTuners, hexPath, textureInstances],
   );
 
   // Build a map from hex coordinates to tile for neighbor lookup
@@ -1298,7 +1759,11 @@ export function HexMap({
       }
 
       // BFS: grow region from this seed
-      const region: QualRegion = { id: regionId++, label, clusterIds: new Set() };
+      const region: QualRegion = {
+        id: regionId++,
+        label,
+        clusterIds: new Set(),
+      };
       const queue: HexTile[] = [tile];
       visited.add(cid);
       region.clusterIds.add(cid);
@@ -1353,7 +1818,12 @@ export function HexMap({
       for (const tile of terr.tiles) {
         const k = `${tile.q},${tile.r}`;
         hexToTerr.set(k, terr.id);
-        if (tile.cluster && TUNER_NAMES.some((t) => selectedTuners.has(t) && tile.cluster!.tunerCounts[t] > 0))
+        if (
+          tile.cluster &&
+          TUNER_NAMES.some(
+            (t) => selectedTuners.has(t) && tile.cluster!.tunerCounts[t] > 0,
+          )
+        )
           visibleHex.add(k);
       }
       for (const sr of terr.subRegions) {
@@ -1444,7 +1914,7 @@ export function HexMap({
     }[] = [];
 
     const sorted = [...terr.subRegions]
-      .filter((sr) => sr.label)
+      .filter((sr) => sr.label.trim().length > 0)
       .sort((a, b) => b.totalTrials - a.totalTrials);
 
     for (const sr of sorted) {
@@ -1619,7 +2089,10 @@ export function HexMap({
   }, [data, territories, scale]);
 
   // Territory fills + borders: scaled hex fills, bridge quads between neighbors, boundary lines
-  const territoryScaleFactors = useMemo(() => [1.0, 0.82, 0.64, 0.5, 0.38, 0.28], []);
+  const territoryScaleFactors = useMemo(
+    () => [1.0, 0.82, 0.64, 0.5, 0.38, 0.28],
+    [],
+  );
   const renderTerritoryFillsAndBorders = useMemo(() => {
     if (!data || colorMode !== "territory") return null;
 
@@ -1890,92 +2363,6 @@ export function HexMap({
           height={height}
           style={{ flexShrink: 0 }}
         >
-          {/* ── Qualitative texture patterns ───────────────────── */}
-          <defs>
-            {/* Failure-prone: dense red dots */}
-            <pattern
-              id="qual-tex-failure"
-              patternUnits="userSpaceOnUse"
-              width={HEX_SIZE * 0.5}
-              height={HEX_SIZE * 0.5}
-            >
-              <circle
-                cx={HEX_SIZE * 0.25}
-                cy={HEX_SIZE * 0.25}
-                r={HEX_SIZE * 0.09}
-                fill="#EF4444"
-              />
-            </pattern>
-            {/* High Novelty: cross hatch purple */}
-            <pattern
-              id="qual-tex-novelty"
-              patternUnits="userSpaceOnUse"
-              width={HEX_SIZE * 0.6}
-              height={HEX_SIZE * 0.6}
-            >
-              <line
-                x1="0"
-                y1="0"
-                x2={HEX_SIZE * 0.6}
-                y2={HEX_SIZE * 0.6}
-                stroke="#8B5CF6"
-                strokeWidth={1.2}
-              />
-              <line
-                x1={HEX_SIZE * 0.6}
-                y1="0"
-                x2="0"
-                y2={HEX_SIZE * 0.6}
-                stroke="#8B5CF6"
-                strokeWidth={1.2}
-              />
-            </pattern>
-            {/* Saturated: sparse amber dots */}
-            <pattern
-              id="qual-tex-saturated"
-              patternUnits="userSpaceOnUse"
-              width={HEX_SIZE * 0.9}
-              height={HEX_SIZE * 0.9}
-            >
-              <circle
-                cx={HEX_SIZE * 0.45}
-                cy={HEX_SIZE * 0.45}
-                r={HEX_SIZE * 0.1}
-                fill="#F59E0B"
-              />
-            </pattern>
-            {/* High Coverage: diagonal green lines */}
-            <pattern
-              id="qual-tex-coverage"
-              patternUnits="userSpaceOnUse"
-              width={HEX_SIZE * 0.55}
-              height={HEX_SIZE * 0.55}
-            >
-              <line
-                x1="0"
-                y1={HEX_SIZE * 0.55}
-                x2={HEX_SIZE * 0.55}
-                y2="0"
-                stroke="#10B981"
-                strokeWidth={1.4}
-              />
-            </pattern>
-            {/* Volatile: wavy blue lines */}
-            <pattern
-              id="qual-tex-volatile"
-              patternUnits="userSpaceOnUse"
-              width={HEX_SIZE * 0.8}
-              height={HEX_SIZE * 0.5}
-            >
-              <path
-                d={`M0,${HEX_SIZE * 0.25} Q${HEX_SIZE * 0.2},0 ${HEX_SIZE * 0.4},${HEX_SIZE * 0.25} Q${HEX_SIZE * 0.6},${HEX_SIZE * 0.5} ${HEX_SIZE * 0.8},${HEX_SIZE * 0.25}`}
-                fill="none"
-                stroke="#3B82F6"
-                strokeWidth={1.3}
-              />
-            </pattern>
-          </defs>
-
           {layoutMode === "hex" && (
             /* ===== HEX GRID MODE ===== */
             <g
@@ -1996,24 +2383,101 @@ export function HexMap({
                 style={{ cursor: "default" }}
               />
 
-              {data.hexTiles.map((tile) => {
+              {/* ── Coarse level: one hex per super-cluster ──────────────── */}
+              {detailLevel < 4 && coarseHexLayout.map(({ coarseId, x, y, hexSize }) => {
+                const cPath = getHexPath(hexSize);
+                const visual = coarseHexVisuals.get(coarseId);
+                return (
+                  <g key={`coarse-${coarseId}`} transform={`translate(${x}, ${y})`}>
+                    <path
+                      d={cPath}
+                      fill={visual?.fill ?? "#CBD5E1"}
+                      stroke={visual?.stroke ?? "white"}
+                      strokeWidth={3}
+                      strokeLinejoin="round"
+                    />
+                  </g>
+                );
+              })}
+
+              {/* ── Coarse borders (L0–L3): sub-region style between hexes ──── */}
+              {detailLevel < 4 && coarseTerritoryData && (() => {
+                const { subBorderD, terrBorderD } = coarseTerritoryData;
+                return <>
+                  {subBorderD && <>
+                    <path d={subBorderD} fill="none" stroke="white"
+                      strokeWidth={3} strokeLinecap="round" opacity={0.55} pointerEvents="none" />
+                    <path d={subBorderD} fill="none" stroke="#64748B"
+                      strokeWidth={1.5} strokeDasharray={`${5},${4}`}
+                      strokeLinecap="round" opacity={0.7} pointerEvents="none" />
+                  </>}
+                  {terrBorderD && <>
+                    <path d={terrBorderD} fill="none" stroke="white"
+                      strokeWidth={7} strokeLinecap="round" strokeLinejoin="round"
+                      opacity={0.8} pointerEvents="none" />
+                    <path d={terrBorderD} fill="none" stroke="#475569"
+                      strokeWidth={3.5} strokeLinecap="round" strokeLinejoin="round"
+                      pointerEvents="none" />
+                  </>}
+                </>;
+              })()}
+
+              {/* ── Coarse macro labels (L0–L3): one label per dominant territory ── */}
+              {detailLevel < 4 && focusedTerritoryId === null &&
+                coarseMacroLabelPositions.map(
+                  ({ tuner, x, y, rw, rh, color, label }) => (
+                    <g key={`cmacro-${tuner}-${label}-${Math.round(x)}-${Math.round(y)}`} pointerEvents="none">
+                      <rect
+                        x={x - rw / 2}
+                        y={y - rh / 2}
+                        width={rw}
+                        height={rh}
+                        rx={rh / 2}
+                        fill="white"
+                        opacity={0.96}
+                      />
+                      <rect
+                        x={x - rw / 2}
+                        y={y - rh / 2}
+                        width={rw}
+                        height={rh}
+                        rx={rh / 2}
+                        fill="none"
+                        stroke={color}
+                        strokeWidth={1.75 / scale}
+                      />
+                      <text
+                        x={x}
+                        y={y}
+                        textAnchor="middle"
+                        dominantBaseline="middle"
+                        fontSize={11 / scale}
+                        fontWeight={700}
+                        fill={color}
+                      >
+                        {label}
+                      </text>
+                    </g>
+                  ),
+                )}
+
+              {/* ── Hex tiles (level 4 only): no hover-sensitive props so hover doesn't re-render all tiles ── */}
+              {detailLevel === 4 && data.hexTiles.map((tile) => {
                 if (!tile.cluster) return null;
 
-                // Hide tile if none of the selected tuners have any trials here
                 const hasSelectedTuner = TUNER_NAMES.some(
-                  (t) => selectedTuners.has(t) && tile.cluster!.tunerCounts[t] > 0,
+                  (t) =>
+                    selectedTuners.has(t) && tile.cluster!.tunerCounts[t] > 0,
                 );
                 if (!hasSelectedTuner) return null;
 
                 const fill = getHexFill(tile);
-                const isHovered = hoveredClusterId === tile.cluster.id;
                 const isInspected =
                   inspectedClusterId === tile.cluster.id &&
                   focusedTerritoryId !== null;
                 const isMuted =
                   focusedTerritoryId !== null &&
                   clusterToTerrId.get(tile.cluster.id) !== focusedTerritoryId;
-                // label hover takes priority over click-selection for dimming
                 const activeSubRegionId =
                   hoveredSubRegionId ?? focusedSubRegionId;
                 const isSubMuted =
@@ -2043,40 +2507,40 @@ export function HexMap({
                       stroke={
                         isInspected
                           ? "#4F46E5"
-                          : isHovered
-                            ? "#1E293B"
-                            : (clusterToSubRegionVisual.get(tile.cluster.id)
-                                ?.stroke ?? "#E2E8F0")
+                          : (clusterToSubRegionVisual.get(tile.cluster.id)
+                              ?.stroke ?? "#E2E8F0")
                       }
-                      strokeWidth={isInspected ? 3 : isHovered ? 2.5 : 0.5}
+                      strokeWidth={isInspected ? 3 : 0.5}
                     />
-                    {/* Qualitative region texture overlay */}
-                    {(() => {
-                      const qr = clusterToQualRegion.get(tile.cluster.id);
-                      if (!qr) return null;
-                      const m = clusterQualMetrics.get(tile.cluster.id);
-                      const hasSupport = (m?.trialCount ?? 0) >= 2;
-                      return (
-                        <path
-                          d={hexPath}
-                          fill={`url(#${QUAL_TEXTURE_ID[qr.label]})`}
-                          stroke={
-                            qr.label === "Failure-prone" ? "#EF4444" : "none"
-                          }
-                          strokeWidth={qr.label === "Failure-prone" ? 1.5 : 0}
-                          opacity={hasSupport ? 0.65 : 0.38}
-                          pointerEvents="none"
-                        />
-                      );
-                    })()}
                   </g>
                 );
               })}
 
-              {renderTerritoryFillsAndBorders}
+              {/* ── Hover + inspect highlight: separate overlay so hover doesn't re-render tiles ── */}
+              {hoveredClusterId !== null && (() => {
+                const tile = data.hexTiles.find(
+                  (t) => t.cluster?.id === hoveredClusterId,
+                );
+                if (!tile) return null;
+                return (
+                  <g
+                    transform={`translate(${tile.x}, ${tile.y})`}
+                    pointerEvents="none"
+                  >
+                    <path
+                      d={hexPath}
+                      fill="none"
+                      stroke="#1E293B"
+                      strokeWidth={2.5}
+                    />
+                  </g>
+                );
+              })()}
+
+              {detailLevel === 4 && renderTerritoryFillsAndBorders}
 
               {/* ── Macro boundaries: white halo pass (drawn first, behind) ── */}
-              {boundaryData.macro.map(({ d, terr }) => {
+              {detailLevel === 4 && boundaryData.macro.map(({ d, terr }) => {
                 if (!d) return null;
                 const isFocused = terr.id === focusedTerritoryId;
                 const isMuted = focusedTerritoryId !== null && !isFocused;
@@ -2097,7 +2561,7 @@ export function HexMap({
               })}
 
               {/* ── Macro boundaries: colored line pass ─────────────────── */}
-              {boundaryData.macro.map(({ d, terr }) => {
+              {detailLevel === 4 && boundaryData.macro.map(({ d, terr }) => {
                 if (!d) return null;
                 const isFocused = terr.id === focusedTerritoryId;
                 const isMuted = focusedTerritoryId !== null && !isFocused;
@@ -2117,7 +2581,7 @@ export function HexMap({
               })}
 
               {/* ── Sub-region boundaries: neutral, focus mode only ──────── */}
-              {focusedTerritoryId !== null && (
+              {detailLevel === 4 && focusedTerritoryId !== null && (
                 <>
                   {/* white halo (thin) */}
                   {boundaryData.sub
@@ -2158,7 +2622,7 @@ export function HexMap({
               )}
 
               {/* ── Sub-region labels: white bg + colored border + colored text ── */}
-              {subLabelPositions.map(({ sr, x, y, rw, rh: lh, color }) => {
+              {detailLevel === 4 && subLabelPositions.map(({ sr, x, y, rw, rh: lh, color }) => {
                 const isLabelHovered = hoveredSubRegionId === sr.id;
                 return (
                   <g
@@ -2214,7 +2678,7 @@ export function HexMap({
               })}
 
               {/* ── Macro territory labels: overview only ── */}
-              {focusedTerritoryId === null &&
+              {detailLevel === 4 && focusedTerritoryId === null &&
                 macroLabelPositions.map(
                   ({
                     terr: t,
@@ -2418,22 +2882,6 @@ export function HexMap({
                         />
                       </g>
                     )}
-
-                    {false && (
-                      <g clipPath={`url(#voronoi-clip-${cell.cluster.id})`}>
-                        <g transform={`translate(${cell.cx}, ${cell.cy})`}>
-                          {(() => {
-                            const cellRadius = Math.max(bw, bh) / 2;
-                            const scaleFactor = cellRadius / (HEX_SIZE * 0.85);
-                            return (
-                              <g transform={`scale(${scaleFactor})`}>
-                                {renderHatching(syntheticTile)}
-                              </g>
-                            );
-                          })()}
-                        </g>
-                      </g>
-                    )}
                   </g>
                 );
               })}
@@ -2602,7 +3050,7 @@ export function HexMap({
                     </div>
 
                     {/* Sub-region list */}
-                    {subMetrics.length > 1 && (
+                    {subMetrics.length > 0 && (
                       <>
                         <div
                           style={{
@@ -2684,14 +3132,24 @@ export function HexMap({
                                       </span>
                                       {(() => {
                                         // dominant qualitative class among clusters in this sub-region
-                                        const counts = new Map<QualitativeLabel, number>();
+                                        const counts = new Map<
+                                          QualitativeLabel,
+                                          number
+                                        >();
                                         for (const c of sr.clusters) {
-                                          const qr = clusterToQualRegion.get(c.id);
+                                          const qr = clusterToQualRegion.get(
+                                            c.id,
+                                          );
                                           if (!qr) continue;
-                                          counts.set(qr.label, (counts.get(qr.label) ?? 0) + 1);
+                                          counts.set(
+                                            qr.label,
+                                            (counts.get(qr.label) ?? 0) + 1,
+                                          );
                                         }
                                         if (counts.size === 0) return null;
-                                        const dominant = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+                                        const dominant = [
+                                          ...counts.entries(),
+                                        ].sort((a, b) => b[1] - a[1])[0][0];
                                         return (
                                           <span
                                             style={{
@@ -2701,8 +3159,10 @@ export function HexMap({
                                               fontSize: 8,
                                               fontWeight: 600,
                                               background:
-                                                QUAL_LABEL_COLORS[dominant] + "22",
-                                              color: QUAL_LABEL_COLORS[dominant],
+                                                QUAL_LABEL_COLORS[dominant] +
+                                                "22",
+                                              color:
+                                                QUAL_LABEL_COLORS[dominant],
                                               marginLeft: 4,
                                             }}
                                           >
@@ -2952,6 +3412,47 @@ export function HexMap({
             </div>
           </div>
 
+          {/* Detail Level */}
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontWeight: 600, marginBottom: 6, color: "#374151" }}>
+              Detail Level
+            </div>
+            <div style={{ display: "flex", gap: 3 }}>
+              {([0, 1, 2, 3, 4] as const).map((lv) => {
+                const coarseIdx = 3 - lv; // lv3→idx0, lv0→idx3
+                const count =
+                  lv === 4
+                    ? data.clusters.length
+                    : (coarseLevels[coarseIdx]?.k ?? "…");
+                return (
+                  <button
+                    key={lv}
+                    onClick={() => setDetailLevel(lv)}
+                    title={`Level ${lv}: ${count} clusters`}
+                    style={{
+                      flex: 1,
+                      padding: "5px 2px",
+                      fontSize: 10,
+                      fontWeight: 600,
+                      border: "1px solid",
+                      borderColor: detailLevel === lv ? "#4F46E5" : "#E5E7EB",
+                      borderRadius: 4,
+                      background: detailLevel === lv ? "#EEF2FF" : "white",
+                      color: detailLevel === lv ? "#4F46E5" : "#6B7280",
+                      cursor: "pointer",
+                      lineHeight: 1.2,
+                      textAlign: "center",
+                    }}
+                  >
+                    L{lv}
+                    <br />
+                    <span style={{ fontSize: 9, fontWeight: 400 }}>{count}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
           {/* Cluster count slider */}
           <div style={{ marginBottom: 20 }}>
             <div style={{ fontWeight: 600, marginBottom: 8, color: "#374151" }}>
@@ -3110,7 +3611,9 @@ export function HexMap({
                   gap: 12,
                 }}
               >
-                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <div
+                  style={{ display: "flex", flexDirection: "column", gap: 4 }}
+                >
                   <div
                     style={{
                       width: 18,
@@ -3120,7 +3623,13 @@ export function HexMap({
                       border: "1px solid #E5E7EB",
                     }}
                   />
-                  <div style={{ fontSize: 9, color: "#9CA3AF", textAlign: "center" }}>
+                  <div
+                    style={{
+                      fontSize: 9,
+                      color: "#9CA3AF",
+                      textAlign: "center",
+                    }}
+                  >
                     0
                   </div>
                 </div>
@@ -3190,7 +3699,9 @@ export function HexMap({
                   gap: 12,
                 }}
               >
-                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <div
+                  style={{ display: "flex", flexDirection: "column", gap: 4 }}
+                >
                   <div
                     style={{
                       width: 18,
@@ -3200,7 +3711,13 @@ export function HexMap({
                       border: "1px solid #E5E7EB",
                     }}
                   />
-                  <div style={{ fontSize: 9, color: "#9CA3AF", textAlign: "center" }}>
+                  <div
+                    style={{
+                      fontSize: 9,
+                      color: "#9CA3AF",
+                      textAlign: "center",
+                    }}
+                  >
                     0
                   </div>
                 </div>
@@ -3240,7 +3757,6 @@ export function HexMap({
               </div>
             </div>
           )}
-
 
           {colorMode === "density" && densityScale && data && (
             <div style={{ marginBottom: 20 }}>
@@ -3302,7 +3818,7 @@ export function HexMap({
             </div>
           )}
 
-          {/* Qualitative texture legend — always visible */}
+          {/* Qualitative label legend — always visible */}
           <div style={{ marginBottom: 20 }}>
             <div
               style={{
@@ -3313,7 +3829,7 @@ export function HexMap({
               }}
             >
               <div style={{ fontWeight: 600, color: "#374151" }}>
-                Texture Legend
+                Region Legend
               </div>
               <div
                 style={{
@@ -3328,176 +3844,41 @@ export function HexMap({
               </div>
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-              {(
-                [
-                  {
-                    label: "Failure-prone" as QualitativeLabel,
-                    desc: "Zero-coverage rate >20%",
-                    svg: (
-                      <svg width={22} height={14}>
-                        <defs>
-                          <pattern
-                            id="leg-failure"
-                            patternUnits="userSpaceOnUse"
-                            width={5}
-                            height={5}
-                          >
-                            <circle cx={2.5} cy={2.5} r={1.1} fill="#EF4444" />
-                          </pattern>
-                        </defs>
-                        <rect
-                          width={22}
-                          height={14}
-                          rx={2}
-                          fill="url(#leg-failure)"
-                          stroke="#EF444455"
-                          strokeWidth={1}
-                        />
-                      </svg>
-                    ),
-                  },
-                  {
-                    label: "High Novelty" as QualitativeLabel,
-                    desc: "High marginal gain",
-                    svg: (
-                      <svg width={22} height={14}>
-                        <defs>
-                          <pattern
-                            id="leg-novelty"
-                            patternUnits="userSpaceOnUse"
-                            width={7}
-                            height={7}
-                          >
-                            <line
-                              x1="0"
-                              y1="0"
-                              x2="7"
-                              y2="7"
-                              stroke="#8B5CF6"
-                              strokeWidth={1.2}
-                            />
-                            <line
-                              x1="7"
-                              y1="0"
-                              x2="0"
-                              y2="7"
-                              stroke="#8B5CF6"
-                              strokeWidth={1.2}
-                            />
-                          </pattern>
-                        </defs>
-                        <rect
-                          width={22}
-                          height={14}
-                          rx={2}
-                          fill="url(#leg-novelty)"
-                          stroke="#8B5CF655"
-                          strokeWidth={1}
-                        />
-                      </svg>
-                    ),
-                  },
-                  {
-                    label: "Saturated" as QualitativeLabel,
-                    desc: "High cov, low marginal",
-                    svg: (
-                      <svg width={22} height={14}>
-                        <defs>
-                          <pattern
-                            id="leg-saturated"
-                            patternUnits="userSpaceOnUse"
-                            width={9}
-                            height={9}
-                          >
-                            <circle cx={4.5} cy={4.5} r={1.4} fill="#F59E0B" />
-                          </pattern>
-                        </defs>
-                        <rect
-                          width={22}
-                          height={14}
-                          rx={2}
-                          fill="url(#leg-saturated)"
-                          stroke="#F59E0B55"
-                          strokeWidth={1}
-                        />
-                      </svg>
-                    ),
-                  },
-                  {
-                    label: "High Coverage" as QualitativeLabel,
-                    desc: "High total branch coverage",
-                    svg: (
-                      <svg width={22} height={14}>
-                        <defs>
-                          <pattern
-                            id="leg-coverage"
-                            patternUnits="userSpaceOnUse"
-                            width={6}
-                            height={6}
-                          >
-                            <line
-                              x1="0"
-                              y1="6"
-                              x2="6"
-                              y2="0"
-                              stroke="#10B981"
-                              strokeWidth={1.4}
-                            />
-                          </pattern>
-                        </defs>
-                        <rect
-                          width={22}
-                          height={14}
-                          rx={2}
-                          fill="url(#leg-coverage)"
-                          stroke="#10B98155"
-                          strokeWidth={1}
-                        />
-                      </svg>
-                    ),
-                  },
-                  {
-                    label: "Volatile" as QualitativeLabel,
-                    desc: "High coverage variance",
-                    svg: (
-                      <svg width={22} height={14}>
-                        <defs>
-                          <pattern
-                            id="leg-volatile"
-                            patternUnits="userSpaceOnUse"
-                            width={10}
-                            height={6}
-                          >
-                            <path
-                              d="M0,3 Q2.5,0 5,3 Q7.5,6 10,3"
-                              fill="none"
-                              stroke="#3B82F6"
-                              strokeWidth={1.3}
-                            />
-                          </pattern>
-                        </defs>
-                        <rect
-                          width={22}
-                          height={14}
-                          rx={2}
-                          fill="url(#leg-volatile)"
-                          stroke="#3B82F655"
-                          strokeWidth={1}
-                        />
-                      </svg>
-                    ),
-                  },
-                ] as Array<{
-                  label: QualitativeLabel;
-                  desc: string;
-                  svg: React.ReactNode;
-                }>
-              ).map(({ label, desc, svg }) => (
+              {[
+                {
+                  label: "Failure-prone" as QualitativeLabel,
+                  desc: "Zero-coverage rate >20%",
+                },
+                {
+                  label: "High Novelty" as QualitativeLabel,
+                  desc: "High marginal gain",
+                },
+                {
+                  label: "Saturated" as QualitativeLabel,
+                  desc: "High cov, low marginal",
+                },
+                {
+                  label: "High Coverage" as QualitativeLabel,
+                  desc: "High total branch coverage",
+                },
+                {
+                  label: "Volatile" as QualitativeLabel,
+                  desc: "High coverage variance",
+                },
+              ].map(({ label, desc }) => (
                 <div
                   key={label}
                   style={{ display: "flex", alignItems: "center", gap: 7 }}
                 >
-                  {svg}
+                  <div
+                    style={{
+                      width: 22,
+                      height: 14,
+                      borderRadius: 2,
+                      background: QUAL_LABEL_COLORS[label],
+                      flexShrink: 0,
+                    }}
+                  />
                   <div>
                     <div
                       style={{
@@ -3509,7 +3890,9 @@ export function HexMap({
                     >
                       {label}
                     </div>
-                    <div style={{ fontSize: 9, color: "#9CA3AF", lineHeight: 1.2 }}>
+                    <div
+                      style={{ fontSize: 9, color: "#9CA3AF", lineHeight: 1.2 }}
+                    >
                       {desc}
                     </div>
                   </div>
@@ -3527,7 +3910,7 @@ export function HexMap({
               }}
             >
               <p style={{ margin: 0 }}>
-                Texture = qualitative region (independent of color)
+                Color = qualitative region (independent of tuner color)
               </p>
               <p style={{ margin: "2px 0 0 0" }}>
                 Adjacent same-class clusters form one region

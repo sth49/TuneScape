@@ -209,6 +209,8 @@ function computeTunerBoundaries(
     'CMA_ES': [],
     'Genetic': [],
     'SuccessiveHalving': [],
+    'TPE': [],
+    'BayesianOptimization': [],
   };
 
   for (let r = 0; r < gridSize; r++) {
