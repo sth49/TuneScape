@@ -15,21 +15,17 @@ import React, {
   useRef,
 } from "react";
 import * as d3 from "d3";
-import type { ProcessedData } from "../types/data";
 import {
   getHexPath,
   getDominantTuner,
+  deserializePrecomputed,
   TUNER_COLORS,
   TUNER_NAMES,
-  buildCoarseLevels,
-  buildSubRegionsForTerritory,
-  generateSubRegionLabels,
   type HexMapData,
   type HexTile,
   type Cluster,
   type Territory,
   type SubRegion,
-  type CoarseLevel,
   type Trial,
   type TunerType,
 } from "../utils/hexMapUtils";
@@ -48,16 +44,9 @@ type ColorMode =
 type LayoutMode = "hex" | "map";
 
 interface HexMapProps {
-  width?: number;
-  height?: number;
   program?: string;
 }
 
-interface TooltipData {
-  cluster: Cluster;
-  x: number;
-  y: number;
-}
 
 interface VoronoiCell {
   cluster: Cluster;
@@ -242,7 +231,7 @@ const TUNER_DISPLAY_NAMES: Record<TunerType, string> = {
   BayesianOptimization: "Bayesian Opt.",
 };
 
-const HEX_SIZE = 32;
+const HEX_SIZE_DEFAULT = 32;
 
 const QUAL_LABEL_COLORS: Record<QualitativeLabel, string> = {
   "Failure-prone": "#EF4444",
@@ -250,14 +239,6 @@ const QUAL_LABEL_COLORS: Record<QualitativeLabel, string> = {
   Saturated: "#F59E0B",
   "High Coverage": "#10B981",
   Volatile: "#3B82F6",
-};
-
-const QUAL_LABEL_RATIONALE: Record<QualitativeLabel, string> = {
-  "Failure-prone": "High zero-coverage rate (>20%)",
-  "High Novelty": "High marginal coverage gain",
-  Saturated: "High total coverage, low marginal gain",
-  "High Coverage": "High total branch coverage",
-  Volatile: "High coverage variance across trials",
 };
 
 function clamp01(value: number): number {
@@ -281,6 +262,22 @@ function mixHexColors(colorA: string, colorB: string, t: number): string {
     .formatHex();
 }
 
+// Neutral territory palette — visually distinct without semantic meaning
+const TERRITORY_PALETTE = [
+  "#64748B", // slate-500
+  "#78716C", // stone-500
+  "#6B7280", // gray-500
+  "#71717A", // zinc-500
+  "#737373", // neutral-500
+  "#7C8594", // blue-gray
+  "#8B7E74", // warm-gray
+  "#6E7B8B", // cool-slate
+];
+
+function getTerritoryColor(territoryId: number): string {
+  return TERRITORY_PALETTE[territoryId % TERRITORY_PALETTE.length];
+}
+
 function getSubRegionPaletteColor(
   territoryColor: string,
   index: number,
@@ -289,15 +286,14 @@ function getSubRegionPaletteColor(
   const base = d3.hsl(territoryColor);
   const safeCount = Math.max(count, 1);
   const ratio = safeCount === 1 ? 0.5 : index / (safeCount - 1);
-  const hueShift = (ratio - 0.5) * 28;
-  const lightnessTargets = [0.84, 0.72, 0.6, 0.5];
-  const saturationTargets = [0.52, 0.62, 0.7, 0.78];
+  const hueShift = (ratio - 0.5) * 12;
+  const lightnessTargets = [0.78, 0.68, 0.58, 0.50];
   const targetIdx = Math.min(index, lightnessTargets.length - 1);
 
   const fill = d3
     .hsl(
       (base.h + hueShift + 360) % 360,
-      Math.max(base.s * 0.7, saturationTargets[targetIdx]),
+      Math.min(base.s, 0.15),
       lightnessTargets[targetIdx],
     )
     .formatHex();
@@ -349,24 +345,36 @@ function computeSRMetrics(trials: Trial[]): SRMetrics {
 // ============================================================
 
 export function HexMap({
-  width = 900,
-  height = 750,
   program = "gawk",
 }: HexMapProps) {
-  const [data, setData] = useState<HexMapData | null>(null);
-  const [rawTunerData, setRawTunerData] = useState<ProcessedData[] | null>(
-    null,
-  );
-  const [shapImportance, setShapImportance] = useState<
-    { name: string; importance: number }[]
-  >([]);
+  // Responsive sizing: measure the container
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerSize, setContainerSize] = useState({ width: 900, height: 750 });
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const { width: w, height: h } = entries[0].contentRect;
+      if (w > 0 && h > 0) setContainerSize({ width: w, height: h });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const MAP_RATIO = 0.7; // 7:3 split
+  const svgWidth = Math.floor(containerSize.width * MAP_RATIO);
+  const panelWidth = containerSize.width - svgWidth;
+  const height = containerSize.height;
+  // All 5 levels: index 0 = L0, ... 4 = L4
+  const [allLevels, setAllLevels] = useState<HexMapData[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const [colorMode, setColorMode] = useState<ColorMode>("pixel");
+  const [previewColorMode, setPreviewColorMode] = useState<ColorMode | null>(null);
   const [layoutMode, setLayoutMode] = useState<LayoutMode>("hex");
-  const [tooltip, setTooltip] = useState<TooltipData | null>(null);
-  // hover: tooltip only — never drives focus or selection
+  // hover: drives sub-region / territory highlight
   const [hoveredClusterId, setHoveredClusterId] = useState<number | null>(null);
   // 1st click: territory focus; 2nd click within territory: cluster inspect
   const [focusedTerritoryId, setFocusedTerritoryId] = useState<number | null>(
@@ -380,105 +388,69 @@ export function HexMap({
   const [hoveredSubRegionId, setHoveredSubRegionId] = useState<number | null>(
     null,
   );
+  // territory hover — highlights the hovered territory's sub-region on tile hover
+  const [hoveredTerritoryId, setHoveredTerritoryId] = useState<number | null>(
+    null,
+  );
   // cluster detail panel — only set from within a focused territory
   const [inspectedClusterId, setInspectedClusterId] = useState<number | null>(
     null,
   );
+  // Control panel tuner hover — highlight tiles containing that tuner
+  const [previewTuner, setPreviewTuner] = useState<TunerType | null>(null);
 
   const [selectedTuners, setSelectedTuners] = useState<Set<TunerType>>(
     new Set(TUNER_NAMES),
   );
-  const [numClusters, setNumClusters] = useState<number>(200);
   // 4 = finest (current clusters), 3/2/1/0 = progressively coarser merged levels
   const [detailLevel, setDetailLevel] = useState<number>(4);
+  const [previewDetailLevel, setPreviewDetailLevel] = useState<number | null>(null);
 
   const svgRef = useRef<SVGSVGElement>(null);
-  const workerRef = useRef<Worker | null>(null);
-  const computationIdRef = useRef(0);
 
-  // Initialize Web Worker once
-  useEffect(() => {
-    const worker = new Worker(
-      new URL("../workers/hexMapWorker.ts", import.meta.url),
-      { type: "module" },
-    );
-    workerRef.current = worker;
-    return () => {
-      worker.terminate();
-    };
-  }, []);
-
-  // Effect 1: Fetch raw data when program changes
+  // Load pre-computed multi-level HexMap data
   useEffect(() => {
     let cancelled = false;
 
-    async function loadData() {
+    async function loadPrecomputed() {
       setLoading(true);
       setError(null);
-      setRawTunerData(null);
+      setAllLevels([]);
 
       try {
-        const tunerFiles = TUNER_NAMES.map(
-          (tuner) => `/data/${program}_${tuner}_processed.json`,
-        );
-        const responses = await Promise.all(
-          tunerFiles.map((url) =>
-            fetch(url).then((r) => {
-              if (!r.ok) throw new Error(`Failed to load ${url}`);
-              return r.json();
-            }),
-          ),
-        );
+        const url = `/data/${program}_hexmap_precomputed.json`;
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`Failed to load ${url}`);
+        const json = await resp.json();
         if (cancelled) return;
 
-        const decisionTreeData = await fetch(
-          "/data/decision_tree_data.json",
-        ).then((r) => r.json());
-        if (cancelled) return;
-
-        setRawTunerData(responses);
-        setShapImportance(
-          decisionTreeData[program]?.SymTuner?.param_importance || [],
-        );
+        const levels = deserializePrecomputed(json);
+        setAllLevels(levels);
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "Failed to load data");
-          setLoading(false);
         }
+      } finally {
+        if (!cancelled) setLoading(false);
       }
     }
 
-    loadData();
+    loadPrecomputed();
     return () => {
       cancelled = true;
     };
   }, [program]);
 
-  // Effect 2: Re-process via Web Worker when raw data or numClusters changes (NOT selectedTuners)
-  useEffect(() => {
-    if (!rawTunerData || !workerRef.current) return;
-    setLoading(true);
-    const id = ++computationIdRef.current;
-    workerRef.current.postMessage({
-      id,
-      tunerData: rawTunerData,
-      shapImportance,
-      numClusters,
-    });
-    workerRef.current.onmessage = (e: MessageEvent) => {
-      if (e.data.id !== computationIdRef.current) return; // stale result, discard
-      if (e.data.error) {
-        setError(e.data.error);
-      } else {
-        setData(e.data.result);
-      }
-      setLoading(false);
-    };
-  }, [rawTunerData, numClusters, shapImportance]);
+  // Effective values (preview overrides actual for hover preview)
+  const effectiveDetailLevel = previewDetailLevel ?? detailLevel;
+  const effectiveColorMode = previewColorMode ?? colorMode;
+
+  // Active data for current detail level
+  const data = allLevels[effectiveDetailLevel] ?? null;
+  const HEX_SIZE = data?.hexSize ?? HEX_SIZE_DEFAULT;
 
   // Compute transform to fit and center the honeycomb
   const { centerX, centerY, scale } = useMemo(() => {
-    const svgWidth = width - 200; // always: focusPanel(260) + controls(200)
     const svgHeight = height - 80;
 
     if (!data || data.hexTiles.length === 0) {
@@ -509,7 +481,7 @@ export function HexMap({
       centerY: svgHeight / 2,
       scale: fitScale,
     };
-  }, [data, width, height]);
+  }, [data, svgWidth, height, HEX_SIZE]);
 
   // Compute data center for transform
   const dataCenter = useMemo(() => {
@@ -524,590 +496,21 @@ export function HexMap({
   }, [data]);
 
   // Hex path
-  const hexPath = useMemo(() => getHexPath(HEX_SIZE), []);
+  const hexPath = useMemo(() => getHexPath(HEX_SIZE), [HEX_SIZE]);
 
   // Territories are pre-computed in processHexMapData (hexMapUtils.ts)
   // Wrapped in useMemo so the array reference is stable across renders.
   const territories = useMemo<Territory[]>(() => data?.territories ?? [], [data]);
 
-  // ── Coarse levels: 4 levels built by merging clusters spatially ─
-  // coarseLevels[0] = level3 (≈50% of clusters), ..., [3] = level0 (≈6%)
-  const coarseLevels = useMemo<CoarseLevel[]>(() => {
-    if (!data) return [];
-    return buildCoarseLevels(data);
-  }, [data]);
+  // Reset focus when detail level changes (including preview)
+  useEffect(() => {
+    setFocusedTerritoryId(null);
+    setFocusedSubRegionId(null);
+    setInspectedClusterId(null);
+    setHoveredClusterId(null);
+  }, [effectiveDetailLevel]);
 
-  // Active coarse level data when detailLevel < 4
-  const activeCoarseLevel = useMemo<CoarseLevel | null>(() => {
-    if (detailLevel === 4) return null;
-    return coarseLevels[3 - detailLevel] ?? null; // level3→idx0, ..., level0→idx3
-  }, [detailLevel, coarseLevels]);
 
-  // Each coarse cluster → one hex at its centroid, snapped to a coarser hex grid.
-  // hexSize scales up so the cluster count × hex area ≈ the fine level's total area.
-  const coarseHexLayout = useMemo<{
-    coarseId: number; q: number; r: number; x: number; y: number;
-    hexSize: number; color: string; tuner: TunerType; label: string;
-  }[]>(() => {
-    if (!activeCoarseLevel || !data) return [];
-
-    const { clusters: coarseClusters } = activeCoarseLevel;
-    const k = coarseClusters.length;
-    const n = data.clusters.length;
-    // Hex size grows so that k coarse hexes fill the same visual area as n fine hexes
-    const hexSize = HEX_SIZE * Math.sqrt(n / Math.max(k, 1));
-
-    // flat-top axial ↔ pixel helpers
-    const pixelToAxial = (px: number, py: number, s: number) => ({
-      fq: (2 / 3) * px / s,
-      fr: (-1 / 3) * px / s + (Math.sqrt(3) / 3) * py / s,
-    });
-    const hexRound = (fq: number, fr: number) => {
-      const fs = -fq - fr;
-      let rq = Math.round(fq), rr = Math.round(fr);
-      const rs = Math.round(fs);
-      const dq = Math.abs(rq - fq), dr = Math.abs(rr - fr), ds = Math.abs(rs - fs);
-      if (dq > dr && dq > ds) rq = -rr - rs;
-      else if (dr > ds) rr = -rq - rs;
-      return { q: rq, r: rr };
-    };
-    const axialToPixel = (q: number, r: number, s: number) => ({
-      x: s * 1.5 * q,
-      y: s * (Math.sqrt(3) / 2 * q + Math.sqrt(3) * r),
-    });
-
-    const HEX_DIRS = [
-      { dq: 1, dr: 0 }, { dq: 0, dr: 1 }, { dq: -1, dr: 1 },
-      { dq: -1, dr: 0 }, { dq: 0, dr: -1 }, { dq: 1, dr: -1 },
-    ];
-
-    // Largest clusters get first pick of hex positions
-    const sorted = [...coarseClusters].sort((a, b) => b.totalTrials - a.totalTrials);
-    const usedPositions = new Map<string, true>();
-    const result: {
-      coarseId: number; q: number; r: number; x: number; y: number;
-      hexSize: number; color: string; tuner: TunerType; label: string;
-    }[] = [];
-
-    for (const cc of sorted) {
-      const tuner = getDominantTuner(cc.tunerCounts);
-      const color = TUNER_COLORS[tuner];
-      const { fq, fr } = pixelToAxial(cc.pixelCentroidX, cc.pixelCentroidY, hexSize);
-      let { q, r } = hexRound(fq, fr);
-
-      // Spiral outward until an empty hex position is found
-      if (usedPositions.has(`${q},${r}`)) {
-        const tried = new Set([`${q},${r}`]);
-        const queue = [{ q, r }];
-        let placed = false;
-        outer: while (queue.length > 0) {
-          const cur = queue.shift()!;
-          for (const { dq, dr } of HEX_DIRS) {
-            const nq = cur.q + dq, nr = cur.r + dr;
-            const nk = `${nq},${nr}`;
-            if (tried.has(nk)) continue;
-            tried.add(nk);
-            if (!usedPositions.has(nk)) {
-              q = nq; r = nr; placed = true; break outer;
-            }
-            queue.push({ q: nq, r: nr });
-          }
-        }
-        if (!placed) continue;
-      }
-
-      usedPositions.set(`${q},${r}`, true);
-      const { x, y } = axialToPixel(q, r, hexSize);
-      result.push({ coarseId: cc.id, q, r, x, y, hexSize, color, tuner, label: cc.label });
-    }
-
-    return result;
-  }, [activeCoarseLevel, data]);
-
-  // Territory/sub-region structure for coarse levels (L0–L3)
-  // - Territory = BFS connected component of same-tuner coarse hexes
-  // - Sub-region border = internal edge between two adjacent coarse hexes of the same territory
-  // - Territory border = external edge toward a different tuner or empty
-  const coarseTerritoryData = useMemo(() => {
-    if (detailLevel === 4 || coarseHexLayout.length === 0) return null;
-
-    const hexSize = coarseHexLayout[0].hexSize;
-    const DIRS = [
-      { dq: 1, dr: 0 }, { dq: 0, dr: 1 }, { dq: -1, dr: 1 },
-      { dq: -1, dr: 0 }, { dq: 0, dr: -1 }, { dq: 1, dr: -1 },
-    ];
-    const verts = Array.from({ length: 6 }, (_, i) => ({
-      x: hexSize * Math.cos((i * Math.PI) / 3),
-      y: hexSize * Math.sin((i * Math.PI) / 3),
-    }));
-
-    type CoarseHex = typeof coarseHexLayout[0];
-    const hexMap = new Map<string, CoarseHex>();
-    for (const h of coarseHexLayout) hexMap.set(`${h.q},${h.r}`, h);
-
-    // BFS: find connected occupied components, matching L4 territory logic.
-    type Component = {
-      tuner: TunerType;
-      hexes: CoarseHex[];
-      cx: number;
-      cy: number;
-    };
-    const visited = new Set<string>();
-    const components: Component[] = [];
-
-    for (const h of coarseHexLayout) {
-      const k = `${h.q},${h.r}`;
-      if (visited.has(k)) continue;
-      const group: CoarseHex[] = [];
-      const queue: CoarseHex[] = [h];
-      visited.add(k);
-      while (queue.length > 0) {
-        const cur = queue.shift()!;
-        group.push(cur);
-        for (const { dq, dr } of DIRS) {
-          const nk = `${cur.q + dq},${cur.r + dr}`;
-          if (visited.has(nk)) continue;
-          const nb = hexMap.get(nk);
-          if (!nb) continue;
-          visited.add(nk);
-          queue.push(nb);
-        }
-      }
-      const tunerCounts = {
-        SymTuner: 0,
-        CMA_ES: 0,
-        Genetic: 0,
-        SuccessiveHalving: 0,
-        TPE: 0,
-        BayesianOptimization: 0,
-      } as Record<TunerType, number>;
-      for (const member of group) {
-        tunerCounts[member.tuner] += 1;
-      }
-      const tuner = getDominantTuner(tunerCounts);
-      components.push({
-        tuner,
-        hexes: group,
-        cx: group.reduce((s, x) => s + x.x, 0) / group.length,
-        cy: group.reduce((s, x) => s + x.y, 0) / group.length,
-      });
-    }
-
-    // Map each hex to its component index
-    const hexToComp = new Map<string, number>();
-    components.forEach((comp, idx) => {
-      for (const h of comp.hexes) hexToComp.set(`${h.q},${h.r}`, idx);
-    });
-
-    // Build border paths
-    let terrBorderD = '';
-    let subBorderD = '';
-
-    for (const h of coarseHexLayout) {
-      const myComp = hexToComp.get(`${h.q},${h.r}`)!;
-      for (let ei = 0; ei < 6; ei++) {
-        const { dq, dr } = DIRS[ei];
-        const nk = `${h.q + dq},${h.r + dr}`;
-        const nb = hexMap.get(nk);
-        const va = verts[ei], vb = verts[(ei + 1) % 6];
-        const seg = `M${h.x + va.x},${h.y + va.y}L${h.x + vb.x},${h.y + vb.y}`;
-        if (!nb || hexToComp.get(nk) !== myComp) {
-          terrBorderD += seg;
-        } else if (nb.tuner !== h.tuner) {
-          subBorderD += seg;
-        }
-      }
-    }
-
-    const terrLabels: {
-      tuner: TunerType;
-      x: number;
-      y: number;
-      color: string;
-      text: string;
-      weight: number;
-    }[] = [];
-
-    // Sub-region labels: same approach as L4 — buildSubRegionsForTerritory per component,
-    // then generateSubRegionLabels for contrastive parameter labels.
-    const srLabels: { x: number; y: number; text: string; weight: number }[] =
-      [];
-    if (data && activeCoarseLevel) {
-      const clusterById = new Map<number, Cluster>();
-      for (const c of data.clusters) clusterById.set(c.id, c);
-      const tileByClusterId = new Map<number, HexTile>();
-      for (const tile of data.hexTiles) {
-        if (tile.cluster) tileByClusterId.set(tile.cluster.id, tile);
-      }
-      const coarseClusterById = new Map<number, typeof activeCoarseLevel.clusters[0]>();
-      for (const cc of activeCoarseLevel.clusters) coarseClusterById.set(cc.id, cc);
-      const importanceMap = new Map(data.paramImportance.map(p => [p.name, p.importance]));
-
-      const allTrials = data.clusters.flatMap((c) => c.trials);
-
-      // orig cluster id → coarse hex position (for label placement at coarse level coords)
-      const origClusterToCoarsePos = new Map<number, { x: number; y: number }>();
-      for (const h of coarseHexLayout) {
-        const cc = coarseClusterById.get(h.coarseId);
-        if (!cc) continue;
-        for (const cid of cc.memberClusterIds) origClusterToCoarsePos.set(cid, { x: h.x, y: h.y });
-      }
-
-      const componentRegions = components.map((comp) => {
-        const origClusters: Cluster[] = [];
-        const origTiles: HexTile[] = [];
-        for (const h of comp.hexes) {
-          const cc = coarseClusterById.get(h.coarseId);
-          if (!cc) continue;
-          for (const cid of cc.memberClusterIds) {
-            const c = clusterById.get(cid);
-            if (c) origClusters.push(c);
-            const tile = tileByClusterId.get(cid);
-            if (tile) origTiles.push(tile);
-          }
-        }
-
-        const compTrials = origClusters.flatMap((c) => c.trials);
-        const tunerCounts = {
-          SymTuner: 0,
-          CMA_ES: 0,
-          Genetic: 0,
-          SuccessiveHalving: 0,
-          TPE: 0,
-          BayesianOptimization: 0,
-        } as Record<TunerType, number>;
-        for (const c of origClusters) {
-          for (const t of TUNER_NAMES) tunerCounts[t] += c.tunerCounts[t];
-        }
-
-        return {
-          comp,
-          origClusters,
-          origTiles,
-          compTrials,
-          tunerCounts,
-        };
-      });
-
-      const terrLabelTexts = generateSubRegionLabels(
-        componentRegions.map((region) => ({ trials: region.compTrials })),
-        allTrials,
-        data.paramStats,
-        data.labelParams,
-        importanceMap,
-      );
-
-      componentRegions.forEach(
-        ({ comp, origClusters, origTiles, compTrials, tunerCounts }, compIdx) => {
-          const terrText = terrLabelTexts[compIdx];
-          if (terrText) {
-            terrLabels.push({
-              tuner: comp.tuner,
-              x: comp.cx,
-              y: comp.cy,
-              color: TUNER_COLORS[comp.tuner],
-              text: terrText,
-              weight: comp.hexes.length,
-            });
-          }
-
-          if (origClusters.length === 0) return;
-
-          const pseudoTerritory: Omit<Territory, "label" | "subRegions"> = {
-            id: compIdx,
-            clusters: origClusters,
-            tiles: origTiles,
-            trials: compTrials,
-            totalTrials: compTrials.length,
-            tunerCounts,
-            centroidX: comp.cx,
-            centroidY: comp.cy,
-            pixelCentroidX: comp.cx,
-            pixelCentroidY: comp.cy,
-          };
-
-          const srRaws = buildSubRegionsForTerritory(
-            pseudoTerritory,
-            data.labelParams,
-            data.paramStats,
-          );
-          const srLabelTexts = generateSubRegionLabels(
-            srRaws,
-            compTrials,
-            data.paramStats,
-            data.labelParams,
-            importanceMap,
-          );
-
-          for (let i = 0; i < srRaws.length; i++) {
-            const text = srLabelTexts[i];
-            if (!text) continue;
-            // Recompute centroid using coarse hex positions (not fine-level tile positions)
-            const srClusters = srRaws[i].clusters;
-            let cx = 0,
-              cy = 0,
-              n = 0;
-            for (const c of srClusters) {
-              const pos = origClusterToCoarsePos.get(c.id);
-              if (pos) {
-                cx += pos.x;
-                cy += pos.y;
-                n++;
-              }
-            }
-            if (n === 0) continue;
-            srLabels.push({
-              x: cx / n,
-              y: cy / n,
-              text,
-              weight: srClusters.length,
-            });
-          }
-        },
-      );
-    }
-
-    return { terrBorderD, subBorderD, terrLabels, srLabels, hexSize };
-  }, [coarseHexLayout, detailLevel, data, activeCoarseLevel]);
-
-  const coarseMacroLabelPositions = useMemo(() => {
-    if (detailLevel === 4 || !coarseTerritoryData) return [];
-
-    const fs = 11 / scale;
-    const pad = 5 / scale;
-    const charW = fs * 0.58;
-    const rh = fs + pad * 2;
-    const gap = rh * 0.45;
-
-    type Bbox = { x: number; y: number; w: number; h: number };
-    const placed: Bbox[] = [];
-    const results: {
-      tuner: TunerType;
-      x: number;
-      y: number;
-      rw: number;
-      rh: number;
-      color: string;
-      label: string;
-    }[] = [];
-
-    const sorted = [...coarseTerritoryData.terrLabels]
-      .filter((terr) => terr.text.trim().length > 0)
-      .sort((a, b) => b.weight - a.weight);
-
-    for (const terr of sorted) {
-      const label = terr.text;
-      const rw = label.length * charW + pad * 2;
-      const candidates = [
-        { x: terr.x, y: terr.y },
-        { x: terr.x, y: terr.y - rh * 1.3 },
-        { x: terr.x, y: terr.y + rh * 1.3 },
-      ];
-
-      let chosen: { x: number; y: number } | null = null;
-      for (const c of candidates) {
-        const bb: Bbox = {
-          x: c.x - rw / 2 - gap / 2,
-          y: c.y - rh / 2 - gap / 2,
-          w: rw + gap,
-          h: rh + gap,
-        };
-        const overlaps = placed.some(
-          (p) =>
-            bb.x < p.x + p.w &&
-            bb.x + bb.w > p.x &&
-            bb.y < p.y + p.h &&
-            bb.y + bb.h > p.y,
-        );
-        if (!overlaps) {
-          chosen = c;
-          placed.push(bb);
-          break;
-        }
-      }
-
-      if (chosen) {
-        results.push({
-          tuner: terr.tuner,
-          x: chosen.x,
-          y: chosen.y,
-          rw,
-          rh,
-          color: terr.color,
-          label,
-        });
-      }
-    }
-
-    return results;
-  }, [coarseTerritoryData, detailLevel, scale]);
-
-  const coarseHexVisuals = useMemo(() => {
-    const map = new Map<number, { fill: string; stroke: string }>();
-    if (
-      detailLevel === 4 ||
-      coarseHexLayout.length === 0 ||
-      !data ||
-      !activeCoarseLevel
-    ) {
-      return map;
-    }
-
-    type CoarseHex = (typeof coarseHexLayout)[number];
-    const dirs = [
-      { dq: 1, dr: 0 },
-      { dq: 0, dr: 1 },
-      { dq: -1, dr: 1 },
-      { dq: -1, dr: 0 },
-      { dq: 0, dr: -1 },
-      { dq: 1, dr: -1 },
-    ];
-
-    const hexMap = new Map<string, CoarseHex>();
-    for (const h of coarseHexLayout) hexMap.set(`${h.q},${h.r}`, h);
-
-    const visited = new Set<string>();
-    const components: CoarseHex[][] = [];
-    for (const h of coarseHexLayout) {
-      const startKey = `${h.q},${h.r}`;
-      if (visited.has(startKey)) continue;
-      const group: CoarseHex[] = [];
-      const queue: CoarseHex[] = [h];
-      visited.add(startKey);
-      while (queue.length > 0) {
-        const cur = queue.shift()!;
-        group.push(cur);
-        for (const { dq, dr } of dirs) {
-          const nk = `${cur.q + dq},${cur.r + dr}`;
-          if (visited.has(nk)) continue;
-          const nb = hexMap.get(nk);
-          if (!nb) continue;
-          visited.add(nk);
-          queue.push(nb);
-        }
-      }
-      components.push(group);
-    }
-
-    const clusterById = new Map<number, Cluster>();
-    for (const c of data.clusters) clusterById.set(c.id, c);
-
-    const tileByClusterId = new Map<number, HexTile>();
-    for (const tile of data.hexTiles) {
-      if (tile.cluster) tileByClusterId.set(tile.cluster.id, tile);
-    }
-
-    const coarseClusterById = new Map<
-      number,
-      (typeof activeCoarseLevel.clusters)[number]
-    >();
-    for (const cc of activeCoarseLevel.clusters) coarseClusterById.set(cc.id, cc);
-
-    for (const component of components) {
-      const tunerCounts = {
-        SymTuner: 0,
-        CMA_ES: 0,
-        Genetic: 0,
-        SuccessiveHalving: 0,
-        TPE: 0,
-        BayesianOptimization: 0,
-      } as Record<TunerType, number>;
-      for (const coarseHex of component) {
-        tunerCounts[coarseHex.tuner] += 1;
-      }
-      const territoryColor = TUNER_COLORS[getDominantTuner(tunerCounts)];
-
-      const origClusters: Cluster[] = [];
-      const origTiles: HexTile[] = [];
-      for (const coarseHex of component) {
-        const cc = coarseClusterById.get(coarseHex.coarseId);
-        if (!cc) continue;
-        for (const cid of cc.memberClusterIds) {
-          const cluster = clusterById.get(cid);
-          if (cluster) origClusters.push(cluster);
-          const tile = tileByClusterId.get(cid);
-          if (tile) origTiles.push(tile);
-        }
-      }
-
-      const compTrials = origClusters.flatMap((cluster) => cluster.trials);
-      if (origClusters.length === 0) continue;
-
-      const pseudoTerritory: Omit<Territory, "label" | "subRegions"> = {
-        id: component[0].coarseId,
-        clusters: origClusters,
-        tiles: origTiles,
-        trials: compTrials,
-        totalTrials: compTrials.length,
-        tunerCounts: origClusters.reduce(
-          (acc, cluster) => {
-            for (const tuner of TUNER_NAMES) acc[tuner] += cluster.tunerCounts[tuner];
-            return acc;
-          },
-          {
-            SymTuner: 0,
-            CMA_ES: 0,
-            Genetic: 0,
-            SuccessiveHalving: 0,
-            TPE: 0,
-            BayesianOptimization: 0,
-          } as Record<TunerType, number>,
-        ),
-        centroidX: component.reduce((sum, h) => sum + h.x, 0) / component.length,
-        centroidY: component.reduce((sum, h) => sum + h.y, 0) / component.length,
-        pixelCentroidX:
-          component.reduce((sum, h) => sum + h.x, 0) / component.length,
-        pixelCentroidY:
-          component.reduce((sum, h) => sum + h.y, 0) / component.length,
-      };
-
-      const sortedSubRegions = [...buildSubRegionsForTerritory(
-        pseudoTerritory,
-        data.labelParams,
-        data.paramStats,
-      )].sort((a, b) => b.totalTrials - a.totalTrials);
-
-      if (sortedSubRegions.length === 0) {
-        for (const coarseHex of component) {
-          map.set(coarseHex.coarseId, {
-            fill: mixHexColors(territoryColor, "#FFFFFF", 0.65),
-            stroke: mixHexColors(territoryColor, "#475569", 0.2),
-          });
-        }
-        continue;
-      }
-
-      const coarseVotes = new Map<number, Map<number, number>>();
-      sortedSubRegions.forEach((sr, srIndex) => {
-        for (const cluster of sr.clusters) {
-          const coarseId = activeCoarseLevel.clusterIdToCoarseId.get(cluster.id);
-          if (coarseId === undefined) continue;
-          let votes = coarseVotes.get(coarseId);
-          if (!votes) {
-            votes = new Map<number, number>();
-            coarseVotes.set(coarseId, votes);
-          }
-          votes.set(srIndex, (votes.get(srIndex) ?? 0) + 1);
-        }
-      });
-
-      for (const coarseHex of component) {
-        const votes = coarseVotes.get(coarseHex.coarseId);
-        let chosenIndex = 0;
-        if (votes && votes.size > 0) {
-          chosenIndex = [...votes.entries()].sort((a, b) => b[1] - a[1])[0][0];
-        }
-        const palette = getSubRegionPaletteColor(
-          territoryColor,
-          chosenIndex,
-          sortedSubRegions.length,
-        );
-        map.set(coarseHex.coarseId, palette);
-      }
-    }
-
-    return map;
-  }, [activeCoarseLevel, coarseHexLayout, data, detailLevel]);
 
   // cluster.id → territory.id (used for focus-mode opacity and click routing)
   const clusterToTerrId = useMemo(() => {
@@ -1124,23 +527,22 @@ export function HexMap({
     return data.clusters.find((c) => c.id === inspectedClusterId) ?? null;
   }, [data, inspectedClusterId]);
 
-  // cluster.id → subRegion.id (within whichever territory is focused)
+  // cluster.id → subRegion.id (all territories, so hover works in any view)
   const clusterToSubRegionId = useMemo(() => {
     const map = new Map<number, number>();
-    if (focusedTerritoryId === null) return map;
-    const terr = territories.find((t) => t.id === focusedTerritoryId);
-    if (!terr) return map;
-    for (const sr of terr.subRegions) {
-      for (const c of sr.clusters) map.set(c.id, sr.id);
+    for (const terr of territories) {
+      for (const sr of terr.subRegions) {
+        for (const c of sr.clusters) map.set(c.id, sr.id);
+      }
     }
     return map;
-  }, [territories, focusedTerritoryId]);
+  }, [territories]);
 
   const clusterToSubRegionVisual = useMemo(() => {
     const map = new Map<number, SubRegionVisual>();
 
     for (const terr of territories) {
-      const territoryColor = TUNER_COLORS[getDominantTuner(terr.tunerCounts)];
+      const territoryColor = getTerritoryColor(terr.id);
       const sortedSubRegions = [...terr.subRegions].sort(
         (a, b) => b.totalTrials - a.totalTrials,
       );
@@ -1289,7 +691,7 @@ export function HexMap({
         neighborEdges: [],
       };
 
-    const svgW = width - 240;
+    const svgW = svgWidth;
     const svgH = height - 80;
     const pad = 30;
 
@@ -1465,7 +867,7 @@ export function HexMap({
       cellTerritoryIds,
       neighborEdges,
     };
-  }, [data, territories, layoutMode, width, height]);
+  }, [data, territories, layoutMode, svgWidth, height]);
 
   // Synthetic HexTile lookup for map mode (for reusing tooltip / click handlers)
   const voronoiTileMap = useMemo(() => {
@@ -1577,13 +979,6 @@ export function HexMap({
     return d3.scaleSequential(d3.interpolateYlOrRd).domain([0, maxTrials]);
   }, [data, selectedTuners]);
 
-  const maxBranchCoverage = useMemo(() => {
-    if (!data) return 1;
-    const maxCoverage =
-      d3.max(data.clusters.map((c) => c.meanBranchCoverage)) ?? 1;
-    return Math.max(maxCoverage, 1);
-  }, [data]);
-
   const positiveBranchCoverages = useMemo(() => {
     if (!data) return [];
     return data.clusters
@@ -1612,12 +1007,6 @@ export function HexMap({
     },
     [positiveBranchCoverages],
   );
-
-  const maxMarginalCoverage = useMemo(() => {
-    if (!data) return 1;
-    const maxCoverage = d3.max(data.clusters.map((c) => c.avgCoverage)) ?? 1;
-    return Math.max(maxCoverage, 1);
-  }, [data]);
 
   const positiveMarginalCoverages = useMemo(() => {
     if (!data) return [];
@@ -1659,7 +1048,7 @@ export function HexMap({
       const { tunerCounts } = tile.cluster;
       const subRegionVisual = clusterToSubRegionVisual.get(tile.cluster.id);
 
-      switch (colorMode) {
+      switch (effectiveColorMode) {
         case "dominant": {
           const filteredCounts = Object.fromEntries(
             TUNER_NAMES.filter((t) => selectedTuners.has(t)).map((t) => [
@@ -1693,7 +1082,7 @@ export function HexMap({
       }
     },
     [
-      colorMode,
+      effectiveColorMode,
       clusterToSubRegionVisual,
       densityScale,
       getCoverageColor,
@@ -1886,124 +1275,220 @@ export function HexMap({
   }, [data, territories, HEX_DIRECTIONS, selectedTuners]);
 
   // ============================================================
-  // Greedy label placement for sub-region labels (focus mode only)
-  // Sorts sub-regions by size, places largest first.
-  // If a label bbox overlaps an already-placed one, try offset
-  // candidates. If all collide, skip the label.
+  // Label placement helpers
+  // ============================================================
+
+  /** Visible viewport in data-space coordinates (with margin for labels) */
+  const viewBounds = useMemo(() => {
+    const margin = 8 / scale; // small inset so labels don't touch SVG edge
+    const halfW = (svgWidth / 2) / scale;
+    const halfH = ((height - 80) / 2) / scale;
+    return {
+      minX: dataCenter.x - halfW + margin,
+      maxX: dataCenter.x + halfW - margin,
+      minY: dataCenter.y - halfH + margin,
+      maxY: dataCenter.y + halfH - margin,
+    };
+  }, [dataCenter, svgWidth, height, scale]);
+
+  /** Check if a rectangle overlaps any hex tile */
+  const labelOverlapsTiles = useCallback(
+    (lx: number, ly: number, lw: number, lh: number): boolean => {
+      if (!data) return false;
+      const hr = HEX_SIZE * 0.9;
+      for (const tile of data.hexTiles) {
+        if (!tile.cluster) continue;
+        if (
+          lx < tile.x + hr && lx + lw > tile.x - hr &&
+          ly < tile.y + hr && ly + lh > tile.y - hr
+        ) return true;
+      }
+      return false;
+    },
+    [data, HEX_SIZE],
+  );
+
+  /** Check if a label rect is fully inside the visible viewport */
+  const labelInsideView = useCallback(
+    (cx: number, cy: number, w: number, h: number): boolean => {
+      return (
+        cx - w / 2 >= viewBounds.minX &&
+        cx + w / 2 <= viewBounds.maxX &&
+        cy - h / 2 >= viewBounds.minY &&
+        cy + h / 2 <= viewBounds.maxY
+      );
+    },
+    [viewBounds],
+  );
+
+  // ============================================================
+  // Sub-region labels — multi-line, just outside their own tiles,
+  // with leader lines back to the centroid.
   // ============================================================
   const subLabelPositions = useMemo(() => {
-    if (focusedTerritoryId === null) return [];
-    const terr = territories.find((t) => t.id === focusedTerritoryId);
+    const activeTerrId = focusedTerritoryId ?? hoveredTerritoryId;
+    if (activeTerrId === null || !data) return [];
+    const terr = territories.find((t) => t.id === activeTerrId);
     if (!terr) return [];
+    // Skip if territory has only 1 sub-region (nothing to differentiate)
+    if (terr.subRegions.length <= 1) return [];
 
     const fs = 10 / scale;
-    const pad = 5 / scale;
-    const rh = fs + pad * 2;
+    const pad = 4 / scale;
+    const lineH = fs * 1.3;
     const charW = fs * 0.56;
-    const gap = rh * 0.3;
+    const gap = fs * 2;
 
     type Bbox = { x: number; y: number; w: number; h: number };
+    function bbOverlaps(a: Bbox, b: Bbox) {
+      return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+    }
     const placed: Bbox[] = [];
     const results: {
-      sr: SubRegion;
-      x: number;
-      y: number;
-      rw: number;
-      rh: number;
-      color: string;
+      sr: SubRegion; x: number; y: number;
+      rw: number; rh: number; lines: string[]; color: string;
+      anchorX: number; anchorY: number;
     }[] = [];
+
+    // Territory-level bounding box — labels go outside ALL tiles
+    const allTxs = terr.tiles.map((t) => t.x);
+    const allTys = terr.tiles.map((t) => t.y);
+    const tMinX = Math.min(...allTxs) - HEX_SIZE;
+    const tMaxX = Math.max(...allTxs) + HEX_SIZE;
+    const tMinY = Math.min(...allTys) - HEX_SIZE;
+    const tMaxY = Math.max(...allTys) + HEX_SIZE;
 
     const sorted = [...terr.subRegions]
       .filter((sr) => sr.label.trim().length > 0)
       .sort((a, b) => b.totalTrials - a.totalTrials);
 
     for (const sr of sorted) {
-      const rw = sr.label.length * charW + pad * 2;
-      const cx = sr.pixelCentroidX;
-      const cy = sr.pixelCentroidY;
-      const step = rh + gap;
+      const lines = sr.label.split(", ");
+      const maxLineLen = Math.max(...lines.map((l) => l.length));
+      const rw = maxLineLen * charW + pad * 2;
+      const rh = lines.length * lineH + pad * 2;
+      const anchorX = sr.pixelCentroidX;
+      const anchorY = sr.pixelCentroidY;
+      const margin = HEX_SIZE * 0.6;
 
-      const candidates = [
-        { x: cx, y: cy },
-        { x: cx, y: cy - step },
-        { x: cx, y: cy + step },
-        { x: cx - rw * 0.6, y: cy },
-        { x: cx + rw * 0.6, y: cy },
-        { x: cx, y: cy - step * 2 },
-        { x: cx, y: cy + step * 2 },
+      // Sort edges by distance from sub-region centroid → closest edge first
+      const edgeDists: { dir: string; dist: number }[] = [
+        { dir: "left",   dist: Math.abs(anchorX - tMinX) },
+        { dir: "right",  dist: Math.abs(anchorX - tMaxX) },
+        { dir: "above",  dist: Math.abs(anchorY - tMinY) },
+        { dir: "below",  dist: Math.abs(anchorY - tMaxY) },
       ];
+      edgeDists.sort((a, b) => a.dist - b.dist);
 
+      const edgeCandidates: Record<string, { x: number; y: number }[]> = {
+        left: [
+          { x: tMinX - margin - rw / 2, y: anchorY },
+          { x: tMinX - margin - rw / 2, y: anchorY - rh },
+          { x: tMinX - margin - rw / 2, y: anchorY + rh },
+        ],
+        above: [
+          { x: anchorX, y: tMinY - margin - rh / 2 },
+          { x: anchorX - rw * 0.5, y: tMinY - margin - rh / 2 },
+          { x: anchorX + rw * 0.5, y: tMinY - margin - rh / 2 },
+        ],
+        right: [
+          { x: tMaxX + margin + rw / 2, y: anchorY },
+          { x: tMaxX + margin + rw / 2, y: anchorY - rh },
+          { x: tMaxX + margin + rw / 2, y: anchorY + rh },
+        ],
+        below: [
+          { x: anchorX, y: tMaxY + margin + rh / 2 },
+          { x: anchorX - rw * 0.5, y: tMaxY + margin + rh / 2 },
+          { x: anchorX + rw * 0.5, y: tMaxY + margin + rh / 2 },
+        ],
+      };
+
+      // Build candidates in closest-edge-first order
+      const candidates: { x: number; y: number }[] = [];
+      for (const { dir } of edgeDists) {
+        candidates.push(...edgeCandidates[dir]);
+      }
+
+      // Candidates are already outside territory bbox — only check viewport & label overlap
       let chosen: { x: number; y: number } | null = null;
       for (const c of candidates) {
         const b: Bbox = {
-          x: c.x - rw / 2 - gap,
-          y: c.y - rh / 2 - gap,
-          w: rw + gap * 2,
-          h: rh + gap * 2,
+          x: c.x - rw / 2 - gap, y: c.y - rh / 2 - gap,
+          w: rw + gap * 2, h: rh + gap * 2,
         };
-        const overlaps = placed.some(
-          (p) =>
-            b.x < p.x + p.w &&
-            b.x + b.w > p.x &&
-            b.y < p.y + p.h &&
-            b.y + b.h > p.y,
-        );
-        if (!overlaps) {
+        if (
+          labelInsideView(c.x, c.y, rw, rh) &&
+          !placed.some((p) => bbOverlaps(b, p))
+        ) {
           chosen = c;
-          placed.push({ x: c.x - rw / 2, y: c.y - rh / 2, w: rw, h: rh });
+          placed.push(b);
           break;
         }
       }
 
-      if (chosen) {
-        results.push({
-          sr,
-          x: chosen.x,
-          y: chosen.y,
-          rw,
-          rh,
-          color: TUNER_COLORS[getDominantTuner(sr.tunerCounts)],
-        });
+      // Fallback: try further out from territory edges, closest-edge-first
+      if (!chosen) {
+        for (const extraMult of [1.5, 2.5, 4]) {
+          if (chosen) break;
+          const em = HEX_SIZE * extraMult;
+          const fbEdge: Record<string, { x: number; y: number }> = {
+            left:  { x: tMinX - margin - em - rw / 2, y: anchorY },
+            above: { x: anchorX, y: tMinY - margin - em - rh / 2 },
+            right: { x: tMaxX + margin + em + rw / 2, y: anchorY },
+            below: { x: anchorX, y: tMaxY + margin + em + rh / 2 },
+          };
+          const fbCandidates = edgeDists.map(({ dir }) => fbEdge[dir]);
+          for (const c of fbCandidates) {
+            const b: Bbox = { x: c.x - rw / 2 - gap, y: c.y - rh / 2 - gap, w: rw + gap * 2, h: rh + gap * 2 };
+            if (
+              labelInsideView(c.x, c.y, rw, rh) &&
+              !placed.some((p) => bbOverlaps(b, p))
+            ) {
+              chosen = c;
+              placed.push(b);
+              break;
+            }
+          }
+        }
       }
+
+      // Last resort: don't show rather than overlap tiles
+      if (!chosen) {
+        continue;
+      }
+
+      results.push({
+        sr, x: chosen.x, y: chosen.y, rw, rh, lines,
+        color: getTerritoryColor(terr.id), anchorX, anchorY,
+      });
     }
     return results;
-  }, [focusedTerritoryId, territories, scale]);
+  }, [focusedTerritoryId, hoveredTerritoryId, territories, scale, data, HEX_SIZE, labelInsideView]);
 
   // ============================================================
-  // Macro label placement — greedy, largest territory first.
-  // Primary candidates: inside territory (centroid-based).
-  // Fallback: external positions with leader line.
-  // Style: white bg + colored border + colored text.
-  // Anchor dot always at territory centroid.
+  // Macro label placement — just outside each territory's own
+  // bounding box, close to it, with leader lines to centroid.
   // ============================================================
   const macroLabelPositions = useMemo(() => {
     if (!data) return [];
 
     const fs = 11 / scale;
     const pad = 5 / scale;
+    const lineH = fs * 1.3;
     const charW = fs * 0.58;
-    const rh = fs + pad * 2;
-    const gap = rh * 0.55;
+    const gap = fs * 2;
 
     type Bbox = { x: number; y: number; w: number; h: number };
     type LPos = {
-      terr: Territory;
-      label: string;
-      x: number;
-      y: number;
-      rw: number;
-      anchorX: number;
-      anchorY: number; // territory centroid — anchor dot position
-      hasLeader: boolean; // label displaced from centroid
+      terr: Territory; lines: string[];
+      x: number; y: number; rw: number; rh: number;
+      anchorX: number; anchorY: number;
     };
 
     function bbOverlaps(a: Bbox, b: Bbox) {
-      return (
-        a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y
-      );
+      return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
     }
 
-    // Largest territories get priority placement
     const sorted = [...territories]
       .filter((t) => t.label && t.tiles.length > 0)
       .sort((a, b) => b.tiles.length - a.tiles.length);
@@ -2012,81 +1497,116 @@ export function HexMap({
     const results: LPos[] = [];
 
     for (const t of sorted) {
-      const fullLabel = t.label;
-      const shortLabel =
-        fullLabel.length > 6 ? fullLabel.slice(0, 5) + "…" : fullLabel;
+      const lines = t.label.split(", ");
+      const maxLineLen = Math.max(...lines.map((l) => l.length));
+      const rw = maxLineLen * charW + pad * 2;
+      const rh = lines.length * lineH + pad * 2;
 
-      // Anchor dot is always at the territory pixel centroid
       const anchorX = t.pixelCentroidX;
       const anchorY = t.pixelCentroidY;
 
-      const maxY = Math.max(...t.tiles.map((tile) => tile.y));
-      const minY = Math.min(...t.tiles.map((tile) => tile.y));
-      const step = rh + gap;
+      // Per-territory bounding box
+      const txs = t.tiles.map((tile) => tile.x);
+      const tys = t.tiles.map((tile) => tile.y);
+      const tMinX = Math.min(...txs) - HEX_SIZE;
+      const tMaxX = Math.max(...txs) + HEX_SIZE;
+      const tMinY = Math.min(...tys) - HEX_SIZE;
+      const tMaxY = Math.max(...tys) + HEX_SIZE;
 
-      let chosen: { x: number; y: number; label: string; rw: number } | null =
-        null;
+      const margin = HEX_SIZE * 0.6;
 
-      for (const lbl of [fullLabel, shortLabel]) {
-        if (chosen) break;
-        const rw = lbl.length * charW + pad * 2;
+      // Candidates close to THIS territory's edges
+      const candidates = [
+        // center of each edge: left → above → right → below
+        { x: tMinX - margin - rw / 2, y: anchorY },                // left
+        { x: anchorX, y: tMinY - margin - rh / 2 },                // above
+        { x: tMaxX + margin + rw / 2, y: anchorY },                // right
+        { x: anchorX, y: tMaxY + margin + rh / 2 },                // below
+        // shifted along each edge
+        { x: tMinX - margin - rw / 2, y: anchorY - rh },
+        { x: anchorX - rw * 0.5, y: tMinY - margin - rh / 2 },
+        { x: tMaxX + margin + rw / 2, y: anchorY - rh },
+        { x: anchorX - rw * 0.5, y: tMaxY + margin + rh / 2 },
+        { x: tMinX - margin - rw / 2, y: anchorY + rh },
+        { x: anchorX + rw * 0.5, y: tMinY - margin - rh / 2 },
+        { x: tMaxX + margin + rw / 2, y: anchorY + rh },
+        { x: anchorX + rw * 0.5, y: tMaxY + margin + rh / 2 },
+        // corners
+        { x: tMinX - margin - rw / 2, y: tMinY - margin - rh / 2 },
+        { x: tMaxX + margin + rw / 2, y: tMinY - margin - rh / 2 },
+        { x: tMaxX + margin + rw / 2, y: tMaxY + margin + rh / 2 },
+        { x: tMinX - margin - rw / 2, y: tMaxY + margin + rh / 2 },
+      ];
 
-        // Inside-territory candidates first, external fallback last
-        const candidates = [
-          // --- inside territory ---
-          { x: anchorX, y: anchorY }, // centroid
-          { x: anchorX, y: anchorY - step }, // up
-          { x: anchorX, y: anchorY + step }, // down
-          { x: anchorX - rw * 0.8, y: anchorY }, // left
-          { x: anchorX + rw * 0.8, y: anchorY }, // right
-          { x: anchorX - rw * 0.8, y: anchorY - step },
-          { x: anchorX + rw * 0.8, y: anchorY - step },
-          { x: anchorX - rw * 0.8, y: anchorY + step },
-          { x: anchorX + rw * 0.8, y: anchorY + step },
-          // --- external fallback (below / above territory) ---
-          { x: anchorX, y: maxY + HEX_SIZE * 1.6 },
-          { x: anchorX - rw * 0.8, y: maxY + HEX_SIZE * 1.6 },
-          { x: anchorX + rw * 0.8, y: maxY + HEX_SIZE * 1.6 },
-          { x: anchorX, y: maxY + HEX_SIZE * 1.6 + step },
-          { x: anchorX, y: minY - HEX_SIZE * 1.6 },
-          { x: anchorX - rw * 0.8, y: minY - HEX_SIZE * 1.6 },
-          { x: anchorX + rw * 0.8, y: minY - HEX_SIZE * 1.6 },
-        ];
-
-        for (const c of candidates) {
-          const bb: Bbox = {
-            x: c.x - rw / 2 - gap / 2,
-            y: c.y - rh / 2 - gap / 2,
-            w: rw + gap,
-            h: rh + gap,
-          };
-          if (!placed.some((p) => bbOverlaps(bb, p))) {
-            chosen = { x: c.x, y: c.y, label: lbl, rw };
-            placed.push(bb);
-            break;
-          }
+      let chosen: { x: number; y: number } | null = null;
+      for (const c of candidates) {
+        const bb: Bbox = {
+          x: c.x - rw / 2 - gap / 2, y: c.y - rh / 2 - gap / 2,
+          w: rw + gap, h: rh + gap,
+        };
+        if (
+          labelInsideView(c.x, c.y, rw, rh) &&
+          !placed.some((p) => bbOverlaps(bb, p)) &&
+          !labelOverlapsTiles(bb.x, bb.y, bb.w, bb.h)
+        ) {
+          chosen = c;
+          placed.push(bb);
+          break;
         }
       }
 
-      if (!chosen) continue; // no room — hide
+      // Fallback: try increasingly distant offsets, still avoiding tiles
+      if (!chosen) {
+        const dirs = [
+          { x: -1, y: 0 }, { x: 0, y: -1 }, { x: 1, y: 0 }, { x: 0, y: 1 },
+          { x: -0.7, y: -0.7 }, { x: 0.7, y: -0.7 }, { x: 0.7, y: 0.7 }, { x: -0.7, y: 0.7 },
+        ];
+        for (const mult of [3, 4.5, 6, 8]) {
+          if (chosen) break;
+          const dist = HEX_SIZE * mult;
+          for (const d of dirs) {
+            const cx = anchorX + d.x * dist;
+            const cy = anchorY + d.y * dist;
+            const fb: Bbox = { x: cx - rw / 2 - gap / 2, y: cy - rh / 2 - gap / 2, w: rw + gap, h: rh + gap };
+            if (
+              labelInsideView(cx, cy, rw, rh) &&
+              !placed.some((p) => bbOverlaps(fb, p)) &&
+              !labelOverlapsTiles(fb.x, fb.y, fb.w, fb.h)
+            ) {
+              chosen = { x: cx, y: cy };
+              placed.push(fb);
+              break;
+            }
+          }
+        }
+        // Last resort: nearest non-overlapping direction (allow tile overlap)
+        if (!chosen) {
+          for (const d of dirs) {
+            const cx = anchorX + d.x * HEX_SIZE * 4;
+            const cy = anchorY + d.y * HEX_SIZE * 4;
+            const fb: Bbox = { x: cx - rw / 2 - gap / 2, y: cy - rh / 2 - gap / 2, w: rw + gap, h: rh + gap };
+            if (labelInsideView(cx, cy, rw, rh) && !placed.some((p) => bbOverlaps(fb, p))) {
+              chosen = { x: cx, y: cy };
+              placed.push(fb);
+              break;
+            }
+          }
+        }
+        if (!chosen) {
+          chosen = { x: anchorX, y: anchorY };
+          placed.push({ x: anchorX - rw / 2 - gap / 2, y: anchorY - rh / 2 - gap / 2, w: rw + gap, h: rh + gap });
+        }
+      }
 
-      const dist = Math.sqrt(
-        (chosen.x - anchorX) ** 2 + (chosen.y - anchorY) ** 2,
-      );
       results.push({
-        terr: t,
-        label: chosen.label,
-        x: chosen.x,
-        y: chosen.y,
-        rw: chosen.rw,
-        anchorX,
-        anchorY,
-        hasLeader: dist > rh,
+        terr: t, lines,
+        x: chosen.x, y: chosen.y, rw, rh,
+        anchorX, anchorY,
       });
     }
 
     return results;
-  }, [data, territories, scale]);
+  }, [data, territories, scale, HEX_SIZE, labelOverlapsTiles, labelInsideView]);
 
   // Territory fills + borders: scaled hex fills, bridge quads between neighbors, boundary lines
   const territoryScaleFactors = useMemo(
@@ -2094,7 +1614,7 @@ export function HexMap({
     [],
   );
   const renderTerritoryFillsAndBorders = useMemo(() => {
-    if (!data || colorMode !== "territory") return null;
+    if (!data || effectiveColorMode !== "territory") return null;
 
     const verticesByRank = territoryScaleFactors.map((s) =>
       getHexVertices(HEX_SIZE * s),
@@ -2193,7 +1713,7 @@ export function HexMap({
     );
   }, [
     data,
-    colorMode,
+    effectiveColorMode,
     hexLookup,
     selectedTuners,
     tunerTerritoryRank,
@@ -2203,50 +1723,24 @@ export function HexMap({
   ]);
 
   // Mouse handlers
-  const handleMouseEnter = useCallback((tile: HexTile, e: React.MouseEvent) => {
+  const handleMouseEnter = useCallback((tile: HexTile, _e: React.MouseEvent) => {
     if (!tile.cluster) return;
     setHoveredClusterId(tile.cluster.id);
-    setTooltip({ cluster: tile.cluster, x: e.clientX, y: e.clientY });
-  }, []);
+    // Highlight the sub-region & territory this tile belongs to
+    const srId = clusterToSubRegionId.get(tile.cluster.id) ?? null;
+    setHoveredSubRegionId(srId);
+    const tId = clusterToTerrId.get(tile.cluster.id) ?? null;
+    setHoveredTerritoryId(tId);
+  }, [clusterToSubRegionId, clusterToTerrId]);
 
-  const handleMouseMove = useCallback(
-    (e: React.MouseEvent) => {
-      if (tooltip)
-        setTooltip((prev) =>
-          prev ? { ...prev, x: e.clientX, y: e.clientY } : null,
-        );
-    },
-    [tooltip],
-  );
+  const handleMouseMove = useCallback((_e: React.MouseEvent) => {}, []);
 
   const handleMouseLeave = useCallback(() => {
     setHoveredClusterId(null);
-    setTooltip(null);
+    setHoveredSubRegionId(null);
+    setHoveredTerritoryId(null);
   }, []);
 
-  const handleClick = useCallback(
-    (tile: HexTile) => {
-      if (!tile.cluster) return;
-      const terrId = clusterToTerrId.get(tile.cluster.id) ?? null;
-      const srId = clusterToSubRegionId.get(tile.cluster.id) ?? null;
-
-      setFocusedTerritoryId((prev) => {
-        if (prev === terrId) {
-          // 2nd level: focus sub-region + set cluster for inspect panel
-          setFocusedSubRegionId((prevSr) => (prevSr === srId ? null : srId));
-          setInspectedClusterId((prev) =>
-            prev === tile.cluster!.id ? null : tile.cluster!.id,
-          );
-          return prev;
-        }
-        // 1st level: focus territory, clear deeper state
-        setFocusedSubRegionId(null);
-        setInspectedClusterId(null);
-        return terrId;
-      });
-    },
-    [clusterToTerrId, clusterToSubRegionId],
-  );
 
   const toggleTuner = useCallback((tuner: TunerType) => {
     setSelectedTuners((prev) => {
@@ -2293,9 +1787,10 @@ export function HexMap({
   if (loading) {
     return (
       <div
+        ref={containerRef}
         style={{
-          width,
-          height,
+          width: "100%",
+          height: "100%",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
@@ -2309,9 +1804,10 @@ export function HexMap({
   if (error) {
     return (
       <div
+        ref={containerRef}
         style={{
-          width,
-          height,
+          width: "100%",
+          height: "100%",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
@@ -2326,40 +1822,21 @@ export function HexMap({
   if (!data) return null;
 
   return (
-    <div style={{ position: "relative", width: "100%", height: "100%" }}>
-      {/* Title */}
-      <div
-        style={{
-          marginBottom: 12,
-          display: "flex",
-          alignItems: "center",
-          gap: 16,
-          width: "100%",
-        }}
-      >
-        <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>
-          Parameter Space Map
-        </h3>
-        <span style={{ fontSize: 12, color: "#6B7280" }}>
-          {stats.totalTrials.toLocaleString()} trials in{" "}
-          {data?.hexTiles.length || 0} clusters • {program}
-        </span>
-      </div>
-
+    <div ref={containerRef} style={{ position: "relative", width: "100%", height: "100%" }}>
       <div
         style={{
           position: "relative",
           display: "flex",
           justifyContent: "space-between",
           width: "100%",
-          height: "calc(100% - 60px)",
+          height: "100%",
           overflow: "hidden",
         }}
       >
-        {/* SVG Map — always full width minus controls */}
+        {/* SVG Map — 70% width */}
         <svg
           ref={svgRef}
-          width={width - 200}
+          width={svgWidth}
           height={height}
           style={{ flexShrink: 0 }}
         >
@@ -2383,86 +1860,8 @@ export function HexMap({
                 style={{ cursor: "default" }}
               />
 
-              {/* ── Coarse level: one hex per super-cluster ──────────────── */}
-              {detailLevel < 4 && coarseHexLayout.map(({ coarseId, x, y, hexSize }) => {
-                const cPath = getHexPath(hexSize);
-                const visual = coarseHexVisuals.get(coarseId);
-                return (
-                  <g key={`coarse-${coarseId}`} transform={`translate(${x}, ${y})`}>
-                    <path
-                      d={cPath}
-                      fill={visual?.fill ?? "#CBD5E1"}
-                      stroke={visual?.stroke ?? "white"}
-                      strokeWidth={3}
-                      strokeLinejoin="round"
-                    />
-                  </g>
-                );
-              })}
-
-              {/* ── Coarse borders (L0–L3): sub-region style between hexes ──── */}
-              {detailLevel < 4 && coarseTerritoryData && (() => {
-                const { subBorderD, terrBorderD } = coarseTerritoryData;
-                return <>
-                  {subBorderD && <>
-                    <path d={subBorderD} fill="none" stroke="white"
-                      strokeWidth={3} strokeLinecap="round" opacity={0.55} pointerEvents="none" />
-                    <path d={subBorderD} fill="none" stroke="#64748B"
-                      strokeWidth={1.5} strokeDasharray={`${5},${4}`}
-                      strokeLinecap="round" opacity={0.7} pointerEvents="none" />
-                  </>}
-                  {terrBorderD && <>
-                    <path d={terrBorderD} fill="none" stroke="white"
-                      strokeWidth={7} strokeLinecap="round" strokeLinejoin="round"
-                      opacity={0.8} pointerEvents="none" />
-                    <path d={terrBorderD} fill="none" stroke="#475569"
-                      strokeWidth={3.5} strokeLinecap="round" strokeLinejoin="round"
-                      pointerEvents="none" />
-                  </>}
-                </>;
-              })()}
-
-              {/* ── Coarse macro labels (L0–L3): one label per dominant territory ── */}
-              {detailLevel < 4 && focusedTerritoryId === null &&
-                coarseMacroLabelPositions.map(
-                  ({ tuner, x, y, rw, rh, color, label }) => (
-                    <g key={`cmacro-${tuner}-${label}-${Math.round(x)}-${Math.round(y)}`} pointerEvents="none">
-                      <rect
-                        x={x - rw / 2}
-                        y={y - rh / 2}
-                        width={rw}
-                        height={rh}
-                        rx={rh / 2}
-                        fill="white"
-                        opacity={0.96}
-                      />
-                      <rect
-                        x={x - rw / 2}
-                        y={y - rh / 2}
-                        width={rw}
-                        height={rh}
-                        rx={rh / 2}
-                        fill="none"
-                        stroke={color}
-                        strokeWidth={1.75 / scale}
-                      />
-                      <text
-                        x={x}
-                        y={y}
-                        textAnchor="middle"
-                        dominantBaseline="middle"
-                        fontSize={11 / scale}
-                        fontWeight={700}
-                        fill={color}
-                      >
-                        {label}
-                      </text>
-                    </g>
-                  ),
-                )}
-
-              {/* ── Hex tiles (level 4 only): no hover-sensitive props so hover doesn't re-render all tiles ── */}
-              {detailLevel === 4 && data.hexTiles.map((tile) => {
+              {/* ── Hex tiles: no hover-sensitive props so hover doesn't re-render all tiles ── */}
+              {data.hexTiles.map((tile) => {
                 if (!tile.cluster) return null;
 
                 const hasSelectedTuner = TUNER_NAMES.some(
@@ -2475,9 +1874,11 @@ export function HexMap({
                 const isInspected =
                   inspectedClusterId === tile.cluster.id &&
                   focusedTerritoryId !== null;
+                const tileTerrId = clusterToTerrId.get(tile.cluster.id);
+                const activeTerritoryId = focusedTerritoryId ?? hoveredTerritoryId;
                 const isMuted =
-                  focusedTerritoryId !== null &&
-                  clusterToTerrId.get(tile.cluster.id) !== focusedTerritoryId;
+                  activeTerritoryId !== null &&
+                  tileTerrId !== activeTerritoryId;
                 const activeSubRegionId =
                   hoveredSubRegionId ?? focusedSubRegionId;
                 const isSubMuted =
@@ -2485,7 +1886,10 @@ export function HexMap({
                   activeSubRegionId !== null &&
                   clusterToSubRegionId.get(tile.cluster.id) !==
                     activeSubRegionId;
-                const tileOpacity = isMuted ? 0.12 : isSubMuted ? 0.22 : 1;
+                const isTunerMuted =
+                  previewTuner !== null &&
+                  (tile.cluster!.tunerCounts[previewTuner] ?? 0) === 0;
+                const tileOpacity = isTunerMuted ? 0.1 : isMuted ? 0.12 : isSubMuted ? 0.22 : 1;
 
                 return (
                   <g
@@ -2494,11 +1898,6 @@ export function HexMap({
                     onMouseEnter={(e) => handleMouseEnter(tile, e)}
                     onMouseMove={handleMouseMove}
                     onMouseLeave={handleMouseLeave}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleClick(tile);
-                    }}
-                    style={{ cursor: "pointer" }}
                     opacity={tileOpacity}
                   >
                     <path
@@ -2537,10 +1936,10 @@ export function HexMap({
                 );
               })()}
 
-              {detailLevel === 4 && renderTerritoryFillsAndBorders}
+              {renderTerritoryFillsAndBorders}
 
               {/* ── Macro boundaries: white halo pass (drawn first, behind) ── */}
-              {detailLevel === 4 && boundaryData.macro.map(({ d, terr }) => {
+              {boundaryData.macro.map(({ d, terr }) => {
                 if (!d) return null;
                 const isFocused = terr.id === focusedTerritoryId;
                 const isMuted = focusedTerritoryId !== null && !isFocused;
@@ -2561,7 +1960,7 @@ export function HexMap({
               })}
 
               {/* ── Macro boundaries: colored line pass ─────────────────── */}
-              {detailLevel === 4 && boundaryData.macro.map(({ d, terr }) => {
+              {boundaryData.macro.map(({ d, terr }) => {
                 if (!d) return null;
                 const isFocused = terr.id === focusedTerritoryId;
                 const isMuted = focusedTerritoryId !== null && !isFocused;
@@ -2570,22 +1969,26 @@ export function HexMap({
                     key={`macro-line-${terr.id}`}
                     d={d}
                     fill="none"
-                    stroke={TUNER_COLORS[getDominantTuner(terr.tunerCounts)]}
+                    stroke={getTerritoryColor(terr.id)}
                     strokeWidth={isFocused ? 5 : 3.5}
                     strokeLinecap="round"
                     strokeLinejoin="round"
-                    opacity={isMuted ? 0.12 : 1}
+                    opacity={isMuted ? 0.12 : 0.7}
                     pointerEvents="none"
                   />
                 );
               })}
 
               {/* ── Sub-region boundaries: neutral, focus mode only ──────── */}
-              {detailLevel === 4 && focusedTerritoryId !== null && (
+              {(focusedTerritoryId ?? hoveredTerritoryId) !== null &&
+               (() => {
+                 const at = territories.find((t) => t.id === (focusedTerritoryId ?? hoveredTerritoryId));
+                 return at && at.subRegions.length > 1;
+               })() && (
                 <>
                   {/* white halo (thin) */}
                   {boundaryData.sub
-                    .filter(({ terr }) => terr.id === focusedTerritoryId)
+                    .filter(({ terr }) => terr.id === (focusedTerritoryId ?? hoveredTerritoryId))
                     .map(({ d, sr, terr }) =>
                       d ? (
                         <path
@@ -2602,7 +2005,7 @@ export function HexMap({
                     )}
                   {/* slate dashed line — neutral, reads as "internal division" not a new territory */}
                   {boundaryData.sub
-                    .filter(({ terr }) => terr.id === focusedTerritoryId)
+                    .filter(({ terr }) => terr.id === (focusedTerritoryId ?? hoveredTerritoryId))
                     .map(({ d, sr, terr }) =>
                       d ? (
                         <path
@@ -2621,9 +2024,12 @@ export function HexMap({
                 </>
               )}
 
-              {/* ── Sub-region labels: white bg + colored border + colored text ── */}
-              {detailLevel === 4 && subLabelPositions.map(({ sr, x, y, rw, rh: lh, color }) => {
+              {/* ── Sub-region labels: multi-line, outside tiles, with leader lines ── */}
+              {subLabelPositions.map(({ sr, x, y, rw, rh: lh, lines, color, anchorX, anchorY }) => {
                 const isLabelHovered = hoveredSubRegionId === sr.id;
+                const fs = 10 / scale;
+                const lineH = fs * 1.3;
+                const rx = 4 / scale;
                 return (
                   <g
                     key={`sr-label-${sr.territoryId}-${sr.id}`}
@@ -2640,125 +2046,76 @@ export function HexMap({
                       );
                     }}
                   >
-                    {/* white fill */}
-                    <rect
-                      x={x - rw / 2}
-                      y={y - lh / 2}
-                      width={rw}
-                      height={lh}
-                      rx={lh / 2}
-                      fill="white"
-                      opacity={0.96}
+                    <line
+                      x1={anchorX} y1={anchorY} x2={x} y2={y}
+                      stroke={color} strokeWidth={1 / scale}
+                      strokeDasharray={`${3 / scale},${2 / scale}`} opacity={0.5}
                     />
-                    {/* colored border */}
-                    <rect
-                      x={x - rw / 2}
-                      y={y - lh / 2}
-                      width={rw}
-                      height={lh}
-                      rx={lh / 2}
-                      fill="none"
-                      stroke={color}
-                      strokeWidth={1.5 / scale}
-                      opacity={1}
-                    />
-                    <text
-                      x={x}
-                      y={y}
-                      textAnchor="middle"
-                      dominantBaseline="middle"
-                      fontSize={10 / scale}
-                      fontWeight={700}
-                      fill={color}
-                    >
-                      {sr.label}
+                    <circle cx={anchorX} cy={anchorY} r={2.5 / scale}
+                      fill={color} opacity={0.7} />
+                    <rect x={x - rw / 2} y={y - lh / 2} width={rw} height={lh}
+                      rx={rx} fill="white" opacity={0.96} />
+                    <rect x={x - rw / 2} y={y - lh / 2} width={rw} height={lh}
+                      rx={rx} fill="none" stroke={color}
+                      strokeWidth={1.5 / scale} />
+                    <text x={x} textAnchor="middle" fontSize={fs}
+                      fontWeight={600} fill={color}>
+                      {lines.map((line, li) => (
+                        <tspan key={li} x={x}
+                          y={y - (lines.length - 1) * lineH / 2 + li * lineH}
+                          dominantBaseline="middle"
+                        >{line}</tspan>
+                      ))}
                     </text>
                   </g>
                 );
               })}
 
-              {/* ── Macro territory labels: overview only ── */}
-              {detailLevel === 4 && focusedTerritoryId === null &&
+              {/* ── Macro territory labels: multi-line, outside tiles, with leader lines ── */}
+              {focusedTerritoryId === null && hoveredTerritoryId === null &&
                 macroLabelPositions.map(
                   ({
                     terr: t,
-                    label,
+                    lines,
                     x: px,
                     y: py,
                     rw,
+                    rh,
                     anchorX,
                     anchorY,
-                    hasLeader,
                   }) => {
-                    const color = TUNER_COLORS[getDominantTuner(t.tunerCounts)];
+                    const color = getTerritoryColor(t.id);
                     const fs = 11 / scale;
-                    const pad = 5 / scale;
-                    const rh = fs + pad * 2;
-                    const bw = 2 / scale; // border width
+                    const lineH = fs * 1.3;
+                    const bw = 1.5 / scale;
+                    const rx = 5 / scale;
                     return (
                       <g key={`macro-label-${t.id}`} pointerEvents="none">
-                        {/* Anchor dot: always at territory centroid */}
-                        <circle
-                          cx={anchorX}
-                          cy={anchorY}
-                          r={3 / scale}
-                          fill={color}
-                          opacity={0.85}
+                        <line
+                          x1={anchorX} y1={anchorY} x2={px} y2={py}
+                          stroke={color} strokeWidth={1 / scale}
+                          strokeDasharray={`${4 / scale},${3 / scale}`} opacity={0.45}
                         />
-                        {/* Leader line: only when label is displaced from centroid */}
-                        {hasLeader && (
-                          <line
-                            x1={anchorX}
-                            y1={anchorY}
-                            x2={px}
-                            y2={py}
-                            stroke={color}
-                            strokeWidth={1 / scale}
-                            strokeDasharray={`${4 / scale},${3 / scale}`}
-                            opacity={0.5}
-                          />
-                        )}
-                        {/* White shadow for readability */}
+                        <circle cx={anchorX} cy={anchorY} r={3 / scale}
+                          fill={color} opacity={0.8} />
                         <rect
-                          x={px - rw / 2 - bw - 1 / scale}
-                          y={py - rh / 2 - bw - 1 / scale}
-                          width={rw + bw * 2 + 2 / scale}
-                          height={rh + bw * 2 + 2 / scale}
-                          rx={rh / 2 + bw + 1 / scale}
-                          fill="white"
-                          opacity={0.9}
+                          x={px - rw / 2 - 1 / scale} y={py - rh / 2 - 1 / scale}
+                          width={rw + 2 / scale} height={rh + 2 / scale}
+                          rx={rx + 1 / scale} fill="white"
                         />
-                        {/* White bg pill */}
                         <rect
-                          x={px - rw / 2}
-                          y={py - rh / 2}
-                          width={rw}
-                          height={rh}
-                          rx={rh / 2}
-                          fill="white"
+                          x={px - rw / 2} y={py - rh / 2}
+                          width={rw} height={rh} rx={rx}
+                          fill="none" stroke={color} strokeWidth={bw} opacity={0.9}
                         />
-                        {/* Colored border — connects label to territory */}
-                        <rect
-                          x={px - rw / 2}
-                          y={py - rh / 2}
-                          width={rw}
-                          height={rh}
-                          rx={rh / 2}
-                          fill="none"
-                          stroke={color}
-                          strokeWidth={bw}
-                          opacity={0.95}
-                        />
-                        <text
-                          x={px}
-                          y={py}
-                          textAnchor="middle"
-                          dominantBaseline="middle"
-                          fontSize={fs}
-                          fontWeight={700}
-                          fill={color}
-                        >
-                          {label}
+                        <text x={px} textAnchor="middle" fontSize={fs}
+                          fontWeight={700} fill={color}>
+                          {lines.map((line, li) => (
+                            <tspan key={li} x={px}
+                              y={py - (lines.length - 1) * lineH / 2 + li * lineH}
+                              dominantBaseline="middle"
+                            >{line}</tspan>
+                          ))}
                         </text>
                       </g>
                     );
@@ -2809,10 +2166,6 @@ export function HexMap({
                     }}
                     onMouseMove={handleMouseMove}
                     onMouseLeave={handleMouseLeave}
-                    onClick={() => {
-                      if (syntheticTile) handleClick(syntheticTile);
-                    }}
-                    style={{ cursor: "pointer" }}
                   >
                     {/* Cell fill */}
                     {cell.subCellPaths.map((d, i) => (
@@ -2825,7 +2178,7 @@ export function HexMap({
                     ))}
 
                     {/* Territory fill: layered sizes by territory rank */}
-                    {colorMode === "territory" &&
+                    {effectiveColorMode === "territory" &&
                       (() => {
                         const tc = cell.cluster.tunerCounts;
                         const present = TUNER_NAMES.filter(
@@ -2900,7 +2253,7 @@ export function HexMap({
               ))}
 
               {/* Territory borders (thick, on top) — hidden in territory color mode */}
-              {colorMode !== "territory" &&
+              {effectiveColorMode !== "territory" &&
                 voronoiMapData.territoryBorderPaths.map((d, idx) => (
                   <path
                     key={`terr-border-${idx}`}
@@ -2915,7 +2268,7 @@ export function HexMap({
                 ))}
 
               {/* Tuner territory borders (per-tuner colored edges) */}
-              {colorMode === "territory" && mapTerritoryBorders}
+              {effectiveColorMode === "territory" && mapTerritoryBorders}
             </g>
           )}
         </svg>
@@ -2943,8 +2296,7 @@ export function HexMap({
               (() => {
                 const { terr, terrAvgCov, terrMaxCov, subMetrics } =
                   focusedTerritoryMetrics;
-                const terrColor =
-                  TUNER_COLORS[getDominantTuner(terr.tunerCounts)];
+                const terrColor = getTerritoryColor(terr.id);
                 return (
                   <>
                     {/* Territory header */}
@@ -3071,7 +2423,7 @@ export function HexMap({
                         >
                           {subMetrics.map(
                             ({ sr, avgCov, maxCov, dominant, dominantPct }) => {
-                              const srColor = TUNER_COLORS[dominant];
+                              const srColor = "#64748B"; // neutral slate
                               const isActive =
                                 focusedSubRegionId === sr.id ||
                                 hoveredSubRegionId === sr.id;
@@ -3368,677 +2720,179 @@ export function HexMap({
               })()}
           </div>
         )}
-        {/* Controls panel — always 200px on the right */}
+        {/* Controls panel — 30% width */}
         <div
           style={{
-            width: 200,
+            width: panelWidth,
             fontSize: 12,
-            height: height - 60,
+            height: "100%",
             overflowY: "auto",
             flexShrink: 0,
             borderLeft: "1px solid #E5E7EB",
-            paddingLeft: 12,
+            paddingLeft: 16,
+            paddingRight: 8,
           }}
         >
-          {/* Layout toggle */}
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ fontWeight: 600, marginBottom: 6, color: "#374151" }}>
-              Layout
-            </div>
-            <div style={{ display: "flex", gap: 4 }}>
-              {[
-                { key: "hex" as LayoutMode, label: "Hex" },
-                { key: "map" as LayoutMode, label: "Cluster" },
-              ].map(({ key, label }) => (
-                <button
-                  key={key}
-                  onClick={() => setLayoutMode(key)}
-                  style={{
-                    flex: 1,
-                    padding: "6px 4px",
-                    fontSize: 10,
-                    fontWeight: 500,
-                    border: "1px solid",
-                    borderColor: layoutMode === key ? "#4F46E5" : "#E5E7EB",
-                    borderRadius: 4,
-                    background: layoutMode === key ? "#EEF2FF" : "white",
-                    color: layoutMode === key ? "#4F46E5" : "#6B7280",
-                    cursor: "pointer",
-                  }}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
+          {/* Summary */}
+          <div style={{
+            marginBottom: 14,
+            padding: "8px 10px",
+            background: "#F8FAFC",
+            borderRadius: 6,
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            fontSize: 11,
+            color: "#64748B",
+          }}>
+            <span><b style={{ color: "#1E293B" }}>{stats.totalTrials.toLocaleString()}</b> trials</span>
+            <span><b style={{ color: "#1E293B" }}>{data?.clusters.length || 0}</b> clusters</span>
           </div>
 
           {/* Detail Level */}
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ fontWeight: 600, marginBottom: 6, color: "#374151" }}>
-              Detail Level
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <span style={{ fontWeight: 600, fontSize: 11, color: "#374151" }}>Detail</span>
+              <div style={{ display: "flex", gap: 2 }}>
+                {([0, 1, 2, 3, 4] as const).map((lv) => {
+                  const count = allLevels[lv]?.clusters.length ?? "…";
+                  const isActive = detailLevel === lv;
+                  return (
+                    <button
+                      key={lv}
+                      onClick={() => setDetailLevel(lv)}
+                      onMouseEnter={() => setPreviewDetailLevel(lv)}
+                      onMouseLeave={() => setPreviewDetailLevel(null)}
+                      title={`Level ${lv}: ${count} clusters`}
+                      style={{
+                        padding: "3px 0",
+                        width: 36,
+                        fontSize: 10,
+                        fontWeight: isActive ? 600 : 400,
+                        border: "1px solid",
+                        borderColor: isActive ? "#4F46E5" : "#E5E7EB",
+                        borderRadius: 4,
+                        background: isActive ? "#EEF2FF" : "white",
+                        color: isActive ? "#4F46E5" : "#9CA3AF",
+                        cursor: "pointer",
+                        textAlign: "center",
+                        lineHeight: 1.2,
+                      }}
+                    >
+                      L{lv}
+                      <br />
+                      <span style={{ fontSize: 8 }}>{count}</span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
-            <div style={{ display: "flex", gap: 3 }}>
-              {([0, 1, 2, 3, 4] as const).map((lv) => {
-                const coarseIdx = 3 - lv; // lv3→idx0, lv0→idx3
-                const count =
-                  lv === 4
-                    ? data.clusters.length
-                    : (coarseLevels[coarseIdx]?.k ?? "…");
+          </div>
+
+          <div style={{ borderTop: "1px solid #F1F5F9", margin: "0 0 14px" }} />
+
+          {/* Color mode */}
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontWeight: 600, fontSize: 11, marginBottom: 6, color: "#374151" }}>
+              Color
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
+              {(
+                [
+                  { mode: "pixel", label: "Sub-region" },
+                  { mode: "coverage", label: "Coverage" },
+                  { mode: "marginal", label: "Marginal" },
+                  { mode: "dominant", label: "Dominant" },
+                  { mode: "density", label: "Density" },
+                ] as { mode: ColorMode; label: string }[]
+              ).map(({ mode, label }) => {
+                const isActive = colorMode === mode;
                 return (
                   <button
-                    key={lv}
-                    onClick={() => setDetailLevel(lv)}
-                    title={`Level ${lv}: ${count} clusters`}
+                    key={mode}
+                    onClick={() => setColorMode(mode)}
+                    onMouseEnter={() => setPreviewColorMode(mode)}
+                    onMouseLeave={() => setPreviewColorMode(null)}
                     style={{
-                      flex: 1,
-                      padding: "5px 2px",
+                      padding: "4px 8px",
                       fontSize: 10,
-                      fontWeight: 600,
                       border: "1px solid",
-                      borderColor: detailLevel === lv ? "#4F46E5" : "#E5E7EB",
+                      borderColor: isActive ? "#4F46E5" : "#E5E7EB",
                       borderRadius: 4,
-                      background: detailLevel === lv ? "#EEF2FF" : "white",
-                      color: detailLevel === lv ? "#4F46E5" : "#6B7280",
+                      background: isActive ? "#EEF2FF" : "white",
+                      color: isActive ? "#4F46E5" : "#6B7280",
                       cursor: "pointer",
-                      lineHeight: 1.2,
-                      textAlign: "center",
                     }}
                   >
-                    L{lv}
-                    <br />
-                    <span style={{ fontSize: 9, fontWeight: 400 }}>{count}</span>
+                    {label}
                   </button>
                 );
               })}
             </div>
           </div>
 
-          {/* Cluster count slider */}
-          <div style={{ marginBottom: 20 }}>
-            <div style={{ fontWeight: 600, marginBottom: 8, color: "#374151" }}>
-              Clusters: {data.hexTiles.length}개
-            </div>
-            <input
-              type="range"
-              min={30}
-              max={200}
-              value={numClusters}
-              onChange={(e) => setNumClusters(Number(e.target.value))}
-              style={{ width: "100%", cursor: "pointer" }}
-            />
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                fontSize: 10,
-                color: "#9CA3AF",
-              }}
-            >
-              <span>30</span>
-              <span>Target: {numClusters}</span>
-              <span>200</span>
-            </div>
-          </div>
-
-          {/* Color mode */}
-          <div style={{ marginBottom: 20 }}>
-            <div style={{ fontWeight: 600, marginBottom: 8, color: "#374151" }}>
-              Display Mode
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              {(
-                [
-                  { mode: "pixel", label: "Sub-region" },
-                  { mode: "coverage", label: "Branch Coverage" },
-                  { mode: "marginal", label: "Marginal Coverage" },
-                  { mode: "territory" as ColorMode, label: "Tuner Territory" },
-                  { mode: "dominant", label: "Dominant Only" },
-                  { mode: "density", label: "Trial Density" },
-                ] as { mode: ColorMode; label: string }[]
-              ).map(({ mode, label }) => (
-                <button
-                  key={mode}
-                  onClick={() => setColorMode(mode)}
-                  style={{
-                    padding: "6px 12px",
-                    fontSize: 11,
-                    border: "1px solid",
-                    borderColor: colorMode === mode ? "#4F46E5" : "#E5E7EB",
-                    borderRadius: 4,
-                    background: colorMode === mode ? "#EEF2FF" : "white",
-                    color: colorMode === mode ? "#4F46E5" : "#6B7280",
-                    cursor: "pointer",
-                    textAlign: "left",
-                  }}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </div>
+          <div style={{ borderTop: "1px solid #F1F5F9", margin: "0 0 14px" }} />
 
           {/* Tuner filter */}
-          <div style={{ marginBottom: 20 }}>
-            <div style={{ fontWeight: 600, marginBottom: 8, color: "#374151" }}>
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontWeight: 600, fontSize: 11, marginBottom: 6, color: "#374151" }}>
               Tuners
             </div>
-            {TUNER_NAMES.map((tuner) => (
-              <button
-                key={tuner}
-                onClick={() => toggleTuner(tuner)}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  width: "100%",
-                  padding: "6px 10px",
-                  marginBottom: 4,
-                  fontSize: 11,
-                  border: "1px solid",
-                  borderColor: selectedTuners.has(tuner)
-                    ? TUNER_COLORS[tuner]
-                    : "#E5E7EB",
-                  borderRadius: 4,
-                  background: selectedTuners.has(tuner) ? "white" : "#F9FAFB",
-                  cursor: "pointer",
-                  opacity: selectedTuners.has(tuner) ? 1 : 0.5,
-                }}
-              >
-                <div
-                  style={{
-                    width: 14,
-                    height: 14,
-                    borderRadius: 2,
-                    backgroundColor: TUNER_COLORS[tuner],
-                  }}
-                />
-                <span style={{ flex: 1, textAlign: "left", color: "#374151" }}>
-                  {TUNER_DISPLAY_NAMES[tuner]}
-                </span>
-                <span style={{ color: "#9CA3AF" }}>
-                  {stats.tunerTotals[tuner]?.toLocaleString()}
-                </span>
-              </button>
-            ))}
-          </div>
-
-          {/* Mode-specific legends */}
-          {colorMode === "pixel" && (
-            <div style={{ marginBottom: 20 }}>
-              <div
-                style={{ fontWeight: 600, marginBottom: 8, color: "#374151" }}
-              >
-                Sub-region Overview
-              </div>
-              <div style={{ fontSize: 10, color: "#6B7280", lineHeight: 1.6 }}>
-                <p style={{ margin: 0 }}>색상 = territory 내부의 sub-region</p>
-                <p style={{ margin: "4px 0 0 0" }}>
-                  같은 territory는 같은 계열 색을 공유
-                </p>
-                <p style={{ margin: "4px 0 0 0" }}>
-                  더 진한 경계색으로 sub-region 분할을 읽기 쉽게 표시
-                </p>
-              </div>
-            </div>
-          )}
-
-          {colorMode === "coverage" && data && (
-            <div style={{ marginBottom: 20 }}>
-              <div
-                style={{ fontWeight: 600, marginBottom: 8, color: "#374151" }}
-              >
-                Branch Coverage
-              </div>
-              <div
-                style={{
-                  fontSize: 10,
-                  color: "#6B7280",
-                  lineHeight: 1.6,
-                  marginBottom: 8,
-                }}
-              >
-                <p style={{ margin: 0 }}>
-                  색상 = 클러스터의 평균 branch coverage
-                </p>
-                <p style={{ margin: "4px 0 0 0" }}>
-                  0은 빨강, 양수 값은 분위수 기준으로 흰색에서 초록색으로 확장
-                </p>
-              </div>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "flex-start",
-                  gap: 12,
-                }}
-              >
-                <div
-                  style={{ display: "flex", flexDirection: "column", gap: 4 }}
-                >
-                  <div
+            <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+              {TUNER_NAMES.map((tuner) => {
+                const isOn = selectedTuners.has(tuner);
+                return (
+                  <button
+                    key={tuner}
+                    onClick={() => toggleTuner(tuner)}
+                    onMouseEnter={() => setPreviewTuner(tuner)}
+                    onMouseLeave={() => setPreviewTuner(null)}
                     style={{
-                      width: 18,
-                      height: 14,
-                      borderRadius: 2,
-                      background: "#DC2626",
-                      border: "1px solid #E5E7EB",
-                    }}
-                  />
-                  <div
-                    style={{
-                      fontSize: 9,
-                      color: "#9CA3AF",
-                      textAlign: "center",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 7,
+                      width: "100%",
+                      padding: "5px 8px",
+                      fontSize: 10,
+                      border: "1px solid",
+                      borderColor: isOn ? TUNER_COLORS[tuner] + "88" : "#F1F5F9",
+                      borderRadius: 5,
+                      background: isOn ? "white" : "#FAFAFA",
+                      cursor: "pointer",
+                      opacity: isOn ? 1 : 0.45,
+                      transition: "opacity 0.15s",
                     }}
                   >
-                    0
-                  </div>
-                </div>
-                <svg width={150} height={24}>
-                  <defs>
-                    <linearGradient
-                      id="coverage-gradient"
-                      x1="0"
-                      x2="1"
-                      y1="0"
-                      y2="0"
-                    >
-                      <stop offset="0%" stopColor="#FFFFFF" />
-                      <stop offset="100%" stopColor="#16A34A" />
-                    </linearGradient>
-                  </defs>
-                  <rect
-                    width={150}
-                    height={14}
-                    rx={2}
-                    fill="url(#coverage-gradient)"
-                    stroke="#E5E7EB"
-                  />
-                  <text x={0} y={24} fontSize={9} fill="#9CA3AF">
-                    &gt;0
-                  </text>
-                  <text
-                    x={150}
-                    y={24}
-                    fontSize={9}
-                    fill="#9CA3AF"
-                    textAnchor="end"
-                  >
-                    {maxBranchCoverage.toFixed(2)}
-                  </text>
-                </svg>
-              </div>
-            </div>
-          )}
-
-          {colorMode === "marginal" && data && (
-            <div style={{ marginBottom: 20 }}>
-              <div
-                style={{ fontWeight: 600, marginBottom: 8, color: "#374151" }}
-              >
-                Marginal Coverage
-              </div>
-              <div
-                style={{
-                  fontSize: 10,
-                  color: "#6B7280",
-                  lineHeight: 1.6,
-                  marginBottom: 8,
-                }}
-              >
-                <p style={{ margin: 0 }}>
-                  색상 = 클러스터의 평균 marginal coverage
-                </p>
-                <p style={{ margin: "4px 0 0 0" }}>
-                  0은 빨강, 양수 값은 분위수 기준으로 흰색에서 초록색으로 확장
-                </p>
-              </div>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "flex-start",
-                  gap: 12,
-                }}
-              >
-                <div
-                  style={{ display: "flex", flexDirection: "column", gap: 4 }}
-                >
-                  <div
-                    style={{
-                      width: 18,
-                      height: 14,
-                      borderRadius: 2,
-                      background: "#DC2626",
-                      border: "1px solid #E5E7EB",
-                    }}
-                  />
-                  <div
-                    style={{
-                      fontSize: 9,
-                      color: "#9CA3AF",
-                      textAlign: "center",
-                    }}
-                  >
-                    0
-                  </div>
-                </div>
-                <svg width={150} height={24}>
-                  <defs>
-                    <linearGradient
-                      id="marginal-coverage-gradient"
-                      x1="0"
-                      x2="1"
-                      y1="0"
-                      y2="0"
-                    >
-                      <stop offset="0%" stopColor="#FFFFFF" />
-                      <stop offset="100%" stopColor="#16A34A" />
-                    </linearGradient>
-                  </defs>
-                  <rect
-                    width={150}
-                    height={14}
-                    rx={2}
-                    fill="url(#marginal-coverage-gradient)"
-                    stroke="#E5E7EB"
-                  />
-                  <text x={0} y={24} fontSize={9} fill="#9CA3AF">
-                    &gt;0
-                  </text>
-                  <text
-                    x={150}
-                    y={24}
-                    fontSize={9}
-                    fill="#9CA3AF"
-                    textAnchor="end"
-                  >
-                    {maxMarginalCoverage.toFixed(1)}
-                  </text>
-                </svg>
-              </div>
-            </div>
-          )}
-
-          {colorMode === "density" && densityScale && data && (
-            <div style={{ marginBottom: 20 }}>
-              <div
-                style={{ fontWeight: 600, marginBottom: 8, color: "#374151" }}
-              >
-                Trial Density
-              </div>
-              <div
-                style={{
-                  fontSize: 10,
-                  color: "#6B7280",
-                  lineHeight: 1.6,
-                  marginBottom: 8,
-                }}
-              >
-                <p style={{ margin: 0 }}>색상 = 클러스터 내 trial 수</p>
-                <p style={{ margin: "4px 0 0 0" }}>
-                  진할수록 더 많은 trial이 탐색됨
-                </p>
-              </div>
-              <svg width={180} height={24}>
-                <defs>
-                  <linearGradient
-                    id="density-gradient"
-                    x1="0"
-                    x2="1"
-                    y1="0"
-                    y2="0"
-                  >
-                    {[0, 0.25, 0.5, 0.75, 1].map((t) => (
-                      <stop
-                        key={t}
-                        offset={`${t * 100}%`}
-                        stopColor={d3.interpolateYlOrRd(t)}
-                      />
-                    ))}
-                  </linearGradient>
-                </defs>
-                <rect
-                  width={180}
-                  height={14}
-                  rx={2}
-                  fill="url(#density-gradient)"
-                />
-                <text x={0} y={24} fontSize={9} fill="#9CA3AF">
-                  0
-                </text>
-                <text
-                  x={180}
-                  y={24}
-                  fontSize={9}
-                  fill="#9CA3AF"
-                  textAnchor="end"
-                >
-                  {d3.max(data.clusters.map((c) => c.totalTrials))}
-                </text>
-              </svg>
-            </div>
-          )}
-
-          {/* Qualitative label legend — always visible */}
-          <div style={{ marginBottom: 20 }}>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                marginBottom: 8,
-              }}
-            >
-              <div style={{ fontWeight: 600, color: "#374151" }}>
-                Region Legend
-              </div>
-              <div
-                style={{
-                  fontSize: 9,
-                  color: "#9CA3AF",
-                  background: "#F3F4F6",
-                  padding: "1px 5px",
-                  borderRadius: 3,
-                }}
-              >
-                qual. region
-              </div>
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-              {[
-                {
-                  label: "Failure-prone" as QualitativeLabel,
-                  desc: "Zero-coverage rate >20%",
-                },
-                {
-                  label: "High Novelty" as QualitativeLabel,
-                  desc: "High marginal gain",
-                },
-                {
-                  label: "Saturated" as QualitativeLabel,
-                  desc: "High cov, low marginal",
-                },
-                {
-                  label: "High Coverage" as QualitativeLabel,
-                  desc: "High total branch coverage",
-                },
-                {
-                  label: "Volatile" as QualitativeLabel,
-                  desc: "High coverage variance",
-                },
-              ].map(({ label, desc }) => (
-                <div
-                  key={label}
-                  style={{ display: "flex", alignItems: "center", gap: 7 }}
-                >
-                  <div
-                    style={{
-                      width: 22,
-                      height: 14,
-                      borderRadius: 2,
-                      background: QUAL_LABEL_COLORS[label],
-                      flexShrink: 0,
-                    }}
-                  />
-                  <div>
                     <div
                       style={{
-                        fontSize: 10,
-                        fontWeight: 600,
-                        color: QUAL_LABEL_COLORS[label],
-                        lineHeight: 1.2,
+                        width: 10,
+                        height: 10,
+                        borderRadius: 2,
+                        backgroundColor: TUNER_COLORS[tuner],
+                        flexShrink: 0,
                       }}
-                    >
-                      {label}
-                    </div>
-                    <div
-                      style={{ fontSize: 9, color: "#9CA3AF", lineHeight: 1.2 }}
-                    >
-                      {desc}
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-            <div
-              style={{
-                marginTop: 8,
-                paddingTop: 8,
-                borderTop: "1px solid #F3F4F6",
-                fontSize: 9,
-                color: "#9CA3AF",
-                lineHeight: 1.5,
-              }}
-            >
-              <p style={{ margin: 0 }}>
-                Color = qualitative region (independent of tuner color)
-              </p>
-              <p style={{ margin: "2px 0 0 0" }}>
-                Adjacent same-class clusters form one region
-              </p>
+                    />
+                    <span style={{ flex: 1, textAlign: "left", color: "#374151", fontWeight: 500 }}>
+                      {TUNER_DISPLAY_NAMES[tuner]}
+                    </span>
+                    <span style={{ color: "#B0B8C4", fontSize: 9 }}>
+                      {stats.tunerTotals[tuner]?.toLocaleString()}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           </div>
 
-          {/* Info — only in overview */}
+          {/* Tip */}
           {focusedTerritoryId === null && (
-            <div style={{ fontSize: 10, color: "#9CA3AF", lineHeight: 1.5 }}>
-              {layoutMode === "hex" && (
-                <>
-                  <p>Each hexagon = cluster of similar trials</p>
-                  <p>Nearby hexagons = similar parameter combinations</p>
-                </>
-              )}
-              {layoutMode === "map" && (
-                <>
-                  <p>Cell area ∝ number of trials (density-based Voronoi)</p>
-                  <p>Thick borders = territory boundaries</p>
-                  <p>Thin borders = cluster boundaries</p>
-                </>
-              )}
-              <p style={{ marginTop: 4, fontWeight: 500 }}>
-                Click a cell for details
-              </p>
+            <div style={{ fontSize: 10, color: "#B0B8C4", lineHeight: 1.5 }}>
+              Click a cell for details
             </div>
           )}
         </div>
       </div>
 
-      {/* Tooltip */}
-      {tooltip && (
-        <div
-          style={{
-            position: "fixed",
-            left: tooltip.x + 15,
-            top: tooltip.y + 15,
-            backgroundColor: "white",
-            border: "1px solid #E5E7EB",
-            borderRadius: 6,
-            padding: "10px 14px",
-            fontSize: 11,
-            lineHeight: 1.5,
-            boxShadow: "0 4px 12px rgba(0,0,0,0.1)",
-            pointerEvents: "none",
-            zIndex: 1000,
-            maxWidth: 280,
-          }}
-        >
-          <div style={{ fontWeight: 600, marginBottom: 6 }}>
-            Cluster #{tooltip.cluster.id + 1}
-          </div>
-          <div style={{ marginBottom: 8 }}>
-            <span style={{ color: "#6B7280" }}>Trials: </span>
-            <span style={{ fontWeight: 500 }}>
-              {tooltip.cluster.totalTrials}
-            </span>
-            <span style={{ color: "#6B7280", marginLeft: 12 }}>
-              Avg Marginal:{" "}
-            </span>
-            <span style={{ fontWeight: 500, color: "#10B981" }}>
-              {tooltip.cluster.avgCoverage.toFixed(1)}
-            </span>
-          </div>
-          {(() => {
-            const qr = clusterToQualRegion.get(tooltip.cluster.id);
-            if (!qr) return null;
-            return (
-              <div style={{ marginBottom: 8 }}>
-                <span
-                  style={{
-                    display: "inline-block",
-                    padding: "1px 6px",
-                    borderRadius: 4,
-                    fontSize: 10,
-                    fontWeight: 600,
-                    background: QUAL_LABEL_COLORS[qr.label] + "22",
-                    color: QUAL_LABEL_COLORS[qr.label],
-                    border: `1px solid ${QUAL_LABEL_COLORS[qr.label]}55`,
-                  }}
-                >
-                  {qr.label}
-                </span>
-                <span style={{ fontSize: 9, color: "#94A3B8", marginLeft: 6 }}>
-                  {QUAL_LABEL_RATIONALE[qr.label]}
-                </span>
-              </div>
-            );
-          })()}
-          <div style={{ borderTop: "1px solid #E5E7EB", paddingTop: 8 }}>
-            <div style={{ fontWeight: 500, marginBottom: 4, color: "#374151" }}>
-              Tuner Distribution
-            </div>
-            {TUNER_NAMES.map((tuner) => {
-              const count = tooltip.cluster.tunerCounts[tuner];
-              const ratio = count / tooltip.cluster.totalTrials;
-              return (
-                <div
-                  key={tuner}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 6,
-                    marginBottom: 2,
-                  }}
-                >
-                  <div
-                    style={{
-                      width: 10,
-                      height: 10,
-                      borderRadius: 2,
-                      backgroundColor: TUNER_COLORS[tuner],
-                    }}
-                  />
-                  <span style={{ flex: 1 }}>{TUNER_DISPLAY_NAMES[tuner]}</span>
-                  <span style={{ color: "#6B7280" }}>{count}</span>
-                  <span
-                    style={{ color: "#9CA3AF", width: 40, textAlign: "right" }}
-                  >
-                    {(ratio * 100).toFixed(0)}%
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
     </div>
   );
 }

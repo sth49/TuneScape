@@ -118,6 +118,7 @@ export interface HexMapData {
   hexTiles: HexTile[];
   territories: Territory[];
   gridRadius: number;
+  hexSize: number;
   paramImportance: { name: string; importance: number }[];
   paramStats: Map<string, ParamStats>;
   labelParams: string[];
@@ -1668,10 +1669,268 @@ export function buildCoarseLevels(data: HexMapData): CoarseLevel[] {
 
 // ============================================================
 
+/**
+ * 2D Procrustes alignment: transform `source` points to best match `target` points.
+ * Finds optimal rotation, uniform scaling, reflection, and translation.
+ * Returns the aligned coordinates (same length as source).
+ */
+function procrustesAlign(
+  source: { x: number; y: number }[],
+  target: { x: number; y: number }[],
+): { x: number; y: number }[] {
+  const n = Math.min(source.length, target.length);
+  if (n < 2) return source;
+
+  // Center both
+  let smx = 0, smy = 0, tmx = 0, tmy = 0;
+  for (let i = 0; i < n; i++) {
+    smx += source[i].x; smy += source[i].y;
+    tmx += target[i].x; tmy += target[i].y;
+  }
+  smx /= n; smy /= n; tmx /= n; tmy /= n;
+
+  const sc = source.map(p => ({ x: p.x - smx, y: p.y - smy }));
+  const tc = target.map(p => ({ x: p.x - tmx, y: p.y - tmy }));
+
+  // Compute optimal rotation+reflection using SVD of cross-covariance
+  // For 2D: M = Σ tc[i] * sc[i]^T  → [[a, b], [c, d]]
+  let a = 0, b = 0, c = 0, d = 0;
+  for (let i = 0; i < n; i++) {
+    a += tc[i].x * sc[i].x;
+    b += tc[i].x * sc[i].y;
+    c += tc[i].y * sc[i].x;
+    d += tc[i].y * sc[i].y;
+  }
+
+  // SVD of 2x2: find rotation that maximizes trace(R * M)
+  // Optimal R: try both rotation and reflection, pick the one with lower error
+  const angle = Math.atan2(c - b, a + d);
+  const cosA = Math.cos(angle), sinA = Math.sin(angle);
+
+  // Scale: ||target|| / ||source||
+  let ssNorm = 0, stNorm = 0;
+  for (let i = 0; i < n; i++) {
+    ssNorm += sc[i].x * sc[i].x + sc[i].y * sc[i].y;
+    stNorm += tc[i].x * tc[i].x + tc[i].y * tc[i].y;
+  }
+  const scale = ssNorm > 0 ? Math.sqrt(stNorm / ssNorm) : 1;
+
+  // Try rotation only
+  const applyTransform = (pts: typeof sc, cos: number, sin: number, s: number, reflectY: boolean) =>
+    pts.map(p => ({
+      x: s * (cos * p.x - sin * (reflectY ? -p.y : p.y)) + tmx,
+      y: s * (sin * p.x + cos * (reflectY ? -p.y : p.y)) + tmy,
+    }));
+
+  const r1 = applyTransform(sc, cosA, sinA, scale, false);
+  const r2 = applyTransform(sc, cosA, sinA, scale, true);
+
+  // Also try with reflection + different angle
+  const angle2 = Math.atan2(c + b, a - d);
+  const cosB = Math.cos(angle2), sinB = Math.sin(angle2);
+  const r3 = applyTransform(sc, cosB, sinB, scale, true);
+
+  // Pick the one with minimum total squared error
+  const err = (r: typeof r1) => {
+    let e = 0;
+    for (let i = 0; i < n; i++) {
+      e += (r[i].x - target[i].x) ** 2 + (r[i].y - target[i].y) ** 2;
+    }
+    return e;
+  };
+
+  const candidates = [r1, r2, r3];
+  let best = r1, bestErr = err(r1);
+  for (const cand of candidates) {
+    const ce = err(cand);
+    if (ce < bestErr) { best = cand; bestErr = ce; }
+  }
+
+  // Apply same transform to ALL source points (not just first n)
+  // Re-derive the winning transform params
+  // For simplicity, just return the aligned first n + unaligned rest
+  if (source.length === n) return best;
+
+  // Need to apply to all source points: find which candidate won and re-apply
+  const bestIdx = candidates.indexOf(best);
+  const allSc = source.map(p => ({ x: p.x - smx, y: p.y - smy }));
+  if (bestIdx === 0) return applyTransform(allSc, cosA, sinA, scale, false);
+  if (bestIdx === 1) return applyTransform(allSc, cosA, sinA, scale, true);
+  return applyTransform(allSc, cosB, sinB, scale, true);
+}
+
+// ============================================================
+// Hierarchical Merge: build coarser level by merging parent clusters
+// ============================================================
+
+/**
+ * Build a coarser HexMapData by spatially merging clusters from the parent level.
+ *
+ * Instead of running independent k-means on raw trials, this groups parent-level
+ * clusters using spatial k-means on their pixel positions, then merges each group
+ * into a single new Cluster. The merged cluster's position is the centroid of its
+ * member clusters' pixel positions, preserving spatial continuity across levels.
+ *
+ * Pipeline: spatial k-means → merge clusters → assign hex grid → territories →
+ *           sub-regions → detail regions → labels
+ */
+export function buildMergedLevel(
+  parent: HexMapData,
+  targetK: number,
+  shapImportance: { name: string; importance: number }[],
+): HexMapData {
+  const parentClusters = parent.clusters;
+  const n = parentClusters.length;
+  if (n === 0) return { ...parent, clusters: [], hexTiles: [], territories: [] };
+
+  // 1. Build pixel positions for each parent cluster from hex tiles
+  const tilePixels = new Map<number, { sumX: number; sumY: number; count: number }>();
+  for (const tile of parent.hexTiles) {
+    if (!tile.cluster) continue;
+    const cid = tile.cluster.id;
+    if (!tilePixels.has(cid)) tilePixels.set(cid, { sumX: 0, sumY: 0, count: 0 });
+    const e = tilePixels.get(cid)!;
+    e.sumX += tile.x; e.sumY += tile.y; e.count++;
+  }
+
+  const clusterPoints = parentClusters.map((c) => {
+    const px = tilePixels.get(c.id);
+    return {
+      id: c.id,
+      x: px ? px.sumX / px.count : c.x,
+      y: px ? px.sumY / px.count : c.y,
+    };
+  });
+
+  // 2. Spatial k-means to group parent clusters
+  const assignments = kMeansPositions(clusterPoints, targetK);
+
+  // Remap centroid indices to compact 0..actualK-1
+  const centroidSet = new Set(assignments.values());
+  const centroidRemap = new Map<number, number>();
+  let remapId = 0;
+  for (const ci of centroidSet) centroidRemap.set(ci, remapId++);
+
+  // 3. Group parent clusters by assignment
+  const groups = new Map<number, Cluster[]>();
+  for (const cluster of parentClusters) {
+    const rawCi = assignments.get(cluster.id) ?? 0;
+    const ci = centroidRemap.get(rawCi) ?? 0;
+    if (!groups.has(ci)) groups.set(ci, []);
+    groups.get(ci)!.push(cluster);
+  }
+
+  // 4. Create merged Cluster objects
+  const paramStats = parent.paramStats;
+  const topParams = Array.from(paramStats.keys());
+  const mergedClusters: Cluster[] = [];
+
+  for (const [groupId, memberClusters] of groups) {
+    const allTrials = memberClusters.flatMap((c) => c.trials);
+    const tunerCounts: Record<TunerType, number> = {
+      SymTuner: 0, CMA_ES: 0, Genetic: 0,
+      SuccessiveHalving: 0, TPE: 0, BayesianOptimization: 0,
+    };
+    let sumCov = 0, sumBranch = 0, maxBranch = 0;
+    for (const mc of memberClusters) {
+      for (const t of TUNER_NAMES) tunerCounts[t] += mc.tunerCounts[t];
+      sumCov += mc.avgCoverage * mc.totalTrials;
+      sumBranch += mc.meanBranchCoverage * mc.totalTrials;
+      maxBranch = Math.max(maxBranch, mc.maxBranchCoverage);
+    }
+    const totalTrials = allTrials.length;
+
+    // Position = centroid of member cluster pixel positions
+    let cx = 0, cy = 0;
+    for (const mc of memberClusters) {
+      const px = tilePixels.get(mc.id);
+      cx += px ? px.sumX / px.count : mc.x;
+      cy += px ? px.sumY / px.count : mc.y;
+    }
+    cx /= memberClusters.length;
+    cy /= memberClusters.length;
+
+    const centroid = computeClusterCentroid(allTrials, paramStats, topParams);
+
+    mergedClusters.push({
+      id: groupId,
+      trials: allTrials,
+      centroid,
+      tunerCounts,
+      totalTrials,
+      avgCoverage: totalTrials > 0 ? sumCov / totalTrials : 0,
+      meanBranchCoverage: totalTrials > 0 ? sumBranch / totalTrials : 0,
+      maxBranchCoverage: maxBranch,
+      x: cx,
+      y: cy,
+      hexQ: 0, // will be set by assignClustersToHex
+      hexR: 0,
+    });
+  }
+
+  // 5. Assign merged clusters to hex grid with scaled hex size
+  const BASE_HEX = 32;
+  const REF_CLUSTERS = 200;
+  const hexSize = BASE_HEX * Math.sqrt(REF_CLUSTERS / Math.max(mergedClusters.length, 1));
+  const hexTiles = assignClustersToHex(mergedClusters, hexSize);
+
+  // 6. Build territories
+  const preLabelTerritories = computeTerritories(hexTiles);
+
+  // 7. Labels
+  const importanceMap = new Map(
+    shapImportance.map((s) => [s.name, s.importance]),
+  );
+  const labelParams = topParams.filter((p) => importanceMap.has(p));
+  const allTrials = mergedClusters.flatMap((c) => c.trials);
+
+  const macroLabels = generateTerritoryLabels(
+    preLabelTerritories,
+    allTrials,
+    paramStats,
+    labelParams,
+    importanceMap,
+  );
+
+  const territories: Territory[] = preLabelTerritories.map((t, i) => {
+    const srRaws = buildSubRegionsForTerritory(t, labelParams, paramStats);
+    const srLabels = generateSubRegionLabels(
+      srRaws, t.trials, paramStats, labelParams, importanceMap,
+    );
+    const subRegions: SubRegion[] = srRaws.map((sr, j) => {
+      const drRaws = buildDetailRegionsForSubRegion(sr, labelParams, paramStats);
+      const drLabels = generateSubRegionLabels(drRaws, sr.trials, paramStats, labelParams, importanceMap);
+      const detailRegions: DetailRegion[] = drRaws.map((dr, di) => ({
+        ...dr,
+        label: drLabels[di] ?? "",
+      }));
+      return { ...sr, label: srLabels[j], detailRegions };
+    });
+    return { ...t, label: macroLabels[i], subRegions };
+  });
+
+  const gridRadius = hexTiles.length > 0
+    ? Math.max(...hexTiles.map((t) => Math.max(Math.abs(t.q), Math.abs(t.r))))
+    : 0;
+
+  return {
+    clusters: mergedClusters,
+    hexTiles,
+    territories,
+    gridRadius,
+    hexSize,
+    paramImportance: shapImportance.slice(0, 10),
+    paramStats,
+    labelParams,
+  };
+}
+
 export function processHexMapData(
   tunerData: ProcessedData[],
   shapImportance: { name: string; importance: number }[],
   numClusters: number = 160,
+  /** Optional: reference trial positions from L4 for Procrustes alignment */
+  refTrialPositions?: Map<string, { x: number; y: number }>,
 ): HexMapData {
   // 1. Combine all trials
   const allTrials: Trial[] = [];
@@ -1716,8 +1975,39 @@ export function processHexMapData(
     clusters[i].y = coords[i]?.y || 0;
   }
 
+  // 6b. Procrustes alignment to reference (L4) positions
+  if (refTrialPositions && refTrialPositions.size > 0) {
+    // Compute expected position for each cluster as the centroid of its trials' reference positions
+    const targetPositions: { x: number; y: number }[] = [];
+    const sourcePositions: { x: number; y: number }[] = [];
+    for (const cluster of clusters) {
+      let sx = 0, sy = 0, count = 0;
+      for (const trial of cluster.trials) {
+        const key = `${trial.tuner}:${trial.id}`;
+        const ref = refTrialPositions.get(key);
+        if (ref) { sx += ref.x; sy += ref.y; count++; }
+      }
+      if (count > 0) {
+        targetPositions.push({ x: sx / count, y: sy / count });
+        sourcePositions.push({ x: cluster.x, y: cluster.y });
+      }
+    }
+    if (sourcePositions.length >= 2) {
+      const allSource = clusters.map(c => ({ x: c.x, y: c.y }));
+      const aligned = procrustesAlign(allSource, targetPositions);
+      for (let i = 0; i < clusters.length; i++) {
+        clusters[i].x = aligned[i].x;
+        clusters[i].y = aligned[i].y;
+      }
+    }
+  }
+
   // 7. Assign to hex grid (compact honeycomb)
-  const hexSize = 32; // Must match HEX_SIZE in HexMap.tsx
+  // Scale hex size so total visual area is similar across levels
+  // Reference: 200 clusters → hexSize 32
+  const BASE_HEX = 32;
+  const REF_CLUSTERS = 200;
+  const hexSize = BASE_HEX * Math.sqrt(REF_CLUSTERS / Math.max(numClusters, 1));
   const hexTiles = assignClustersToHex(clusters, hexSize);
 
   // 8. Build territories (BFS connected components on hex grid) = macro-regions
@@ -1772,10 +2062,137 @@ export function processHexMapData(
     hexTiles,
     territories,
     gridRadius,
+    hexSize,
     paramImportance: shapImportance.slice(0, 10),
     paramStats,
     labelParams,
   };
+}
+
+// ============================================================
+// Pre-computed JSON deserialization
+// ============================================================
+
+/**
+ * Deserialize a pre-computed multi-level HexMap JSON.
+ * Returns an array of 5 HexMapData (index 0 = L0, ... 4 = L4).
+ * Trials are shared across all levels to save memory.
+ */
+export function deserializePrecomputed(json: any): HexMapData[] {
+  const allTrials: Trial[] = json.trials;
+
+  function deserializeLevel(levelJson: any): HexMapData {
+    // Rebuild clusters
+    const clusterMap = new Map<number, Cluster>();
+    const clusters: Cluster[] = levelJson.clusters.map((sc: any) => {
+      const trials = sc.trialIndices.map((i: number) => allTrials[i]);
+      const cluster: Cluster = {
+        id: sc.id,
+        trials,
+        centroid: sc.centroid,
+        tunerCounts: sc.tunerCounts,
+        totalTrials: sc.totalTrials,
+        avgCoverage: sc.avgCoverage,
+        meanBranchCoverage: sc.meanBranchCoverage,
+        maxBranchCoverage: sc.maxBranchCoverage,
+        x: sc.x,
+        y: sc.y,
+        hexQ: sc.hexQ,
+        hexR: sc.hexR,
+      };
+      clusterMap.set(cluster.id, cluster);
+      return cluster;
+    });
+
+    // Rebuild hexTiles
+    const tileMap = new Map<string, HexTile>();
+    const hexTiles: HexTile[] = levelJson.hexTiles.map((st: any) => {
+      const tile: HexTile = {
+        q: st.q,
+        r: st.r,
+        cluster: st.clusterId != null ? clusterMap.get(st.clusterId)! : null,
+        x: st.x,
+        y: st.y,
+      };
+      tileMap.set(`${st.q},${st.r}`, tile);
+      return tile;
+    });
+
+    const resolveTiles = (keys: string[]): HexTile[] =>
+      keys.map((k) => tileMap.get(k)!).filter(Boolean);
+    const resolveClusters = (ids: number[]): Cluster[] =>
+      ids.map((id) => clusterMap.get(id)!).filter(Boolean);
+    const resolveTrials = (indices: number[]): Trial[] =>
+      indices.map((i) => allTrials[i]);
+
+    // Rebuild territories → subRegions → detailRegions
+    const territories: Territory[] = levelJson.territories.map((st: any) => {
+      const subRegions: SubRegion[] = st.subRegions.map((ssr: any) => {
+        const detailRegions: DetailRegion[] = (ssr.detailRegions || []).map(
+          (sdr: any) => ({
+            id: sdr.id,
+            territoryId: sdr.territoryId,
+            parentSubRegionId: sdr.parentSubRegionId,
+            clusters: resolveClusters(sdr.clusterIds),
+            tiles: resolveTiles(sdr.tileKeys),
+            trials: resolveTrials(sdr.trialIndices),
+            totalTrials: sdr.totalTrials,
+            tunerCounts: sdr.tunerCounts,
+            pixelCentroidX: sdr.pixelCentroidX,
+            pixelCentroidY: sdr.pixelCentroidY,
+            label: sdr.label,
+          }),
+        );
+        return {
+          id: ssr.id,
+          territoryId: ssr.territoryId,
+          clusters: resolveClusters(ssr.clusterIds),
+          tiles: resolveTiles(ssr.tileKeys),
+          trials: resolveTrials(ssr.trialIndices),
+          totalTrials: ssr.totalTrials,
+          tunerCounts: ssr.tunerCounts,
+          pixelCentroidX: ssr.pixelCentroidX,
+          pixelCentroidY: ssr.pixelCentroidY,
+          label: ssr.label,
+          detailRegions,
+        } as SubRegion;
+      });
+
+      return {
+        id: st.id,
+        clusters: resolveClusters(st.clusterIds),
+        tiles: resolveTiles(st.tileKeys),
+        trials: resolveTrials(st.trialIndices),
+        totalTrials: st.totalTrials,
+        tunerCounts: st.tunerCounts,
+        centroidX: st.centroidX,
+        centroidY: st.centroidY,
+        pixelCentroidX: st.pixelCentroidX,
+        pixelCentroidY: st.pixelCentroidY,
+        label: st.label,
+        subRegions,
+      } as Territory;
+    });
+
+    // Rebuild paramStats as Map
+    const paramStats = new Map<string, ParamStats>();
+    for (const [k, v] of Object.entries(levelJson.paramStats)) {
+      paramStats.set(k, v as ParamStats);
+    }
+
+    return {
+      clusters,
+      hexTiles,
+      territories,
+      gridRadius: levelJson.gridRadius,
+      hexSize: levelJson.hexSize ?? 32,
+      paramImportance: levelJson.paramImportance,
+      paramStats,
+      labelParams: levelJson.labelParams,
+    };
+  }
+
+  return json.levels.map((lvl: any) => deserializeLevel(lvl));
 }
 
 // ============================================================
