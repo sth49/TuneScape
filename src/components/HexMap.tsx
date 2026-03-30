@@ -23,9 +23,9 @@ import {
   TUNER_NAMES,
   type HexMapData,
   type HexTile,
-  type Cluster,
   type Territory,
   type SubRegion,
+  type DetailRegion,
   type Trial,
   type TunerType,
 } from "../utils/hexMapUtils";
@@ -41,37 +41,24 @@ type ColorMode =
   | "density"
   | "coverage"
   | "marginal";
-type LayoutMode = "hex" | "map";
+export interface DrillState {
+  detailLevel: number;
+  focusedTerritoryId: number | null;
+  focusedSubRegionId: number | null;
+  hoveredTerritoryId: number | null;
+  hoveredSubRegionId: number | null;
+  hoveredDetailRegionId: number | null;
+  hoveredClusterId: number | null;
+}
 
 interface HexMapProps {
   program?: string;
-}
-
-
-interface VoronoiCell {
-  cluster: Cluster;
-  cx: number;
-  cy: number;
-  pathD: string; // compound path of all sub-cell polygons
-  polygon: [number, number][]; // all vertices from all sub-cells
-  outlineD: string; // same as pathD
-  subCellPaths: string[]; // individual sub-cell polygon paths
-}
-
-// Territory is imported from hexMapUtils
-
-interface NeighborEdge {
-  clusterIdA: number;
-  clusterIdB: number;
-  sharedPoints: [number, number][];
-}
-
-interface VoronoiMapData {
-  cells: VoronoiCell[];
-  clusterBorderPaths: string[];
-  territoryBorderPaths: string[];
-  cellTerritoryIds: number[];
-  neighborEdges: NeighborEdge[];
+  compact?: boolean;
+  onDrillStateChange?: (state: DrillState) => void;
+  syncDrillState?: DrillState | null;
+  showSyncButton?: boolean;
+  syncEnabled?: boolean;
+  onSyncToggle?: () => void;
 }
 
 interface SubRegionVisual {
@@ -87,12 +74,10 @@ type QualitativeLabel =
   | "High Novelty"
   | "Saturated"
   | "High Coverage"
-  | "Volatile";
-
-interface QualLabelResult {
-  primary: QualitativeLabel | null;
-  hasSupport: boolean;
-}
+  | "Low Coverage"
+  | "Volatile"
+  | "High Density"
+  | "Low Density";
 
 interface SRMetrics {
   trialCount: number;
@@ -107,115 +92,6 @@ interface QualRegion {
   id: number;
   label: QualitativeLabel;
   clusterIds: Set<number>;
-}
-
-// ============================================================
-// Noisy Edge Utilities (Amit Patel style)
-// ============================================================
-
-/** Simple seeded RNG for reproducible noise */
-function seededRng(seed: number): () => number {
-  let s = seed | 0;
-  return () => {
-    s = (s * 1103515245 + 12345) & 0x7fffffff;
-    return s / 0x7fffffff;
-  };
-}
-
-/** Midpoint-displacement subdivision between two points */
-function noisyEdge(
-  p1: [number, number],
-  p2: [number, number],
-  depth: number,
-  rng: () => number,
-  amplitude?: number,
-): [number, number][] {
-  if (depth <= 0) return [p1, p2];
-
-  const dx = p2[0] - p1[0];
-  const dy = p2[1] - p1[1];
-  const len = Math.sqrt(dx * dx + dy * dy);
-  const amp = amplitude ?? len * 0.15;
-
-  // midpoint + perpendicular displacement
-  const mx = (p1[0] + p2[0]) / 2 + (-dy / len) * (rng() - 0.5) * amp;
-  const my = (p1[1] + p2[1]) / 2 + (dx / len) * (rng() - 0.5) * amp;
-  const mid: [number, number] = [mx, my];
-
-  const left = noisyEdge(p1, mid, depth - 1, rng, amp * 0.5);
-  const right = noisyEdge(mid, p2, depth - 1, rng, amp * 0.5);
-
-  // left includes p1…mid, right includes mid…p2 → skip duplicate mid
-  return [...left, ...right.slice(1)];
-}
-
-/** Apply noisy edges to every side of a polygon → SVG path string */
-function noisyPolygon(
-  vertices: [number, number][],
-  seed: number,
-  depth = 3,
-): string {
-  const rng = seededRng(seed);
-  const pts: [number, number][] = [];
-
-  for (let i = 0; i < vertices.length; i++) {
-    const p1 = vertices[i];
-    const p2 = vertices[(i + 1) % vertices.length];
-    const edge = noisyEdge(p1, p2, depth, rng);
-    // skip last point of each edge (it's the first of the next)
-    pts.push(...edge.slice(0, -1));
-  }
-
-  return "M" + pts.map(([x, y]) => `${x},${y}`).join("L") + "Z";
-}
-
-// ============================================================
-// Lloyd Relaxation
-// ============================================================
-
-function lloydRelax(
-  points: [number, number][],
-  bounds: [number, number, number, number],
-  iterations = 3,
-): [number, number][] {
-  let pts = points.map(([x, y]) => [x, y] as [number, number]);
-
-  for (let iter = 0; iter < iterations; iter++) {
-    const delaunay = d3.Delaunay.from(pts);
-    const voronoi = delaunay.voronoi(bounds);
-
-    const next: [number, number][] = [];
-    for (let i = 0; i < pts.length; i++) {
-      const cell = voronoi.cellPolygon(i);
-      if (!cell || cell.length < 3) {
-        next.push(pts[i]);
-        continue;
-      }
-      // centroid of the cell polygon
-      let cx = 0,
-        cy = 0,
-        area = 0;
-      for (let j = 0; j < cell.length - 1; j++) {
-        const [x0, y0] = cell[j];
-        const [x1, y1] = cell[j + 1];
-        const cross = x0 * y1 - x1 * y0;
-        area += cross;
-        cx += (x0 + x1) * cross;
-        cy += (y0 + y1) * cross;
-      }
-      area /= 2;
-      if (Math.abs(area) < 1e-10) {
-        next.push(pts[i]);
-      } else {
-        cx /= 6 * area;
-        cy /= 6 * area;
-        next.push([cx, cy]);
-      }
-    }
-    pts = next;
-  }
-
-  return pts;
 }
 
 // ============================================================
@@ -238,8 +114,22 @@ const QUAL_LABEL_COLORS: Record<QualitativeLabel, string> = {
   "High Novelty": "#8B5CF6",
   Saturated: "#F59E0B",
   "High Coverage": "#10B981",
+  "Low Coverage": "#F97316",
   Volatile: "#3B82F6",
+  "High Density": "#06B6D4",
+  "Low Density": "#A855F7",
 };
+
+const QUAL_LABEL_NAMES: QualitativeLabel[] = [
+  "Failure-prone",
+  "High Novelty",
+  "Saturated",
+  "High Coverage",
+  "Low Coverage",
+  "Volatile",
+  "High Density",
+  "Low Density",
+];
 
 function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
@@ -287,7 +177,7 @@ function getSubRegionPaletteColor(
   const safeCount = Math.max(count, 1);
   const ratio = safeCount === 1 ? 0.5 : index / (safeCount - 1);
   const hueShift = (ratio - 0.5) * 12;
-  const lightnessTargets = [0.78, 0.68, 0.58, 0.50];
+  const lightnessTargets = [0.78, 0.68, 0.58, 0.5];
   const targetIdx = Math.min(index, lightnessTargets.length - 1);
 
   const fill = d3
@@ -344,12 +234,13 @@ function computeSRMetrics(trials: Trial[]): SRMetrics {
 // Component
 // ============================================================
 
-export function HexMap({
-  program = "gawk",
-}: HexMapProps) {
+export function HexMap({ program = "gawk", compact = false, onDrillStateChange, syncDrillState, showSyncButton = false, syncEnabled = false, onSyncToggle }: HexMapProps) {
   // Responsive sizing: measure the container
   const containerRef = useRef<HTMLDivElement>(null);
-  const [containerSize, setContainerSize] = useState({ width: 900, height: 750 });
+  const [containerSize, setContainerSize] = useState({
+    width: 900,
+    height: 750,
+  });
 
   useEffect(() => {
     const el = containerRef.current;
@@ -362,9 +253,7 @@ export function HexMap({
     return () => ro.disconnect();
   }, []);
 
-  const MAP_RATIO = 0.7; // 7:3 split
-  const svgWidth = Math.floor(containerSize.width * MAP_RATIO);
-  const panelWidth = containerSize.width - svgWidth;
+  const svgWidth = containerSize.width;
   const height = containerSize.height;
   // All 5 levels: index 0 = L0, ... 4 = L4
   const [allLevels, setAllLevels] = useState<HexMapData[]>([]);
@@ -372,8 +261,9 @@ export function HexMap({
   const [error, setError] = useState<string | null>(null);
 
   const [colorMode, setColorMode] = useState<ColorMode>("pixel");
-  const [previewColorMode, setPreviewColorMode] = useState<ColorMode | null>(null);
-  const [layoutMode, setLayoutMode] = useState<LayoutMode>("hex");
+  const [previewColorMode, setPreviewColorMode] = useState<ColorMode | null>(
+    null,
+  );
   // hover: drives sub-region / territory highlight
   const [hoveredClusterId, setHoveredClusterId] = useState<number | null>(null);
   // 1st click: territory focus; 2nd click within territory: cluster inspect
@@ -388,6 +278,10 @@ export function HexMap({
   const [hoveredSubRegionId, setHoveredSubRegionId] = useState<number | null>(
     null,
   );
+  // detail-region hover — highlights at drill level 2
+  const [hoveredDetailRegionId, setHoveredDetailRegionId] = useState<number | null>(
+    null,
+  );
   // territory hover — highlights the hovered territory's sub-region on tile hover
   const [hoveredTerritoryId, setHoveredTerritoryId] = useState<number | null>(
     null,
@@ -396,15 +290,53 @@ export function HexMap({
   const [inspectedClusterId, setInspectedClusterId] = useState<number | null>(
     null,
   );
+  // Animated view focus — when a territory is clicked, smoothly pan/zoom to it
+  const [viewFocus, setViewFocus] = useState<{
+    cx: number; cy: number; zoomScale: number;
+  } | null>(null);
   // Control panel tuner hover — highlight tiles containing that tuner
   const [previewTuner, setPreviewTuner] = useState<TunerType | null>(null);
+
+  // Qualitative label toggles
+  const [selectedQualLabels, setSelectedQualLabels] = useState<
+    Set<QualitativeLabel>
+  >(new Set());
+  const [selectedParam, setSelectedParam] = useState<string | null>(null);
+  const [showParamDebug, setShowParamDebug] = useState(false);
 
   const [selectedTuners, setSelectedTuners] = useState<Set<TunerType>>(
     new Set(TUNER_NAMES),
   );
   // 4 = finest (current clusters), 3/2/1/0 = progressively coarser merged levels
   const [detailLevel, setDetailLevel] = useState<number>(4);
-  const [previewDetailLevel, setPreviewDetailLevel] = useState<number | null>(null);
+
+  // Report drill state changes to parent
+  useEffect(() => {
+    onDrillStateChange?.({
+      detailLevel, focusedTerritoryId, focusedSubRegionId,
+      hoveredTerritoryId, hoveredSubRegionId, hoveredDetailRegionId, hoveredClusterId,
+    });
+  }, [detailLevel, focusedTerritoryId, focusedSubRegionId,
+      hoveredTerritoryId, hoveredSubRegionId, hoveredDetailRegionId, hoveredClusterId,
+      onDrillStateChange]);
+
+  // Track whether we're applying synced state (to skip detail-level reset)
+  const isSyncingRef = useRef(false);
+
+  // Apply synced drill state from sibling view
+  useEffect(() => {
+    if (!syncDrillState) return;
+    isSyncingRef.current = true;
+    setDetailLevel(syncDrillState.detailLevel);
+    setFocusedTerritoryId(syncDrillState.focusedTerritoryId);
+    setFocusedSubRegionId(syncDrillState.focusedSubRegionId);
+    setHoveredTerritoryId(syncDrillState.hoveredTerritoryId);
+    setHoveredSubRegionId(syncDrillState.hoveredSubRegionId);
+    setHoveredDetailRegionId(syncDrillState.hoveredDetailRegionId);
+    setHoveredClusterId(syncDrillState.hoveredClusterId);
+    // Reset flag after React processes the batched state updates
+    requestAnimationFrame(() => { isSyncingRef.current = false; });
+  }, [syncDrillState]);
 
   const svgRef = useRef<SVGSVGElement>(null);
 
@@ -442,7 +374,7 @@ export function HexMap({
   }, [program]);
 
   // Effective values (preview overrides actual for hover preview)
-  const effectiveDetailLevel = previewDetailLevel ?? detailLevel;
+  const effectiveDetailLevel = detailLevel;
   const effectiveColorMode = previewColorMode ?? colorMode;
 
   // Active data for current detail level
@@ -450,13 +382,15 @@ export function HexMap({
   const HEX_SIZE = data?.hexSize ?? HEX_SIZE_DEFAULT;
 
   // Compute transform to fit and center the honeycomb
+  const CONTROLS_PAD = 80; // px reserved for top overlay controls
+
   const { centerX, centerY, scale } = useMemo(() => {
-    const svgHeight = height - 80;
+    const availH = height - CONTROLS_PAD;
 
     if (!data || data.hexTiles.length === 0) {
       return {
         centerX: svgWidth / 2,
-        centerY: svgHeight / 2,
+        centerY: CONTROLS_PAD + availH / 2,
         scale: 1,
       };
     }
@@ -471,14 +405,14 @@ export function HexMap({
     const dataWidth = maxX - minX;
     const dataHeight = maxY - minY;
 
-    // Calculate scale to fit
+    // Calculate scale to fit within the area below controls
     const scaleX = svgWidth / dataWidth;
-    const scaleY = svgHeight / dataHeight;
+    const scaleY = availH / dataHeight;
     const fitScale = Math.min(scaleX, scaleY, 1.2); // Cap at 1.2 to avoid too large
 
     return {
       centerX: svgWidth / 2,
-      centerY: svgHeight / 2,
+      centerY: CONTROLS_PAD + availH / 2,
       scale: fitScale,
     };
   }, [data, svgWidth, height, HEX_SIZE]);
@@ -500,17 +434,67 @@ export function HexMap({
 
   // Territories are pre-computed in processHexMapData (hexMapUtils.ts)
   // Wrapped in useMemo so the array reference is stable across renders.
-  const territories = useMemo<Territory[]>(() => data?.territories ?? [], [data]);
+  const territories = useMemo<Territory[]>(
+    () => data?.territories ?? [],
+    [data],
+  );
 
-  // Reset focus when detail level changes (including preview)
+  // Reset focus when detail level changes — skip if change came from sync
   useEffect(() => {
+    if (isSyncingRef.current) return;
     setFocusedTerritoryId(null);
     setFocusedSubRegionId(null);
     setInspectedClusterId(null);
     setHoveredClusterId(null);
+    setViewFocus(null);
   }, [effectiveDetailLevel]);
 
+  // Animate view to focused region (territory or sub-region)
+  useEffect(() => {
+    if (focusedTerritoryId === null || !data) {
+      setViewFocus(null);
+      return;
+    }
 
+    // Find the set of cluster IDs to zoom into
+    let targetClusterIds: Set<number>;
+
+    if (focusedSubRegionId !== null) {
+      // Level 2: zoom to sub-region (must match both territory and sub-region ID)
+      targetClusterIds = new Set<number>();
+      const focusedTerr = territories.find((t) => t.id === focusedTerritoryId);
+      if (focusedTerr) {
+        const sr = focusedTerr.subRegions.find((s) => s.id === focusedSubRegionId);
+        if (sr) targetClusterIds = new Set(sr.clusters.map((c) => c.id));
+      }
+    } else {
+      // Level 1: zoom to territory
+      const terr = territories.find((t) => t.id === focusedTerritoryId);
+      if (!terr) { setViewFocus(null); return; }
+      targetClusterIds = new Set(terr.clusters.map((c) => c.id));
+    }
+
+    const targetTiles = data.hexTiles.filter(
+      (t) => t.cluster && targetClusterIds.has(t.cluster.id),
+    );
+    if (targetTiles.length === 0) { setViewFocus(null); return; }
+
+    const xs = targetTiles.map((t) => t.x);
+    const ys = targetTiles.map((t) => t.y);
+    const pad = HEX_SIZE * 2;
+    const bboxW = Math.max(...xs) - Math.min(...xs) + pad * 2;
+    const bboxH = Math.max(...ys) - Math.min(...ys) + pad * 2;
+    const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+    const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+
+    // Zoom to fill ~70% of the viewport, capped at 5× overview scale
+    const availH = height - CONTROLS_PAD;
+    const zx = (svgWidth * 0.7) / bboxW;
+    const zy = (availH * 0.7) / bboxH;
+    const zoomScale = Math.min(zx, zy, scale * 5);
+
+    setViewFocus({ cx, cy, zoomScale });
+  }, [focusedTerritoryId, focusedSubRegionId, data, territories, HEX_SIZE, height, svgWidth, scale]);
 
   // cluster.id → territory.id (used for focus-mode opacity and click routing)
   const clusterToTerrId = useMemo(() => {
@@ -568,6 +552,30 @@ export function HexMap({
     return map;
   }, [territories]);
 
+  // Detail-region visual: fill/stroke for clusters within the focused sub-region
+  const clusterToDetailRegionVisual = useMemo(() => {
+    const map = new Map<number, { detailRegionId: number; fill: string; stroke: string }>();
+    if (focusedSubRegionId === null) return map;
+
+    // Find the focused sub-region
+    const focusedTerr = territories.find((t) => t.id === focusedTerritoryId);
+    if (focusedTerr) {
+      const sr = focusedTerr.subRegions.find((s) => s.id === focusedSubRegionId);
+      if (sr) {
+        const srColor = clusterToSubRegionVisual.get(sr.clusters[0]?.id)?.fill
+          ?? getTerritoryColor(focusedTerr.id);
+        const sorted = [...sr.detailRegions].sort((a, b) => b.totalTrials - a.totalTrials);
+        sorted.forEach((dr, index) => {
+          const palette = getSubRegionPaletteColor(srColor, index, sorted.length);
+          for (const c of dr.clusters) {
+            map.set(c.id, { detailRegionId: dr.id, fill: palette.fill, stroke: palette.stroke });
+          }
+        });
+      }
+    }
+    return map;
+  }, [territories, focusedTerritoryId, focusedSubRegionId, clusterToSubRegionVisual]);
+
   // ── Qualitative: per-cluster metrics & class (independent of parameter sub-regions) ──
   // Step 1: per-cluster metrics from cluster.trials directly
   const clusterQualMetrics = useMemo((): Map<number, SRMetrics> => {
@@ -585,23 +593,23 @@ export function HexMap({
       (m) => m.trialCount >= 2,
     );
     if (supported.length === 0)
-      return { p75Coverage: 0, p75Marginal: 0, p25Marginal: 0, p75Iqr: 0 };
+      return { p80Coverage: 0, p80Marginal: 0, p20Marginal: 0, p80Iqr: 0 };
     return {
-      p75Coverage: qualPct(
+      p80Coverage: qualPct(
         supported.map((m) => m.meanCoverage),
-        75,
+        80,
       ),
-      p75Marginal: qualPct(
+      p80Marginal: qualPct(
         supported.map((m) => m.meanMarginalCoverage),
-        75,
+        80,
       ),
-      p25Marginal: qualPct(
+      p20Marginal: qualPct(
         supported.map((m) => m.meanMarginalCoverage),
-        25,
+        20,
       ),
-      p75Iqr: qualPct(
+      p80Iqr: qualPct(
         supported.map((m) => m.coverageIqr),
-        75,
+        80,
       ),
     };
   }, [clusterQualMetrics]);
@@ -616,19 +624,19 @@ export function HexMap({
       }
       const hasSupport = m.trialCount >= 2;
       let label: QualitativeLabel | null = null;
-      if (m.failureRate > 0.2) {
+      if (m.failureRate > 0.3) {
         label = "Failure-prone";
       } else if (hasSupport) {
-        if (m.meanMarginalCoverage > clusterQualThresholds.p75Marginal) {
+        if (m.meanMarginalCoverage > clusterQualThresholds.p80Marginal) {
           label = "High Novelty";
         } else if (
-          m.meanCoverage > clusterQualThresholds.p75Coverage &&
-          m.meanMarginalCoverage < clusterQualThresholds.p25Marginal
+          m.meanCoverage > clusterQualThresholds.p80Coverage &&
+          m.meanMarginalCoverage < clusterQualThresholds.p20Marginal
         ) {
           label = "Saturated";
-        } else if (m.meanCoverage > clusterQualThresholds.p75Coverage) {
+        } else if (m.meanCoverage > clusterQualThresholds.p80Coverage) {
           label = "High Coverage";
-        } else if (m.coverageIqr > clusterQualThresholds.p75Iqr) {
+        } else if (m.coverageIqr > clusterQualThresholds.p80Iqr) {
           label = "Volatile";
         }
       }
@@ -674,282 +682,6 @@ export function HexMap({
     return { terr, terrAvgCov, terrMaxCov, subMetrics };
   }, [focusedTerritoryId, territories]);
 
-  // ============================================================
-  // Voronoi cell computation (map mode)
-  // Two levels: territory Voronoi (big continents) + cluster cells inside
-  // ============================================================
-  const voronoiMapData = useMemo((): VoronoiMapData | null => {
-    if (!data || layoutMode !== "map") return null;
-
-    const clusters = data.clusters;
-    if (clusters.length === 0)
-      return {
-        cells: [],
-        clusterBorderPaths: [],
-        territoryBorderPaths: [],
-        cellTerritoryIds: [],
-        neighborEdges: [],
-      };
-
-    const svgW = svgWidth;
-    const svgH = height - 80;
-    const pad = 30;
-
-    // MDS coordinates → pixel
-    const mdsXs = clusters.map((c) => c.x);
-    const mdsYs = clusters.map((c) => c.y);
-    const xScale = d3
-      .scaleLinear()
-      .domain(d3.extent(mdsXs) as [number, number])
-      .range([pad, svgW - pad]);
-    const yScale = d3
-      .scaleLinear()
-      .domain(d3.extent(mdsYs) as [number, number])
-      .range([pad, svgH - pad]);
-
-    // Cluster positions in pixel space
-    const clusterPositions: [number, number][] = clusters.map((c) => [
-      xScale(c.x),
-      yScale(c.y),
-    ]);
-
-    // Map each cluster → its territory
-    const clusterToTerritory = new Map<number, number>();
-    for (const terr of territories) {
-      for (const c of terr.clusters) {
-        clusterToTerritory.set(c.id, terr.id);
-      }
-    }
-
-    // --- Standard Voronoi: 1 seed per cluster at MDS position ---
-    let sites: [number, number][] = clusterPositions.map(([x, y]) => [
-      Math.max(pad * 0.5, Math.min(svgW - pad * 0.5, x)),
-      Math.max(pad * 0.5, Math.min(svgH - pad * 0.5, y)),
-    ]);
-
-    const bounds: [number, number, number, number] = [0, 0, svgW, svgH];
-
-    // Lloyd relaxation (3 iterations) for smoother, more uniform cells
-    sites = lloydRelax(sites, bounds, 3);
-
-    // Ghost boundary points around convex hull to constrain edge cells
-    const hull = d3.polygonHull(sites);
-    const ghostPts: [number, number][] = [];
-    if (hull && hull.length >= 3) {
-      let hcx = 0,
-        hcy = 0;
-      for (const [x, y] of hull) {
-        hcx += x;
-        hcy += y;
-      }
-      hcx /= hull.length;
-      hcy /= hull.length;
-      const ghostOffset = Math.min(svgW, svgH) * 0.15;
-      for (let i = 0; i < hull.length; i++) {
-        const [x1, y1] = hull[i];
-        const [x2, y2] = hull[(i + 1) % hull.length];
-        const dx1 = x1 - hcx,
-          dy1 = y1 - hcy;
-        const len1 = Math.sqrt(dx1 * dx1 + dy1 * dy1) || 1;
-        ghostPts.push([
-          x1 + (dx1 / len1) * ghostOffset,
-          y1 + (dy1 / len1) * ghostOffset,
-        ]);
-        const mx = (x1 + x2) / 2,
-          my = (y1 + y2) / 2;
-        const dxm = mx - hcx,
-          dym = my - hcy;
-        const lenm = Math.sqrt(dxm * dxm + dym * dym) || 1;
-        ghostPts.push([
-          mx + (dxm / lenm) * ghostOffset,
-          my + (dym / lenm) * ghostOffset,
-        ]);
-      }
-    }
-
-    const realCount = sites.length; // = clusters.length
-    const allSites = [...sites, ...ghostPts];
-    const delaunay = d3.Delaunay.from(allSites);
-    const voronoi = delaunay.voronoi(bounds);
-
-    // Build one VoronoiCell per cluster
-    const cells: VoronoiCell[] = [];
-    const cellTerritoryIds: number[] = [];
-
-    for (let i = 0; i < realCount; i++) {
-      const cellPoly = voronoi.cellPolygon(i);
-      if (!cellPoly) continue;
-      const verts: [number, number][] = cellPoly.slice(0, -1) as [
-        number,
-        number,
-      ][];
-      const pathD = "M" + verts.map(([x, y]) => `${x},${y}`).join("L") + "Z";
-
-      cells.push({
-        cluster: clusters[i],
-        cx: sites[i][0],
-        cy: sites[i][1],
-        pathD,
-        polygon: verts,
-        outlineD: pathD,
-        subCellPaths: [pathD],
-      });
-      cellTerritoryIds.push(clusterToTerritory.get(clusters[i].id) ?? -1);
-    }
-
-    // --- Extract cluster borders, territory borders, and neighbor edges from Delaunay neighbors ---
-    const clusterBorderSegments: [number, number][][] = [];
-    const territoryBorderSegments: [number, number][][] = [];
-    const neighborEdges: NeighborEdge[] = [];
-
-    for (let i = 0; i < realCount; i++) {
-      const terrI = clusterToTerritory.get(clusters[i].id);
-      const polyI = voronoi.cellPolygon(i);
-      if (!polyI) continue;
-      const vertsI = polyI.slice(0, -1);
-
-      for (const j of delaunay.neighbors(i)) {
-        if (j >= realCount) continue; // ghost
-        if (j <= i) continue; // avoid duplicates
-
-        // Find shared edge vertices
-        const polyJ = voronoi.cellPolygon(j);
-        if (!polyJ) continue;
-        const vertsJ = polyJ.slice(0, -1);
-        const shared: [number, number][] = [];
-        for (const [ax, ay] of vertsI) {
-          for (const [bx, by] of vertsJ) {
-            if (Math.abs(ax - bx) < 0.5 && Math.abs(ay - by) < 0.5) {
-              shared.push([ax, ay]);
-              break;
-            }
-          }
-        }
-        if (shared.length < 2) continue;
-
-        // Every neighbor pair is a cluster border (1 seed per cluster)
-        clusterBorderSegments.push(shared);
-        neighborEdges.push({
-          clusterIdA: clusters[i].id,
-          clusterIdB: clusters[j].id,
-          sharedPoints: shared,
-        });
-
-        // Territory border (only if different territories)
-        const terrJ = clusterToTerritory.get(clusters[j].id);
-        if (terrI !== terrJ) {
-          territoryBorderSegments.push(shared);
-        }
-      }
-    }
-
-    // Convert border segments to SVG paths with noisy edges for organic look
-    const segToPath = (seg: [number, number][], depth: number): string => {
-      if (seg.length === 2) {
-        const rng = seededRng(Math.round(seg[0][0] * 7 + seg[1][1] * 13));
-        const noisy = noisyEdge(seg[0], seg[1], depth, rng);
-        return "M" + noisy.map(([x, y]) => `${x},${y}`).join("L");
-      }
-      return "M" + seg.map(([x, y]) => `${x},${y}`).join("L");
-    };
-
-    const clusterBorderPaths = clusterBorderSegments.map((seg) =>
-      segToPath(seg, 2),
-    );
-    const territoryBorderPaths = territoryBorderSegments.map((seg) =>
-      segToPath(seg, 2),
-    );
-
-    return {
-      cells,
-      clusterBorderPaths,
-      territoryBorderPaths,
-      cellTerritoryIds,
-      neighborEdges,
-    };
-  }, [data, territories, layoutMode, svgWidth, height]);
-
-  // Synthetic HexTile lookup for map mode (for reusing tooltip / click handlers)
-  const voronoiTileMap = useMemo(() => {
-    if (!voronoiMapData) return new Map<number, HexTile>();
-    const map = new Map<number, HexTile>();
-    for (const cell of voronoiMapData.cells) {
-      const tile: HexTile = {
-        q: cell.cluster.id,
-        r: 0,
-        cluster: cell.cluster,
-        x: cell.cx,
-        y: cell.cy,
-      };
-      map.set(cell.cluster.id, tile);
-    }
-    return map;
-  }, [voronoiMapData]);
-
-  // Territory boundary lines for map mode (per-tuner colored edges between Voronoi cells)
-  const mapTerritoryBorders = useMemo(() => {
-    if (!voronoiMapData || !data) return null;
-
-    // Build cluster lookup by id
-    const clusterById = new Map<number, Cluster>();
-    for (const c of data.clusters) {
-      clusterById.set(c.id, c);
-    }
-
-    const lines: React.ReactElement[] = [];
-    let lineIdx = 0;
-
-    for (const edge of voronoiMapData.neighborEdges) {
-      const clusterA = clusterById.get(edge.clusterIdA);
-      const clusterB = clusterById.get(edge.clusterIdB);
-      if (!clusterA || !clusterB) continue;
-
-      // Find tuners present in A but not B, and vice versa
-      const boundaryTuners: TunerType[] = [];
-      for (const tuner of TUNER_NAMES) {
-        if (!selectedTuners.has(tuner)) continue;
-        const inA = clusterA.tunerCounts[tuner] > 0;
-        const inB = clusterB.tunerCounts[tuner] > 0;
-        if (inA !== inB) {
-          boundaryTuners.push(tuner);
-        }
-      }
-      if (boundaryTuners.length === 0) continue;
-
-      // Shared edge: 2 points
-      const [p1, p2] = edge.sharedPoints;
-      if (!p1 || !p2) continue;
-
-      // Edge direction and normal for parallel offset lines
-      const dx = p2[0] - p1[0];
-      const dy = p2[1] - p1[1];
-      const len = Math.sqrt(dx * dx + dy * dy) || 1;
-      const nx = -dy / len;
-      const ny = dx / len;
-
-      const lineWidth = 3;
-      const totalWidth = boundaryTuners.length * lineWidth;
-      const startOffset = -(totalWidth - lineWidth) / 2;
-
-      for (let ti = 0; ti < boundaryTuners.length; ti++) {
-        const offset = startOffset + ti * lineWidth;
-        lines.push(
-          <line
-            key={`map-terr-${lineIdx++}`}
-            x1={p1[0] + nx * offset}
-            y1={p1[1] + ny * offset}
-            x2={p2[0] + nx * offset}
-            y2={p2[1] + ny * offset}
-            stroke={TUNER_COLORS[boundaryTuners[ti]]}
-            strokeWidth={lineWidth}
-            strokeLinecap="round"
-          />,
-        );
-      }
-    }
-
-    return lines.length > 0 ? <g pointerEvents="none">{lines}</g> : null;
-  }, [voronoiMapData, data, selectedTuners]);
 
   // Tuner territory sizes: how many clusters each tuner occupies → sorted rank
   const tunerTerritoryRank = useMemo(() => {
@@ -1040,10 +772,238 @@ export function HexMap({
     [positiveMarginalCoverages],
   );
 
+  // ── Canonical parameter type lists (from build_hex_graph.py) ──
+  const BOOLEAN_PARAMS_SET = useMemo(
+    () =>
+      new Set([
+        "disable-inlining",
+        "max-memory-inhibit",
+        "klee-call-optimisation",
+        "use-construct-hash-stp",
+        "use-visitor-hash",
+        "equality-substitution",
+        "check-overshift",
+        "check-div-zero",
+        "use-branch-cache",
+        "use-independent-solver",
+        "use-call-paths",
+        "use-cex-cache",
+        "use-forked-solver",
+        "watchdog",
+        "const-array-opt",
+        "zero-seed-extension",
+        "warnings-only-to-file",
+        "smtlib-human-readable",
+        "warn-all-external-symbols",
+        "use-iterative-deepening-time-search",
+        "cex-cache-exp",
+        "all-external-warnings",
+        "readable-posix-inputs",
+        "return-null-on-zero-malloc",
+        "emit-all-errors",
+        "solver-optimize-divides",
+        "cex-cache-try-all",
+        "simplify-sym-indices",
+        "named-seed-matching",
+        "disable-verify",
+        "track-instruction-time",
+        "silent-klee-assume",
+        "suppress-external-warnings",
+        "cex-cache-superset",
+        "verify-each",
+      ]),
+    [],
+  );
+
+  const CATEGORICAL_PARAMS_SET = useMemo(
+    () =>
+      new Set([
+        "search",
+        "switch-type",
+        "smtlib-display-constants",
+        "smtlib-abbreviation-mode",
+        "seed-file",
+      ]),
+    [],
+  );
+
+  const getParamType = useCallback(
+    (name: string): "boolean" | "numeric" | "categorical" => {
+      if (BOOLEAN_PARAMS_SET.has(name)) return "boolean";
+      if (CATEGORICAL_PARAMS_SET.has(name)) return "categorical";
+      // One-hot encoded: "search__bfs", "switch-type__simple" etc.
+      const base = name.split("__")[0];
+      if (CATEGORICAL_PARAMS_SET.has(base)) return "categorical";
+      return "numeric";
+    },
+    [BOOLEAN_PARAMS_SET, CATEGORICAL_PARAMS_SET],
+  );
+
+  // Detect ALL parameter types for debug panel
+  const paramTypeMap = useMemo((): Map<
+    string,
+    "boolean" | "numeric" | "categorical"
+  > => {
+    const map = new Map<string, "boolean" | "numeric" | "categorical">();
+    if (!data || data.clusters.length === 0) return map;
+    const seen = new Set<string>();
+    for (const rawKey of Object.keys(data.clusters[0].centroid)) {
+      const base = rawKey.split("__")[0];
+      if (seen.has(base)) continue;
+      seen.add(base);
+      map.set(base, getParamType(rawKey));
+    }
+    return map;
+  }, [data, getParamType]);
+
+  // Detect selected parameter type
+  const selectedParamType = useMemo(():
+    | "boolean"
+    | "numeric"
+    | "categorical"
+    | null => {
+    if (!selectedParam) return null;
+    return getParamType(selectedParam);
+  }, [selectedParam, getParamType]);
+
+  // ── Per-cluster param bin (boolean / categorical) ──
+  // Generic string bin + dynamic color palette
+  const MIXED_COLOR = "#e2e7ed";
+  // Tableau20 — up to 20 visually distinct colors for categorical params
+  const CAT_PALETTE = [
+    "#4E79A7",
+    "#F28E2B",
+    "#E15759",
+    "#76B7B2",
+    "#59A14F",
+    "#EDC948",
+    "#B07AA1",
+    "#FF9DA7",
+    "#9C755F",
+    "#BAB0AC",
+    "#AF7AA1",
+    "#86BCB6",
+    "#D37295",
+    "#FABFD2",
+    "#B6992D",
+    "#499894",
+    "#E17C05",
+    "#D4A6C8",
+    "#8CD17D",
+    "#F1CE63",
+  ];
+
+  const paramCellBins = useMemo((): {
+    bins: Map<number, string>;
+    binNames: string[];
+    binColors: Record<string, string>;
+  } | null => {
+    if (!selectedParam || !data || !selectedParamType) return null;
+    const ptype = selectedParamType;
+
+    const bins = new Map<number, string>();
+
+    if (ptype === "numeric") {
+      const vals = data.clusters.map((c) => c.centroid[selectedParam] ?? 0);
+      const sorted = [...vals].sort((a, b) => a - b);
+      const min = sorted[0];
+      const max = sorted[sorted.length - 1];
+      const p33 = sorted[Math.floor(sorted.length / 3)];
+      const p66 = sorted[Math.floor((sorted.length * 2) / 3)];
+      const fmt = (v: number) =>
+        v < 0.01 ? v.toFixed(3) : v < 1 ? v.toFixed(2) : v.toFixed(1);
+      const lowLabel = `Low [${fmt(min)}–${fmt(p33)}]`;
+      const midLabel = `Mid (${fmt(p33)}–${fmt(p66)}]`;
+      const highLabel = `High (${fmt(p66)}–${fmt(max)}]`;
+      for (const c of data.clusters) {
+        const v = c.centroid[selectedParam] ?? 0;
+        if (v <= p33) bins.set(c.id, lowLabel);
+        else if (v <= p66) bins.set(c.id, midLabel);
+        else bins.set(c.id, highLabel);
+      }
+      return {
+        bins,
+        binNames: [lowLabel, midLabel, highLabel],
+        binColors: {
+          [lowLabel]: "#BFDBFE", // light blue
+          [midLabel]: "#3B82F6", // medium blue
+          [highLabel]: "#1E3A8A", // dark blue
+        },
+      };
+    }
+
+    if (ptype === "boolean") {
+      for (const c of data.clusters) {
+        const v = c.centroid[selectedParam] ?? 0;
+        if (v > 0.7) bins.set(c.id, "Mostly True");
+        else if (v < 0.3) bins.set(c.id, "Mostly False");
+        else bins.set(c.id, "Mixed");
+      }
+      return {
+        bins,
+        binNames: ["Mostly True", "Mixed", "Mostly False"],
+        binColors: {
+          "Mostly True": "#10B981",
+          Mixed: MIXED_COLOR,
+          "Mostly False": "#F59E0B",
+        },
+      };
+    }
+
+    // Categorical: find all one-hot keys for this param
+    const prefix = selectedParam + "__";
+    const catKeys = Object.keys(data.clusters[0].centroid)
+      .filter((k) => k.startsWith(prefix))
+      .sort();
+    if (catKeys.length === 0) return null;
+
+    const catValues = catKeys.map((k) => k.slice(prefix.length));
+
+    for (const c of data.clusters) {
+      let maxVal = -1;
+      let dominant = "";
+      let secondMax = -1;
+      for (const k of catKeys) {
+        const v = c.centroid[k] ?? 0;
+        if (v > maxVal) {
+          secondMax = maxVal;
+          maxVal = v;
+          dominant = k.slice(prefix.length);
+        } else if (v > secondMax) {
+          secondMax = v;
+        }
+      }
+      // "Mixed" if no clear dominant (top < 0.5 or gap < 0.15)
+      if (maxVal < 0.45 || maxVal - secondMax < 0.15) {
+        bins.set(c.id, "Mixed");
+      } else {
+        bins.set(c.id, dominant);
+      }
+    }
+
+    const binColors: Record<string, string> = { Mixed: MIXED_COLOR };
+    catValues.forEach((v, i) => {
+      binColors[v] = CAT_PALETTE[i % CAT_PALETTE.length];
+    });
+    const binNames = [...catValues, "Mixed"];
+
+    return { bins, binNames, binColors };
+  }, [selectedParam, selectedParamType, data]);
+
   // Get hex fill
   const getHexFill = useCallback(
     (tile: HexTile): string | null => {
       if (!tile.cluster) return "#F1F5F9";
+
+      // When a boolean/categorical param is selected, tint by bin
+      if (paramCellBins) {
+        const bin = paramCellBins.bins.get(tile.cluster.id);
+        if (bin) {
+          const binColor = paramCellBins.binColors[bin] ?? MIXED_COLOR;
+          return mixHexColors("#F8FAFC", binColor, 0.35);
+        }
+        return "#F1F5F9";
+      }
 
       const { tunerCounts } = tile.cluster;
       const subRegionVisual = clusterToSubRegionVisual.get(tile.cluster.id);
@@ -1077,17 +1037,43 @@ export function HexMap({
           return "#F8FAFC";
 
         case "pixel":
-        default:
-          return subRegionVisual?.fill ?? "#F8FAFC";
+        default: {
+          const terrId = clusterToTerrId.get(tile.cluster.id);
+
+          // Level 0: overview — uniform territory colors
+          if (focusedTerritoryId === null) {
+            return terrId != null ? getTerritoryColor(terrId) : "#F8FAFC";
+          }
+
+          // Level 2: sub-region focused — only focused sub-region tiles render
+          if (focusedSubRegionId !== null) {
+            const drVisual = clusterToDetailRegionVisual.get(tile.cluster.id);
+            return drVisual?.fill ?? subRegionVisual?.fill ?? "#F8FAFC";
+          }
+
+          // Level 1: territory focused — sub-region colors inside, muted outside
+          if (terrId === focusedTerritoryId) {
+            return subRegionVisual?.fill ?? "#F8FAFC";
+          }
+          return terrId != null
+            ? mixHexColors(getTerritoryColor(terrId), "#E2E8F0", 0.6)
+            : "#F1F5F9";
+        }
       }
     },
     [
       effectiveColorMode,
       clusterToSubRegionVisual,
+      clusterToDetailRegionVisual,
+      clusterToSubRegionId,
+      clusterToTerrId,
+      focusedTerritoryId,
+      focusedSubRegionId,
       densityScale,
       getCoverageColor,
       getMarginalCoverageColor,
       selectedTuners,
+      paramCellBins,
     ],
   );
 
@@ -1196,12 +1182,14 @@ export function HexMap({
       return {
         macro: [] as { d: string; terr: Territory }[],
         sub: [] as { d: string; sr: SubRegion; terr: Territory }[],
+        detail: [] as { d: string; dr: DetailRegion; sr: SubRegion; terr: Territory }[],
       };
     }
 
-    // Build lookups: hex key → territoryId, sub-region key, visibility
+    // Build lookups: hex key → territoryId, sub-region key, detail-region key, visibility
     const hexToTerr = new Map<string, number>();
     const hexToSub = new Map<string, { tId: number; srId: number }>();
+    const hexToDetail = new Map<string, { tId: number; srId: number; drId: number }>();
     const visibleHex = new Set<string>();
     for (const terr of territories) {
       for (const tile of terr.tiles) {
@@ -1218,6 +1206,10 @@ export function HexMap({
       for (const sr of terr.subRegions) {
         for (const tile of sr.tiles)
           hexToSub.set(`${tile.q},${tile.r}`, { tId: terr.id, srId: sr.id });
+        for (const dr of sr.detailRegions) {
+          for (const tile of dr.tiles)
+            hexToDetail.set(`${tile.q},${tile.r}`, { tId: terr.id, srId: sr.id, drId: dr.id });
+        }
       }
     }
 
@@ -1229,14 +1221,44 @@ export function HexMap({
 
     const macroPathMap = new Map<number, string>();
     const subPathMap = new Map<string, string>();
+    const detailPathMap = new Map<string, string>();
 
     for (const terr of territories) {
       let macroD = "";
       for (const sr of terr.subRegions) {
         let subD = "";
+        for (const dr of sr.detailRegions) {
+          let detailD = "";
+          for (const tile of dr.tiles) {
+            const tk = `${tile.q},${tile.r}`;
+            if (!visibleHex.has(tk)) continue;
+            for (let ei = 0; ei < 6; ei++) {
+              const dir = HEX_DIRECTIONS[ei];
+              const nk = `${tile.q + dir.dq},${tile.r + dir.dr}`;
+              const nTerr = hexToTerr.get(nk);
+              const nSub = hexToSub.get(nk);
+              const nDetail = hexToDetail.get(nk);
+              const neighborVisible = visibleHex.has(nk);
+              const va = verts[ei];
+              const vb = verts[(ei + 1) % 6];
+              const seg = `M${tile.x + va.x},${tile.y + va.y}L${tile.x + vb.x},${tile.y + vb.y}`;
+
+              if (!neighborVisible || nTerr !== terr.id) {
+                macroD += seg;
+              } else if (nSub && nSub.srId !== sr.id) {
+                subD += seg;
+              } else if (nDetail && nDetail.drId !== dr.id) {
+                detailD += seg;
+              }
+            }
+          }
+          detailPathMap.set(`${terr.id}-${sr.id}-${dr.id}`, detailD);
+        }
+        // Also collect sub-region edges from tiles not in any detail-region
         for (const tile of sr.tiles) {
           const tk = `${tile.q},${tile.r}`;
-          if (!visibleHex.has(tk)) continue; // skip hidden tiles entirely
+          if (!visibleHex.has(tk)) continue;
+          if (hexToDetail.has(tk)) continue; // already handled above
           for (let ei = 0; ei < 6; ei++) {
             const dir = HEX_DIRECTIONS[ei];
             const nk = `${tile.q + dir.dq},${tile.r + dir.dr}`;
@@ -1248,9 +1270,9 @@ export function HexMap({
             const seg = `M${tile.x + va.x},${tile.y + va.y}L${tile.x + vb.x},${tile.y + vb.y}`;
 
             if (!neighborVisible || nTerr !== terr.id) {
-              macroD += seg; // outer territory edge (or edge of hidden neighbor)
+              macroD += seg;
             } else if (nSub && nSub.srId !== sr.id) {
-              subD += seg; // inner sub-region edge
+              subD += seg;
             }
           }
         }
@@ -1271,25 +1293,117 @@ export function HexMap({
           terr: t,
         })),
       ),
+      detail: territories.flatMap((t) =>
+        t.subRegions.flatMap((sr) =>
+          sr.detailRegions.map((dr) => ({
+            d: detailPathMap.get(`${t.id}-${sr.id}-${dr.id}`) ?? "",
+            dr,
+            sr,
+            terr: t,
+          })),
+        ),
+      ),
     };
   }, [data, territories, HEX_DIRECTIONS, selectedTuners]);
+
+  // Outer boundary of the focused sub-region (all edges that touch outside)
+  const focusedSubRegionBorder = useMemo(() => {
+    if (focusedSubRegionId === null || focusedTerritoryId === null || !data) return "";
+    const focusedTerr = territories.find((t) => t.id === focusedTerritoryId);
+    if (!focusedTerr) return "";
+    const focusedSr = focusedTerr.subRegions.find((s) => s.id === focusedSubRegionId);
+    if (!focusedSr) return "";
+    // Collect all tile keys belonging to focused sub-region
+    const srTileKeys = new Set<string>();
+    for (const tile of focusedSr.tiles) {
+      const k = `${tile.q},${tile.r}`;
+      if (
+        tile.cluster &&
+        TUNER_NAMES.some(
+          (t) => selectedTuners.has(t) && tile.cluster!.tunerCounts[t] > 0,
+        )
+      )
+        srTileKeys.add(k);
+    }
+    const verts = Array.from({ length: 6 }, (_, i) => ({
+      x: HEX_SIZE * Math.cos((i * Math.PI) / 3),
+      y: HEX_SIZE * Math.sin((i * Math.PI) / 3),
+    }));
+    let d = "";
+    for (const tile of focusedSr.tiles) {
+      const tk = `${tile.q},${tile.r}`;
+      if (!srTileKeys.has(tk)) continue;
+      for (let ei = 0; ei < 6; ei++) {
+        const dir = HEX_DIRECTIONS[ei];
+        const nk = `${tile.q + dir.dq},${tile.r + dir.dr}`;
+        if (!srTileKeys.has(nk)) {
+          const va = verts[ei];
+          const vb = verts[(ei + 1) % 6];
+          d += `M${tile.x + va.x},${tile.y + va.y}L${tile.x + vb.x},${tile.y + vb.y}`;
+        }
+      }
+    }
+    return d;
+  }, [focusedSubRegionId, focusedTerritoryId, data, territories, HEX_DIRECTIONS, selectedTuners, HEX_SIZE]);
+
+  // Hovered sub-region outer border (works across all color modes)
+  const hoveredSubRegionBorder = useMemo(() => {
+    if (hoveredSubRegionId === null || focusedTerritoryId === null || !data) return "";
+    // Don't draw hover border if this is the already-focused sub-region (it has its own border)
+    if (hoveredSubRegionId === focusedSubRegionId) return "";
+    const terr = territories.find((t) => t.id === focusedTerritoryId);
+    if (!terr) return "";
+    const sr = terr.subRegions.find((s) => s.id === hoveredSubRegionId);
+    if (!sr) return "";
+    const srTileKeys = new Set<string>();
+    for (const tile of sr.tiles) {
+      if (tile.cluster && TUNER_NAMES.some((t) => selectedTuners.has(t) && tile.cluster!.tunerCounts[t] > 0))
+        srTileKeys.add(`${tile.q},${tile.r}`);
+    }
+    const verts = Array.from({ length: 6 }, (_, i) => ({
+      x: HEX_SIZE * Math.cos((i * Math.PI) / 3),
+      y: HEX_SIZE * Math.sin((i * Math.PI) / 3),
+    }));
+    let d = "";
+    for (const tile of sr.tiles) {
+      const tk = `${tile.q},${tile.r}`;
+      if (!srTileKeys.has(tk)) continue;
+      for (let ei = 0; ei < 6; ei++) {
+        const dir = HEX_DIRECTIONS[ei];
+        const nk = `${tile.q + dir.dq},${tile.r + dir.dr}`;
+        if (!srTileKeys.has(nk)) {
+          const va = verts[ei];
+          const vb = verts[(ei + 1) % 6];
+          d += `M${tile.x + va.x},${tile.y + va.y}L${tile.x + vb.x},${tile.y + vb.y}`;
+        }
+      }
+    }
+    return d;
+  }, [hoveredSubRegionId, focusedSubRegionId, focusedTerritoryId, data, territories, HEX_DIRECTIONS, selectedTuners, HEX_SIZE]);
 
   // ============================================================
   // Label placement helpers
   // ============================================================
 
+  // Active rendering scale — uses zoom level when focused on a territory
+  const renderScale = viewFocus ? viewFocus.zoomScale : scale;
+  const renderCenter = useMemo(
+    () => viewFocus ? { x: viewFocus.cx, y: viewFocus.cy } : dataCenter,
+    [viewFocus, dataCenter],
+  );
+
   /** Visible viewport in data-space coordinates (with margin for labels) */
   const viewBounds = useMemo(() => {
-    const margin = 8 / scale; // small inset so labels don't touch SVG edge
-    const halfW = (svgWidth / 2) / scale;
-    const halfH = ((height - 80) / 2) / scale;
+    const margin = 8 / renderScale;
+    const halfW = svgWidth / 2 / renderScale;
+    const halfH = (height - 80) / 2 / renderScale;
     return {
-      minX: dataCenter.x - halfW + margin,
-      maxX: dataCenter.x + halfW - margin,
-      minY: dataCenter.y - halfH + margin,
-      maxY: dataCenter.y + halfH - margin,
+      minX: renderCenter.x - halfW + margin,
+      maxX: renderCenter.x + halfW - margin,
+      minY: renderCenter.y - halfH + margin,
+      maxY: renderCenter.y + halfH - margin,
     };
-  }, [dataCenter, svgWidth, height, scale]);
+  }, [renderCenter, svgWidth, height, renderScale]);
 
   /** Check if a rectangle overlaps any hex tile */
   const labelOverlapsTiles = useCallback(
@@ -1299,9 +1413,12 @@ export function HexMap({
       for (const tile of data.hexTiles) {
         if (!tile.cluster) continue;
         if (
-          lx < tile.x + hr && lx + lw > tile.x - hr &&
-          ly < tile.y + hr && ly + lh > tile.y - hr
-        ) return true;
+          lx < tile.x + hr &&
+          lx + lw > tile.x - hr &&
+          ly < tile.y + hr &&
+          ly + lh > tile.y - hr
+        )
+          return true;
       }
       return false;
     },
@@ -1326,28 +1443,35 @@ export function HexMap({
   // with leader lines back to the centroid.
   // ============================================================
   const subLabelPositions = useMemo(() => {
-    const activeTerrId = focusedTerritoryId ?? hoveredTerritoryId;
-    if (activeTerrId === null || !data) return [];
-    const terr = territories.find((t) => t.id === activeTerrId);
+    if (focusedTerritoryId === null || !data) return [];
+    const terr = territories.find((t) => t.id === focusedTerritoryId);
     if (!terr) return [];
     // Skip if territory has only 1 sub-region (nothing to differentiate)
     if (terr.subRegions.length <= 1) return [];
 
-    const fs = 10 / scale;
-    const pad = 4 / scale;
+    const fs = 10 / renderScale;
+    const pad = 4 / renderScale;
     const lineH = fs * 1.3;
     const charW = fs * 0.56;
     const gap = fs * 2;
 
     type Bbox = { x: number; y: number; w: number; h: number };
     function bbOverlaps(a: Bbox, b: Bbox) {
-      return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+      return (
+        a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y
+      );
     }
     const placed: Bbox[] = [];
     const results: {
-      sr: SubRegion; x: number; y: number;
-      rw: number; rh: number; lines: string[]; color: string;
-      anchorX: number; anchorY: number;
+      sr: SubRegion;
+      x: number;
+      y: number;
+      rw: number;
+      rh: number;
+      lines: string[];
+      color: string;
+      anchorX: number;
+      anchorY: number;
     }[] = [];
 
     // Territory-level bounding box — labels go outside ALL tiles
@@ -1358,12 +1482,48 @@ export function HexMap({
     const tMinY = Math.min(...allTys) - HEX_SIZE;
     const tMaxY = Math.max(...allTys) + HEX_SIZE;
 
+    // When a parameter is selected, compute per-sub-region param summary
+    const srParamLabel = new Map<number, string>();
+    if (selectedParam) {
+      for (const sr of terr.subRegions) {
+        if (sr.clusters.length === 0) continue;
+        const vals = sr.clusters.map((c) => c.centroid[selectedParam] ?? 0);
+        const isBoolean = vals.every((v) => v < 0.05 || v > 0.95);
+        if (isBoolean) {
+          const trueCount = vals.filter((v) => v > 0.5).length;
+          const pct = Math.round((trueCount / vals.length) * 100);
+          srParamLabel.set(
+            sr.id,
+            pct > 50
+              ? `${selectedParam}=T (${pct}%)`
+              : `${selectedParam}=F (${100 - pct}%)`,
+          );
+        } else {
+          const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+          const min = Math.min(...vals);
+          const max = Math.max(...vals);
+          const range = max - min;
+          srParamLabel.set(
+            sr.id,
+            range < 0.01
+              ? `${selectedParam} ≈ ${mean.toFixed(2)}`
+              : `${selectedParam}: ${mean.toFixed(2)} [${min.toFixed(2)}–${max.toFixed(2)}]`,
+          );
+        }
+      }
+    }
+
     const sorted = [...terr.subRegions]
-      .filter((sr) => sr.label.trim().length > 0)
+      .filter((sr) =>
+        selectedParam ? srParamLabel.has(sr.id) : sr.label.trim().length > 0,
+      )
       .sort((a, b) => b.totalTrials - a.totalTrials);
 
     for (const sr of sorted) {
-      const lines = sr.label.split(", ");
+      const labelText = selectedParam
+        ? (srParamLabel.get(sr.id) ?? "")
+        : sr.label;
+      const lines = labelText.split(", ");
       const maxLineLen = Math.max(...lines.map((l) => l.length));
       const rw = maxLineLen * charW + pad * 2;
       const rh = lines.length * lineH + pad * 2;
@@ -1373,10 +1533,10 @@ export function HexMap({
 
       // Sort edges by distance from sub-region centroid → closest edge first
       const edgeDists: { dir: string; dist: number }[] = [
-        { dir: "left",   dist: Math.abs(anchorX - tMinX) },
-        { dir: "right",  dist: Math.abs(anchorX - tMaxX) },
-        { dir: "above",  dist: Math.abs(anchorY - tMinY) },
-        { dir: "below",  dist: Math.abs(anchorY - tMaxY) },
+        { dir: "left", dist: Math.abs(anchorX - tMinX) },
+        { dir: "right", dist: Math.abs(anchorX - tMaxX) },
+        { dir: "above", dist: Math.abs(anchorY - tMinY) },
+        { dir: "below", dist: Math.abs(anchorY - tMaxY) },
       ];
       edgeDists.sort((a, b) => a.dist - b.dist);
 
@@ -1413,8 +1573,10 @@ export function HexMap({
       let chosen: { x: number; y: number } | null = null;
       for (const c of candidates) {
         const b: Bbox = {
-          x: c.x - rw / 2 - gap, y: c.y - rh / 2 - gap,
-          w: rw + gap * 2, h: rh + gap * 2,
+          x: c.x - rw / 2 - gap,
+          y: c.y - rh / 2 - gap,
+          w: rw + gap * 2,
+          h: rh + gap * 2,
         };
         if (
           labelInsideView(c.x, c.y, rw, rh) &&
@@ -1432,14 +1594,19 @@ export function HexMap({
           if (chosen) break;
           const em = HEX_SIZE * extraMult;
           const fbEdge: Record<string, { x: number; y: number }> = {
-            left:  { x: tMinX - margin - em - rw / 2, y: anchorY },
+            left: { x: tMinX - margin - em - rw / 2, y: anchorY },
             above: { x: anchorX, y: tMinY - margin - em - rh / 2 },
             right: { x: tMaxX + margin + em + rw / 2, y: anchorY },
             below: { x: anchorX, y: tMaxY + margin + em + rh / 2 },
           };
           const fbCandidates = edgeDists.map(({ dir }) => fbEdge[dir]);
           for (const c of fbCandidates) {
-            const b: Bbox = { x: c.x - rw / 2 - gap, y: c.y - rh / 2 - gap, w: rw + gap * 2, h: rh + gap * 2 };
+            const b: Bbox = {
+              x: c.x - rw / 2 - gap,
+              y: c.y - rh / 2 - gap,
+              w: rw + gap * 2,
+              h: rh + gap * 2,
+            };
             if (
               labelInsideView(c.x, c.y, rw, rh) &&
               !placed.some((p) => bbOverlaps(b, p))
@@ -1458,12 +1625,114 @@ export function HexMap({
       }
 
       results.push({
-        sr, x: chosen.x, y: chosen.y, rw, rh, lines,
-        color: getTerritoryColor(terr.id), anchorX, anchorY,
+        sr,
+        x: chosen.x,
+        y: chosen.y,
+        rw,
+        rh,
+        lines,
+        color: getTerritoryColor(terr.id),
+        anchorX,
+        anchorY,
       });
     }
     return results;
-  }, [focusedTerritoryId, hoveredTerritoryId, territories, scale, data, HEX_SIZE, labelInsideView]);
+  }, [
+    focusedTerritoryId,
+    territories,
+    renderScale,
+    data,
+    HEX_SIZE,
+    labelInsideView,
+    selectedParam,
+  ]);
+
+  // ============================================================
+  // Detail-region labels — shown when a sub-region is focused (level 2)
+  // ============================================================
+  const detailLabelPositions = useMemo(() => {
+    if (focusedSubRegionId === null || focusedTerritoryId === null || !data) return [];
+    const parentTerr = territories.find((t) => t.id === focusedTerritoryId) ?? null;
+    const targetSr = parentTerr?.subRegions.find((s) => s.id === focusedSubRegionId) ?? null;
+    if (!targetSr || !parentTerr || targetSr.detailRegions.length <= 1) return [];
+
+    const fs = 9 / renderScale;
+    const pad = 3 / renderScale;
+    const lineH = fs * 1.3;
+    const charW = fs * 0.56;
+    const gap = fs * 1.5;
+
+    type Bbox = { x: number; y: number; w: number; h: number };
+    function bbOverlaps(a: Bbox, b: Bbox) {
+      return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+    }
+    const placed: Bbox[] = [];
+
+    // Sub-region bounding box
+    const allTxs = targetSr.tiles.map((t) => t.x);
+    const allTys = targetSr.tiles.map((t) => t.y);
+    const bMinX = Math.min(...allTxs) - HEX_SIZE;
+    const bMaxX = Math.max(...allTxs) + HEX_SIZE;
+    const bMinY = Math.min(...allTys) - HEX_SIZE;
+    const bMaxY = Math.max(...allTys) + HEX_SIZE;
+
+    const results: {
+      dr: DetailRegion;
+      x: number; y: number; rw: number; rh: number;
+      lines: string[]; color: string; anchorX: number; anchorY: number;
+    }[] = [];
+
+    const sorted = [...targetSr.detailRegions]
+      .filter((dr) => dr.label.trim().length > 0)
+      .sort((a, b) => b.totalTrials - a.totalTrials);
+
+    for (const dr of sorted) {
+      const lines = dr.label.split(", ");
+      const maxLineLen = Math.max(...lines.map((l) => l.length));
+      const rw = maxLineLen * charW + pad * 2;
+      const rh = lines.length * lineH + pad * 2;
+      const anchorX = dr.pixelCentroidX;
+      const anchorY = dr.pixelCentroidY;
+      const margin = HEX_SIZE * 0.5;
+
+      const edgeDists: { dir: string; dist: number }[] = [
+        { dir: "left", dist: Math.abs(anchorX - bMinX) },
+        { dir: "right", dist: Math.abs(anchorX - bMaxX) },
+        { dir: "above", dist: Math.abs(anchorY - bMinY) },
+        { dir: "below", dist: Math.abs(anchorY - bMaxY) },
+      ];
+      edgeDists.sort((a, b) => a.dist - b.dist);
+
+      const edgeCandidates: Record<string, { x: number; y: number }[]> = {
+        left: [{ x: bMinX - margin - rw / 2, y: anchorY }],
+        above: [{ x: anchorX, y: bMinY - margin - rh / 2 }],
+        right: [{ x: bMaxX + margin + rw / 2, y: anchorY }],
+        below: [{ x: anchorX, y: bMaxY + margin + rh / 2 }],
+      };
+
+      const candidates: { x: number; y: number }[] = [];
+      for (const { dir } of edgeDists) candidates.push(...edgeCandidates[dir]);
+
+      let chosen: { x: number; y: number } | null = null;
+      for (const c of candidates) {
+        const b: Bbox = { x: c.x - rw / 2 - gap, y: c.y - rh / 2 - gap, w: rw + gap * 2, h: rh + gap * 2 };
+        if (labelInsideView(c.x, c.y, rw, rh) && !placed.some((p) => bbOverlaps(b, p))) {
+          chosen = c;
+          placed.push(b);
+          break;
+        }
+      }
+      if (!chosen) continue;
+
+      const srVisual = clusterToSubRegionVisual.get(dr.clusters[0]?.id);
+      results.push({
+        dr, x: chosen.x, y: chosen.y, rw, rh, lines,
+        color: srVisual?.stroke ?? getTerritoryColor(parentTerr.id),
+        anchorX, anchorY,
+      });
+    }
+    return results;
+  }, [focusedSubRegionId, territories, renderScale, data, HEX_SIZE, labelInsideView, clusterToSubRegionVisual]);
 
   // ============================================================
   // Macro label placement — just outside each territory's own
@@ -1472,32 +1741,77 @@ export function HexMap({
   const macroLabelPositions = useMemo(() => {
     if (!data) return [];
 
-    const fs = 11 / scale;
-    const pad = 5 / scale;
+    const fs = 11 / renderScale;
+    const pad = 5 / renderScale;
     const lineH = fs * 1.3;
     const charW = fs * 0.58;
     const gap = fs * 2;
 
     type Bbox = { x: number; y: number; w: number; h: number };
     type LPos = {
-      terr: Territory; lines: string[];
-      x: number; y: number; rw: number; rh: number;
-      anchorX: number; anchorY: number;
+      terr: Territory;
+      lines: string[];
+      x: number;
+      y: number;
+      rw: number;
+      rh: number;
+      anchorX: number;
+      anchorY: number;
     };
 
     function bbOverlaps(a: Bbox, b: Bbox) {
-      return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+      return (
+        a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y
+      );
+    }
+
+    // When a parameter is selected, compute per-territory param summary label
+    const terrParamLabel = new Map<number, string>();
+    if (selectedParam) {
+      for (const t of territories) {
+        if (t.clusters.length === 0) continue;
+        const vals = t.clusters.map((c) => c.centroid[selectedParam] ?? 0);
+        const isBoolean = vals.every((v) => v < 0.05 || v > 0.95);
+        if (isBoolean) {
+          const trueCount = vals.filter((v) => v > 0.5).length;
+          const pct = Math.round((trueCount / vals.length) * 100);
+          terrParamLabel.set(
+            t.id,
+            pct > 50
+              ? `${selectedParam}=T (${pct}%)`
+              : `${selectedParam}=F (${100 - pct}%)`,
+          );
+        } else {
+          const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+          const min = Math.min(...vals);
+          const max = Math.max(...vals);
+          const range = max - min;
+          terrParamLabel.set(
+            t.id,
+            range < 0.01
+              ? `${selectedParam} ≈ ${mean.toFixed(2)}`
+              : `${selectedParam}: ${mean.toFixed(2)} [${min.toFixed(2)}–${max.toFixed(2)}]`,
+          );
+        }
+      }
     }
 
     const sorted = [...territories]
-      .filter((t) => t.label && t.tiles.length > 0)
+      .filter(
+        (t) =>
+          (selectedParam ? terrParamLabel.has(t.id) : t.label) &&
+          t.tiles.length > 0,
+      )
       .sort((a, b) => b.tiles.length - a.tiles.length);
 
     const placed: Bbox[] = [];
     const results: LPos[] = [];
 
     for (const t of sorted) {
-      const lines = t.label.split(", ");
+      const labelText = selectedParam
+        ? (terrParamLabel.get(t.id) ?? "")
+        : t.label;
+      const lines = labelText.split(", ");
       const maxLineLen = Math.max(...lines.map((l) => l.length));
       const rw = maxLineLen * charW + pad * 2;
       const rh = lines.length * lineH + pad * 2;
@@ -1518,10 +1832,10 @@ export function HexMap({
       // Candidates close to THIS territory's edges
       const candidates = [
         // center of each edge: left → above → right → below
-        { x: tMinX - margin - rw / 2, y: anchorY },                // left
-        { x: anchorX, y: tMinY - margin - rh / 2 },                // above
-        { x: tMaxX + margin + rw / 2, y: anchorY },                // right
-        { x: anchorX, y: tMaxY + margin + rh / 2 },                // below
+        { x: tMinX - margin - rw / 2, y: anchorY }, // left
+        { x: anchorX, y: tMinY - margin - rh / 2 }, // above
+        { x: tMaxX + margin + rw / 2, y: anchorY }, // right
+        { x: anchorX, y: tMaxY + margin + rh / 2 }, // below
         // shifted along each edge
         { x: tMinX - margin - rw / 2, y: anchorY - rh },
         { x: anchorX - rw * 0.5, y: tMinY - margin - rh / 2 },
@@ -1541,8 +1855,10 @@ export function HexMap({
       let chosen: { x: number; y: number } | null = null;
       for (const c of candidates) {
         const bb: Bbox = {
-          x: c.x - rw / 2 - gap / 2, y: c.y - rh / 2 - gap / 2,
-          w: rw + gap, h: rh + gap,
+          x: c.x - rw / 2 - gap / 2,
+          y: c.y - rh / 2 - gap / 2,
+          w: rw + gap,
+          h: rh + gap,
         };
         if (
           labelInsideView(c.x, c.y, rw, rh) &&
@@ -1558,8 +1874,14 @@ export function HexMap({
       // Fallback: try increasingly distant offsets, still avoiding tiles
       if (!chosen) {
         const dirs = [
-          { x: -1, y: 0 }, { x: 0, y: -1 }, { x: 1, y: 0 }, { x: 0, y: 1 },
-          { x: -0.7, y: -0.7 }, { x: 0.7, y: -0.7 }, { x: 0.7, y: 0.7 }, { x: -0.7, y: 0.7 },
+          { x: -1, y: 0 },
+          { x: 0, y: -1 },
+          { x: 1, y: 0 },
+          { x: 0, y: 1 },
+          { x: -0.7, y: -0.7 },
+          { x: 0.7, y: -0.7 },
+          { x: 0.7, y: 0.7 },
+          { x: -0.7, y: 0.7 },
         ];
         for (const mult of [3, 4.5, 6, 8]) {
           if (chosen) break;
@@ -1567,7 +1889,12 @@ export function HexMap({
           for (const d of dirs) {
             const cx = anchorX + d.x * dist;
             const cy = anchorY + d.y * dist;
-            const fb: Bbox = { x: cx - rw / 2 - gap / 2, y: cy - rh / 2 - gap / 2, w: rw + gap, h: rh + gap };
+            const fb: Bbox = {
+              x: cx - rw / 2 - gap / 2,
+              y: cy - rh / 2 - gap / 2,
+              w: rw + gap,
+              h: rh + gap,
+            };
             if (
               labelInsideView(cx, cy, rw, rh) &&
               !placed.some((p) => bbOverlaps(fb, p)) &&
@@ -1584,8 +1911,16 @@ export function HexMap({
           for (const d of dirs) {
             const cx = anchorX + d.x * HEX_SIZE * 4;
             const cy = anchorY + d.y * HEX_SIZE * 4;
-            const fb: Bbox = { x: cx - rw / 2 - gap / 2, y: cy - rh / 2 - gap / 2, w: rw + gap, h: rh + gap };
-            if (labelInsideView(cx, cy, rw, rh) && !placed.some((p) => bbOverlaps(fb, p))) {
+            const fb: Bbox = {
+              x: cx - rw / 2 - gap / 2,
+              y: cy - rh / 2 - gap / 2,
+              w: rw + gap,
+              h: rh + gap,
+            };
+            if (
+              labelInsideView(cx, cy, rw, rh) &&
+              !placed.some((p) => bbOverlaps(fb, p))
+            ) {
               chosen = { x: cx, y: cy };
               placed.push(fb);
               break;
@@ -1594,19 +1929,422 @@ export function HexMap({
         }
         if (!chosen) {
           chosen = { x: anchorX, y: anchorY };
-          placed.push({ x: anchorX - rw / 2 - gap / 2, y: anchorY - rh / 2 - gap / 2, w: rw + gap, h: rh + gap });
+          placed.push({
+            x: anchorX - rw / 2 - gap / 2,
+            y: anchorY - rh / 2 - gap / 2,
+            w: rw + gap,
+            h: rh + gap,
+          });
         }
       }
 
       results.push({
-        terr: t, lines,
-        x: chosen.x, y: chosen.y, rw, rh,
-        anchorX, anchorY,
+        terr: t,
+        lines,
+        x: chosen.x,
+        y: chosen.y,
+        rw,
+        rh,
+        anchorX,
+        anchorY,
       });
     }
 
     return results;
-  }, [data, territories, scale, HEX_SIZE, labelOverlapsTiles, labelInsideView]);
+  }, [
+    data,
+    territories,
+    renderScale,
+    HEX_SIZE,
+    labelOverlapsTiles,
+    labelInsideView,
+    selectedParam,
+  ]);
+
+  // ── Per-cell qualitative label positions (outside tiles, with leader lines) ──
+  // Runs AFTER macroLabelPositions so it can reserve their bboxes to avoid overlap.
+  const qualCellLabelPositions = useMemo(() => {
+    if (!data) return [];
+
+    const fs = 9 / renderScale;
+    const pad = 4 / renderScale;
+    const charW = fs * 0.56;
+    const gap = fs * 1.5;
+
+    type Bbox = { x: number; y: number; w: number; h: number };
+    function bbOverlaps(a: Bbox, b: Bbox) {
+      return (
+        a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y
+      );
+    }
+
+    // Pre-populate placed bboxes from macro parameter labels → no overlap
+    const placed: Bbox[] = [];
+    const macroGap = (11 / renderScale) * 2;
+    for (const ml of macroLabelPositions) {
+      placed.push({
+        x: ml.x - ml.rw / 2 - macroGap / 2,
+        y: ml.y - ml.rh / 2 - macroGap / 2,
+        w: ml.rw + macroGap,
+        h: ml.rh + macroGap,
+      });
+    }
+
+    // Build cluster → tile lookup
+    const cidToTile = new Map<number, HexTile>();
+    for (const tile of data.hexTiles) {
+      if (tile.cluster) cidToTile.set(tile.cluster.id, tile);
+    }
+
+    // Independently pick the single most extreme cluster per category.
+    // No waterfall — each category selects its own best representative.
+    type Candidate = {
+      clusterId: number;
+      label: QualitativeLabel;
+      color: string;
+      anchorX: number;
+      anchorY: number;
+      trialCount: number;
+    };
+
+    // Gather all visible clusters with sufficient support
+    type VisibleCluster = {
+      cid: number;
+      tile: HexTile;
+      m: SRMetrics;
+    };
+    const visible: VisibleCluster[] = [];
+    for (const [cid, m] of clusterQualMetrics) {
+      if (m.trialCount < 2) continue;
+      const tile = cidToTile.get(cid);
+      if (!tile?.cluster) continue;
+      if (
+        !TUNER_NAMES.some(
+          (t) => selectedTuners.has(t) && tile.cluster!.tunerCounts[t] > 0,
+        )
+      )
+        continue;
+      visible.push({ cid, tile, m });
+    }
+
+    const rawPicks: Candidate[] = [];
+
+    // Helper: pick best cluster for a category (same cell can be picked for multiple)
+    const pickBest = (
+      label: QualitativeLabel,
+      filter: (v: VisibleCluster) => boolean,
+      rank: (v: VisibleCluster) => number, // higher = more extreme
+    ) => {
+      if (!selectedQualLabels.has(label)) return;
+      let best: VisibleCluster | null = null;
+      let bestScore = -Infinity;
+      for (const v of visible) {
+        if (!filter(v)) continue;
+        const score = rank(v);
+        if (score > bestScore) {
+          bestScore = score;
+          best = v;
+        }
+      }
+      if (best) {
+        rawPicks.push({
+          clusterId: best.cid,
+          label,
+          color: QUAL_LABEL_COLORS[label],
+          anchorX: best.tile.x,
+          anchorY: best.tile.y,
+          trialCount: best.m.trialCount,
+        });
+      }
+    };
+
+    // No threshold filter — just pick the single most extreme cluster per category.
+    pickBest(
+      "Failure-prone",
+      (v) => v.m.failureRate > 0,
+      (v) => v.m.failureRate,
+    );
+    pickBest(
+      "High Novelty",
+      () => true,
+      (v) => v.m.meanMarginalCoverage,
+    );
+    pickBest(
+      "Saturated",
+      (v) => v.m.meanMarginalCoverage < v.m.meanCoverage,
+      (v) => v.m.meanCoverage - v.m.meanMarginalCoverage,
+    );
+    pickBest(
+      "High Coverage",
+      () => true,
+      (v) => v.m.meanCoverage,
+    );
+    pickBest(
+      "Low Coverage",
+      () => true,
+      (v) => -v.m.meanCoverage,
+    );
+    pickBest(
+      "Volatile",
+      () => true,
+      (v) => v.m.coverageIqr,
+    );
+    pickBest(
+      "High Density",
+      () => true,
+      (v) => v.m.trialCount,
+    );
+    pickBest(
+      "Low Density",
+      (v) => v.m.trialCount > 0,
+      (v) => -v.m.trialCount,
+    );
+
+    // Group by clusterId — same cell may qualify for multiple labels
+    const grouped = new Map<
+      number,
+      {
+        labels: { label: QualitativeLabel; color: string }[];
+        anchorX: number;
+        anchorY: number;
+      }
+    >();
+    for (const p of rawPicks) {
+      const existing = grouped.get(p.clusterId);
+      if (existing) {
+        existing.labels.push({ label: p.label, color: p.color });
+      } else {
+        grouped.set(p.clusterId, {
+          labels: [{ label: p.label, color: p.color }],
+          anchorX: p.anchorX,
+          anchorY: p.anchorY,
+        });
+      }
+    }
+
+    type QualLabelPos = {
+      id: number;
+      cx: number;
+      cy: number;
+      anchorX: number;
+      anchorY: number;
+      lines: { label: QualitativeLabel; color: string }[];
+      rw: number;
+      rh: number;
+    };
+    const results: QualLabelPos[] = [];
+
+    const offsets = [
+      { x: 0, y: -1 },
+      { x: 0, y: 1 },
+      { x: -1, y: 0 },
+      { x: 1, y: 0 },
+      { x: -0.7, y: -0.7 },
+      { x: 0.7, y: -0.7 },
+      { x: -0.7, y: 0.7 },
+      { x: 0.7, y: 0.7 },
+    ];
+
+    const lineH = fs * 1.3;
+    for (const [clusterId, group] of grouped) {
+      const { labels, anchorX, anchorY } = group;
+      const maxLabelLen = Math.max(...labels.map((l) => l.label.length));
+      const rw = maxLabelLen * charW + pad * 2;
+      const rh = labels.length * lineH + pad * 2;
+
+      let chosen: { x: number; y: number } | null = null;
+      // Start far from the cell so labels land in empty background space
+      for (const mult of [5, 7, 10, 14, 18]) {
+        if (chosen) break;
+        const dist = HEX_SIZE * mult;
+        for (const d of offsets) {
+          const px = anchorX + d.x * dist;
+          const py = anchorY + d.y * dist;
+          const bb: Bbox = {
+            x: px - rw / 2 - gap,
+            y: py - rh / 2 - gap,
+            w: rw + gap * 2,
+            h: rh + gap * 2,
+          };
+          if (
+            labelInsideView(px, py, rw, rh) &&
+            !placed.some((p) => bbOverlaps(bb, p)) &&
+            !labelOverlapsTiles(bb.x, bb.y, bb.w, bb.h)
+          ) {
+            chosen = { x: px, y: py };
+            placed.push(bb);
+            break;
+          }
+        }
+      }
+      // Fallback: allow tile overlap at far distance
+      if (!chosen) {
+        for (const mult of [8, 12, 16]) {
+          if (chosen) break;
+          const dist = HEX_SIZE * mult;
+          for (const d of offsets) {
+            const px = anchorX + d.x * dist;
+            const py = anchorY + d.y * dist;
+            const bb: Bbox = {
+              x: px - rw / 2 - gap,
+              y: py - rh / 2 - gap,
+              w: rw + gap * 2,
+              h: rh + gap * 2,
+            };
+            if (
+              labelInsideView(px, py, rw, rh) &&
+              !placed.some((p) => bbOverlaps(bb, p))
+            ) {
+              chosen = { x: px, y: py };
+              placed.push(bb);
+              break;
+            }
+          }
+        }
+      }
+
+      if (!chosen) continue;
+
+      results.push({
+        id: clusterId,
+        cx: chosen.x,
+        cy: chosen.y,
+        anchorX,
+        anchorY,
+        lines: labels,
+        rw,
+        rh,
+      });
+    }
+
+    return results;
+  }, [
+    data,
+    clusterQualMetrics,
+    selectedQualLabels,
+    selectedTuners,
+    renderScale,
+    HEX_SIZE,
+    labelInsideView,
+    labelOverlapsTiles,
+    macroLabelPositions,
+  ]);
+
+  // ── Parameter names from cluster centroids ──
+  const paramNames = useMemo(() => {
+    if (!data || data.clusters.length === 0) return [];
+    const rawKeys = Object.keys(data.clusters[0].centroid);
+    // Collapse one-hot categorical keys ("search__bfs", "search__dfs") → "search"
+    const seen = new Set<string>();
+    const names: string[] = [];
+    for (const k of rawKeys) {
+      const base = k.split("__")[0];
+      if (!seen.has(base)) {
+        seen.add(base);
+        names.push(base);
+      }
+    }
+    return names.sort();
+  }, [data]);
+
+  // ── Boundary path between different param bins ──
+  const paramBinBoundaryPath = useMemo((): string | null => {
+    if (!paramCellBins || !data) return null;
+    const tileBin = new Map<string, string>();
+    for (const tile of data.hexTiles) {
+      if (!tile.cluster) continue;
+      const bin = paramCellBins.bins.get(tile.cluster.id);
+      if (bin) tileBin.set(`${tile.q},${tile.r}`, bin);
+    }
+    const verts = Array.from({ length: 6 }, (_, i) => ({
+      x: HEX_SIZE * Math.cos((i * Math.PI) / 3),
+      y: HEX_SIZE * Math.sin((i * Math.PI) / 3),
+    }));
+    let d = "";
+    for (const tile of data.hexTiles) {
+      const tk = `${tile.q},${tile.r}`;
+      const myBin = tileBin.get(tk);
+      if (!myBin) continue;
+      for (let ei = 0; ei < 6; ei++) {
+        const dir = HEX_DIRECTIONS[ei];
+        const nk = `${tile.q + dir.dq},${tile.r + dir.dr}`;
+        const nBin = tileBin.get(nk);
+        if (nBin !== undefined && nBin !== myBin) {
+          const va = verts[ei];
+          const vb = verts[(ei + 1) % 6];
+          d += `M${tile.x + va.x},${tile.y + va.y}L${tile.x + vb.x},${tile.y + vb.y}`;
+        }
+      }
+    }
+    return d || null;
+  }, [paramCellBins, data, HEX_SIZE, HEX_DIRECTIONS]);
+
+  // ── BFS connected regions per bin with centroids for labels ──
+  const paramBinRegions = useMemo((): {
+    bin: string;
+    cx: number;
+    cy: number;
+    tileCount: number;
+  }[] => {
+    if (!paramCellBins || !data) return [];
+    const tileBin = new Map<string, string>();
+    const tilePixel = new Map<string, { x: number; y: number }>();
+    for (const tile of data.hexTiles) {
+      if (!tile.cluster) continue;
+      const bin = paramCellBins.bins.get(tile.cluster.id);
+      if (bin) {
+        const k = `${tile.q},${tile.r}`;
+        tileBin.set(k, bin);
+        tilePixel.set(k, { x: tile.x, y: tile.y });
+      }
+    }
+    const visited = new Set<string>();
+    const regions: {
+      bin: string;
+      cx: number;
+      cy: number;
+      tileCount: number;
+    }[] = [];
+    for (const [startKey, bin] of tileBin) {
+      if (visited.has(startKey)) continue;
+      const queue = [startKey];
+      visited.add(startKey);
+      let sumX = 0,
+        sumY = 0,
+        count = 0;
+      while (queue.length > 0) {
+        const key = queue.shift()!;
+        const px = tilePixel.get(key)!;
+        sumX += px.x;
+        sumY += px.y;
+        count++;
+        const [qStr, rStr] = key.split(",");
+        const q = parseInt(qStr, 10);
+        const r = parseInt(rStr, 10);
+        for (const { dq, dr } of HEX_DIRECTIONS) {
+          const nk = `${q + dq},${r + dr}`;
+          if (!visited.has(nk) && tileBin.get(nk) === bin) {
+            visited.add(nk);
+            queue.push(nk);
+          }
+        }
+      }
+      regions.push({
+        bin,
+        cx: sumX / count,
+        cy: sumY / count,
+        tileCount: count,
+      });
+    }
+    // Keep only the largest CC per bin for labeling
+    const bestPerBin = new Map<string, (typeof regions)[0]>();
+    for (const r of regions) {
+      const existing = bestPerBin.get(r.bin);
+      if (!existing || r.tileCount > existing.tileCount)
+        bestPerBin.set(r.bin, r);
+    }
+    return Array.from(bestPerBin.values());
+  }, [paramCellBins, data, HEX_DIRECTIONS]);
 
   // Territory fills + borders: scaled hex fills, bridge quads between neighbors, boundary lines
   const territoryScaleFactors = useMemo(
@@ -1723,24 +2461,34 @@ export function HexMap({
   ]);
 
   // Mouse handlers
-  const handleMouseEnter = useCallback((tile: HexTile, _e: React.MouseEvent) => {
-    if (!tile.cluster) return;
-    setHoveredClusterId(tile.cluster.id);
-    // Highlight the sub-region & territory this tile belongs to
-    const srId = clusterToSubRegionId.get(tile.cluster.id) ?? null;
-    setHoveredSubRegionId(srId);
-    const tId = clusterToTerrId.get(tile.cluster.id) ?? null;
-    setHoveredTerritoryId(tId);
-  }, [clusterToSubRegionId, clusterToTerrId]);
+  const handleMouseEnter = useCallback(
+    (tile: HexTile, _e: React.MouseEvent) => {
+      if (!tile.cluster) return;
+      setHoveredClusterId(tile.cluster.id);
+      // In pixel mode at overview level, no hover highlighting
+      if (effectiveColorMode === "pixel" && focusedTerritoryId === null) return;
+      // Highlight the sub-region & territory this tile belongs to
+      if (!selectedParam) {
+        const srId = clusterToSubRegionId.get(tile.cluster.id) ?? null;
+        setHoveredSubRegionId(srId);
+        // At drill level 2, also highlight detail region
+        const drVisual = clusterToDetailRegionVisual.get(tile.cluster.id);
+        setHoveredDetailRegionId(drVisual?.detailRegionId ?? null);
+      }
+      const tId = clusterToTerrId.get(tile.cluster.id) ?? null;
+      setHoveredTerritoryId(tId);
+    },
+    [clusterToSubRegionId, clusterToTerrId, clusterToDetailRegionVisual, selectedParam, effectiveColorMode, focusedTerritoryId],
+  );
 
   const handleMouseMove = useCallback((_e: React.MouseEvent) => {}, []);
 
   const handleMouseLeave = useCallback(() => {
     setHoveredClusterId(null);
     setHoveredSubRegionId(null);
+    setHoveredDetailRegionId(null);
     setHoveredTerritoryId(null);
   }, []);
-
 
   const toggleTuner = useCallback((tuner: TunerType) => {
     setSelectedTuners((prev) => {
@@ -1755,34 +2503,6 @@ export function HexMap({
   }, []);
 
   // Stats
-  const stats = useMemo(() => {
-    if (!data)
-      return {
-        totalTrials: 0,
-        totalClusters: 0,
-        tunerTotals: {} as Record<TunerType, number>,
-      };
-
-    const tunerTotals: Record<TunerType, number> = {
-      SymTuner: 0,
-      CMA_ES: 0,
-      Genetic: 0,
-      SuccessiveHalving: 0,
-      TPE: 0,
-      BayesianOptimization: 0,
-    };
-
-    let totalTrials = 0;
-    for (const c of data.clusters) {
-      totalTrials += c.totalTrials;
-      for (const t of TUNER_NAMES) {
-        tunerTotals[t] += c.tunerCounts[t];
-      }
-    }
-
-    return { totalTrials, totalClusters: data.clusters.length, tunerTotals };
-  }, [data]);
-
   // Loading
   if (loading) {
     return (
@@ -1822,7 +2542,10 @@ export function HexMap({
   if (!data) return null;
 
   return (
-    <div ref={containerRef} style={{ position: "relative", width: "100%", height: "100%" }}>
+    <div
+      ref={containerRef}
+      style={{ position: "relative", width: "100%", height: "100%" }}
+    >
       <div
         style={{
           position: "relative",
@@ -1840,10 +2563,14 @@ export function HexMap({
           height={height}
           style={{ flexShrink: 0 }}
         >
-          {layoutMode === "hex" && (
-            /* ===== HEX GRID MODE ===== */
+          {/* ===== HEX GRID ===== */}
             <g
-              transform={`translate(${centerX}, ${centerY}) scale(${scale}) translate(${-dataCenter.x}, ${-dataCenter.y})`}
+              style={{
+                transform: viewFocus
+                  ? `translate(${centerX}px, ${centerY}px) scale(${viewFocus.zoomScale}) translate(${-viewFocus.cx}px, ${-viewFocus.cy}px)`
+                  : `translate(${centerX}px, ${centerY}px) scale(${scale}) translate(${-dataCenter.x}px, ${-dataCenter.y}px)`,
+                transition: "transform 600ms cubic-bezier(0.4, 0, 0.2, 1)",
+              }}
             >
               {/* Transparent background — click clears focus */}
               <rect
@@ -1853,9 +2580,16 @@ export function HexMap({
                 height={100000}
                 fill="transparent"
                 onClick={() => {
-                  setFocusedTerritoryId(null);
-                  setFocusedSubRegionId(null);
-                  setInspectedClusterId(null);
+                  if (inspectedClusterId !== null) {
+                    setInspectedClusterId(null);
+                  } else if (focusedSubRegionId !== null) {
+                    setFocusedSubRegionId(null);
+                    setInspectedClusterId(null);
+                  } else {
+                    setFocusedTerritoryId(null);
+                    setFocusedSubRegionId(null);
+                    setInspectedClusterId(null);
+                  }
                 }}
                 style={{ cursor: "default" }}
               />
@@ -1870,26 +2604,60 @@ export function HexMap({
                 );
                 if (!hasSelectedTuner) return null;
 
-                const fill = getHexFill(tile);
+                // Level 2 (sub-region focused): hide tiles outside focused sub-region
+                if (
+                  effectiveColorMode === "pixel" &&
+                  focusedSubRegionId !== null &&
+                  clusterToSubRegionId.get(tile.cluster.id) !== focusedSubRegionId
+                ) return null;
+
+                const baseFill = getHexFill(tile);
+                const fill =
+                  previewTuner !== null &&
+                  (tile.cluster!.tunerCounts[previewTuner] ?? 0) > 0
+                    ? TUNER_COLORS[previewTuner]
+                    : baseFill;
                 const isInspected =
                   inspectedClusterId === tile.cluster.id &&
                   focusedTerritoryId !== null;
                 const tileTerrId = clusterToTerrId.get(tile.cluster.id);
-                const activeTerritoryId = focusedTerritoryId ?? hoveredTerritoryId;
+                // In pixel mode at overview level, skip territory/sub-region muting
+                const isOverviewPixel = effectiveColorMode === "pixel" && focusedTerritoryId === null;
+                const activeTerritoryId = isOverviewPixel
+                  ? null
+                  : (focusedTerritoryId ?? hoveredTerritoryId);
                 const isMuted =
                   activeTerritoryId !== null &&
                   tileTerrId !== activeTerritoryId;
-                const activeSubRegionId =
-                  hoveredSubRegionId ?? focusedSubRegionId;
+                const activeSubRegionId = isOverviewPixel || selectedParam
+                  ? null
+                  : (hoveredSubRegionId ?? focusedSubRegionId);
                 const isSubMuted =
                   !isMuted &&
                   activeSubRegionId !== null &&
                   clusterToSubRegionId.get(tile.cluster.id) !==
                     activeSubRegionId;
+                const activeDetailRegionId =
+                  focusedSubRegionId !== null && !selectedParam
+                    ? hoveredDetailRegionId
+                    : null;
+                const isDetailMuted =
+                  !isMuted &&
+                  !isSubMuted &&
+                  activeDetailRegionId !== null &&
+                  (clusterToDetailRegionVisual.get(tile.cluster.id)?.detailRegionId ?? null) !== activeDetailRegionId;
                 const isTunerMuted =
                   previewTuner !== null &&
                   (tile.cluster!.tunerCounts[previewTuner] ?? 0) === 0;
-                const tileOpacity = isTunerMuted ? 0.1 : isMuted ? 0.12 : isSubMuted ? 0.22 : 1;
+                const tileOpacity = isTunerMuted
+                  ? 0.1
+                  : isMuted
+                    ? 0.12
+                    : isSubMuted
+                      ? 0.22
+                      : isDetailMuted
+                        ? 0.3
+                        : 1;
 
                 return (
                   <g
@@ -1898,6 +2666,28 @@ export function HexMap({
                     onMouseEnter={(e) => handleMouseEnter(tile, e)}
                     onMouseMove={handleMouseMove}
                     onMouseLeave={handleMouseLeave}
+                    onClick={(e) => {
+                      if (effectiveColorMode === "pixel") {
+                        e.stopPropagation();
+                        const tId = clusterToTerrId.get(tile.cluster!.id) ?? null;
+                        const sId = clusterToSubRegionId.get(tile.cluster!.id) ?? null;
+
+                        if (focusedTerritoryId === null || tId !== focusedTerritoryId) {
+                          // Level 0 → Level 1: focus territory
+                          setFocusedTerritoryId(tId);
+                          setFocusedSubRegionId(null);
+                          setInspectedClusterId(null);
+                        } else if (focusedSubRegionId === null || sId !== focusedSubRegionId) {
+                          // Level 1 → Level 2: focus sub-region
+                          setFocusedSubRegionId(sId);
+                          setInspectedClusterId(null);
+                        } else {
+                          // Level 2: inspect cluster
+                          setInspectedClusterId(tile.cluster!.id);
+                        }
+                      }
+                    }}
+                    style={effectiveColorMode === "pixel" ? { cursor: "pointer" } : undefined}
                     opacity={tileOpacity}
                   >
                     <path
@@ -1906,8 +2696,14 @@ export function HexMap({
                       stroke={
                         isInspected
                           ? "#4F46E5"
-                          : (clusterToSubRegionVisual.get(tile.cluster.id)
-                              ?.stroke ?? "#E2E8F0")
+                          : effectiveColorMode === "pixel" && focusedTerritoryId === null
+                            ? "#E2E8F0"
+                            : effectiveColorMode === "pixel" && focusedSubRegionId !== null
+                              ? (clusterToDetailRegionVisual.get(tile.cluster.id)
+                                  ?.stroke ?? clusterToSubRegionVisual.get(tile.cluster.id)
+                                  ?.stroke ?? "#E2E8F0")
+                              : (clusterToSubRegionVisual.get(tile.cluster.id)
+                                  ?.stroke ?? "#E2E8F0")
                       }
                       strokeWidth={isInspected ? 3 : 0.5}
                     />
@@ -1915,31 +2711,39 @@ export function HexMap({
                 );
               })}
 
-              {/* ── Hover + inspect highlight: separate overlay so hover doesn't re-render tiles ── */}
-              {hoveredClusterId !== null && (() => {
-                const tile = data.hexTiles.find(
-                  (t) => t.cluster?.id === hoveredClusterId,
-                );
-                if (!tile) return null;
-                return (
-                  <g
-                    transform={`translate(${tile.x}, ${tile.y})`}
-                    pointerEvents="none"
-                  >
-                    <path
-                      d={hexPath}
-                      fill="none"
-                      stroke="#1E293B"
-                      strokeWidth={2.5}
-                    />
-                  </g>
-                );
-              })()}
+              {/* ── Hover highlight: dashed outer border of hovered sub-region ── */}
+              {hoveredSubRegionBorder && (
+                <>
+                  <path d={hoveredSubRegionBorder} fill="none" stroke="white" strokeWidth={5} strokeLinecap="round" strokeLinejoin="round" opacity={0.7} pointerEvents="none" />
+                  <path d={hoveredSubRegionBorder} fill="none" stroke="#1E293B" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" pointerEvents="none" />
+                </>
+              )}
+              {/* ── Hover highlight at overview level: single tile ── */}
+              {hoveredClusterId !== null && focusedTerritoryId === null &&
+                (() => {
+                  const tile = data.hexTiles.find(
+                    (t) => t.cluster?.id === hoveredClusterId,
+                  );
+                  if (!tile) return null;
+                  return (
+                    <g
+                      transform={`translate(${tile.x}, ${tile.y})`}
+                      pointerEvents="none"
+                    >
+                      <path
+                        d={hexPath}
+                        fill="none"
+                        stroke="#1E293B"
+                        strokeWidth={2.5}
+                      />
+                    </g>
+                  );
+                })()}
 
               {renderTerritoryFillsAndBorders}
 
               {/* ── Macro boundaries: white halo pass (drawn first, behind) ── */}
-              {boundaryData.macro.map(({ d, terr }) => {
+              {focusedSubRegionId === null && boundaryData.macro.map(({ d, terr }) => {
                 if (!d) return null;
                 const isFocused = terr.id === focusedTerritoryId;
                 const isMuted = focusedTerritoryId !== null && !isFocused;
@@ -1960,7 +2764,7 @@ export function HexMap({
               })}
 
               {/* ── Macro boundaries: colored line pass ─────────────────── */}
-              {boundaryData.macro.map(({ d, terr }) => {
+              {focusedSubRegionId === null && boundaryData.macro.map(({ d, terr }) => {
                 if (!d) return null;
                 const isFocused = terr.id === focusedTerritoryId;
                 const isMuted = focusedTerritoryId !== null && !isFocused;
@@ -1979,100 +2783,339 @@ export function HexMap({
                 );
               })}
 
-              {/* ── Sub-region boundaries: neutral, focus mode only ──────── */}
-              {(focusedTerritoryId ?? hoveredTerritoryId) !== null &&
-               (() => {
-                 const at = territories.find((t) => t.id === (focusedTerritoryId ?? hoveredTerritoryId));
-                 return at && at.subRegions.length > 1;
-               })() && (
+              {/* ── Sub-region boundaries: neutral, focus mode only (hidden at drill level 2) ──────── */}
+              {focusedTerritoryId !== null && focusedSubRegionId === null &&
+                (() => {
+                  const at = territories.find(
+                    (t) => t.id === focusedTerritoryId,
+                  );
+                  return at && at.subRegions.length > 1;
+                })() && (
+                  <>
+                    {/* white halo (thin) */}
+                    {boundaryData.sub
+                      .filter(
+                        ({ terr }) =>
+                          terr.id === focusedTerritoryId,
+                      )
+                      .map(({ d, sr, terr }) =>
+                        d ? (
+                          <path
+                            key={`sub-halo-${terr.id}-${sr.id}`}
+                            d={d}
+                            fill="none"
+                            stroke="white"
+                            strokeWidth={3}
+                            strokeLinecap="round"
+                            opacity={0.55}
+                            pointerEvents="none"
+                          />
+                        ) : null,
+                      )}
+                    {/* slate dashed line — neutral, reads as "internal division" not a new territory */}
+                    {boundaryData.sub
+                      .filter(
+                        ({ terr }) =>
+                          terr.id === focusedTerritoryId,
+                      )
+                      .map(({ d, sr, terr }) =>
+                        d ? (
+                          <path
+                            key={`sub-line-${terr.id}-${sr.id}`}
+                            d={d}
+                            fill="none"
+                            stroke="#64748B"
+                            strokeWidth={1.5}
+                            strokeDasharray={`${5},${4}`}
+                            strokeLinecap="round"
+                            opacity={0.7}
+                            pointerEvents="none"
+                          />
+                        ) : null,
+                      )}
+                  </>
+                )}
+
+              {/* ── Detail-region boundaries: sub-region focus mode only ──── */}
+              {focusedSubRegionId !== null && focusedTerritoryId !== null &&
+                (() => {
+                  const terr = territories.find((t) => t.id === focusedTerritoryId);
+                  const sr = terr?.subRegions.find((s) => s.id === focusedSubRegionId);
+                  return sr ? sr.detailRegions.length > 1 : false;
+                })() && (
+                  <>
+                    {boundaryData.detail
+                      .filter(({ sr, terr }) => sr.id === focusedSubRegionId && terr.id === focusedTerritoryId)
+                      .map(({ d, dr, sr, terr }) =>
+                        d ? (
+                          <path
+                            key={`detail-halo-${terr.id}-${sr.id}-${dr.id}`}
+                            d={d}
+                            fill="none"
+                            stroke="white"
+                            strokeWidth={2.5}
+                            strokeLinecap="round"
+                            opacity={0.5}
+                            pointerEvents="none"
+                          />
+                        ) : null,
+                      )}
+                    {boundaryData.detail
+                      .filter(({ sr, terr }) => sr.id === focusedSubRegionId && terr.id === focusedTerritoryId)
+                      .map(({ d, dr, sr, terr }) =>
+                        d ? (
+                          <path
+                            key={`detail-line-${terr.id}-${sr.id}-${dr.id}`}
+                            d={d}
+                            fill="none"
+                            stroke="#94A3B8"
+                            strokeWidth={1}
+                            strokeDasharray={`${3},${3}`}
+                            strokeLinecap="round"
+                            opacity={0.7}
+                            pointerEvents="none"
+                          />
+                        ) : null,
+                      )}
+                  </>
+                )}
+
+              {/* ── Focused sub-region outer border ── */}
+              {focusedSubRegionId !== null && focusedSubRegionBorder && (
                 <>
-                  {/* white halo (thin) */}
-                  {boundaryData.sub
-                    .filter(({ terr }) => terr.id === (focusedTerritoryId ?? hoveredTerritoryId))
-                    .map(({ d, sr, terr }) =>
-                      d ? (
-                        <path
-                          key={`sub-halo-${terr.id}-${sr.id}`}
-                          d={d}
-                          fill="none"
-                          stroke="white"
-                          strokeWidth={3}
-                          strokeLinecap="round"
-                          opacity={0.55}
-                          pointerEvents="none"
-                        />
-                      ) : null,
-                    )}
-                  {/* slate dashed line — neutral, reads as "internal division" not a new territory */}
-                  {boundaryData.sub
-                    .filter(({ terr }) => terr.id === (focusedTerritoryId ?? hoveredTerritoryId))
-                    .map(({ d, sr, terr }) =>
-                      d ? (
-                        <path
-                          key={`sub-line-${terr.id}-${sr.id}`}
-                          d={d}
-                          fill="none"
-                          stroke="#64748B"
-                          strokeWidth={1.5}
-                          strokeDasharray={`${5},${4}`}
-                          strokeLinecap="round"
-                          opacity={0.7}
-                          pointerEvents="none"
-                        />
-                      ) : null,
-                    )}
+                  <path
+                    d={focusedSubRegionBorder}
+                    fill="none"
+                    stroke="white"
+                    strokeWidth={6}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    opacity={0.85}
+                    pointerEvents="none"
+                  />
+                  <path
+                    d={focusedSubRegionBorder}
+                    fill="none"
+                    stroke="#475569"
+                    strokeWidth={2.5}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    opacity={0.8}
+                    pointerEvents="none"
+                  />
                 </>
               )}
 
-              {/* ── Sub-region labels: multi-line, outside tiles, with leader lines ── */}
-              {subLabelPositions.map(({ sr, x, y, rw, rh: lh, lines, color, anchorX, anchorY }) => {
-                const isLabelHovered = hoveredSubRegionId === sr.id;
-                const fs = 10 / scale;
-                const lineH = fs * 1.3;
-                const rx = 4 / scale;
-                return (
-                  <g
-                    key={`sr-label-${sr.territoryId}-${sr.id}`}
-                    style={{ cursor: "pointer" }}
-                    opacity={
-                      hoveredSubRegionId !== null && !isLabelHovered ? 0.25 : 1
-                    }
-                    onMouseEnter={() => setHoveredSubRegionId(sr.id)}
-                    onMouseLeave={() => setHoveredSubRegionId(null)}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setFocusedSubRegionId((prev) =>
-                        prev === sr.id ? null : sr.id,
-                      );
-                    }}
-                  >
-                    <line
-                      x1={anchorX} y1={anchorY} x2={x} y2={y}
-                      stroke={color} strokeWidth={1 / scale}
-                      strokeDasharray={`${3 / scale},${2 / scale}`} opacity={0.5}
-                    />
-                    <circle cx={anchorX} cy={anchorY} r={2.5 / scale}
-                      fill={color} opacity={0.7} />
-                    <rect x={x - rw / 2} y={y - lh / 2} width={rw} height={lh}
-                      rx={rx} fill="white" opacity={0.96} />
-                    <rect x={x - rw / 2} y={y - lh / 2} width={rw} height={lh}
-                      rx={rx} fill="none" stroke={color}
-                      strokeWidth={1.5 / scale} />
-                    <text x={x} textAnchor="middle" fontSize={fs}
-                      fontWeight={600} fill={color}>
-                      {lines.map((line, li) => (
-                        <tspan key={li} x={x}
-                          y={y - (lines.length - 1) * lineH / 2 + li * lineH}
-                          dominantBaseline="middle"
-                        >{line}</tspan>
-                      ))}
-                    </text>
-                  </g>
-                );
-              })}
+              {/* ── Sub-region labels: multi-line, outside tiles, with leader lines (hidden at drill level 2) ── */}
+              {!selectedParam && focusedSubRegionId === null &&
+                subLabelPositions.map(
+                  ({
+                    sr,
+                    x,
+                    y,
+                    rw,
+                    rh: lh,
+                    lines,
+                    color,
+                    anchorX,
+                    anchorY,
+                  }) => {
+                    const isLabelHovered = hoveredSubRegionId === sr.id;
+                    const fs = 10 / renderScale;
+                    const lineH = fs * 1.3;
+                    const rx = 4 / renderScale;
+                    return (
+                      <g
+                        key={`sr-label-${sr.territoryId}-${sr.id}`}
+                        style={{ cursor: "pointer" }}
+                        opacity={
+                          hoveredSubRegionId !== null && !isLabelHovered
+                            ? 0.25
+                            : 1
+                        }
+                        onMouseEnter={() => setHoveredSubRegionId(sr.id)}
+                        onMouseLeave={() => setHoveredSubRegionId(null)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setFocusedSubRegionId((prev) =>
+                            prev === sr.id ? null : sr.id,
+                          );
+                        }}
+                      >
+                        <line
+                          x1={anchorX}
+                          y1={anchorY}
+                          x2={x}
+                          y2={y}
+                          stroke={color}
+                          strokeWidth={1 / renderScale}
+                          strokeDasharray={`${3 / renderScale},${2 / renderScale}`}
+                          opacity={0.5}
+                        />
+                        <circle
+                          cx={anchorX}
+                          cy={anchorY}
+                          r={2.5 / renderScale}
+                          fill={color}
+                          opacity={0.7}
+                        />
+                        <rect
+                          x={x - rw / 2}
+                          y={y - lh / 2}
+                          width={rw}
+                          height={lh}
+                          rx={rx}
+                          fill="white"
+                          opacity={0.96}
+                        />
+                        <rect
+                          x={x - rw / 2}
+                          y={y - lh / 2}
+                          width={rw}
+                          height={lh}
+                          rx={rx}
+                          fill="none"
+                          stroke={color}
+                          strokeWidth={1.5 / renderScale}
+                        />
+                        <text
+                          x={x}
+                          textAnchor="middle"
+                          fontSize={fs}
+                          fontWeight={600}
+                          fill={color}
+                        >
+                          {lines.map((line, li) => (
+                            <tspan
+                              key={li}
+                              x={x}
+                              y={
+                                y -
+                                ((lines.length - 1) * lineH) / 2 +
+                                li * lineH
+                              }
+                              dominantBaseline="middle"
+                            >
+                              {line}
+                            </tspan>
+                          ))}
+                        </text>
+                      </g>
+                    );
+                  },
+                )}
+
+              {/* ── Detail-region labels: shown at drill level 2 ── */}
+              {!selectedParam &&
+                detailLabelPositions.map(
+                  ({ dr, x, y, rw, rh: lh, lines, color, anchorX, anchorY }) => {
+                    const isLabelHovered = hoveredDetailRegionId === dr.id;
+                    const fs = 9 / renderScale;
+                    const lineH = fs * 1.3;
+                    const rx = 3 / renderScale;
+                    return (
+                      <g
+                        key={`dr-label-${dr.id}`}
+                        pointerEvents="none"
+                        opacity={hoveredDetailRegionId !== null && !isLabelHovered ? 0.25 : 1}
+                      >
+                        <line
+                          x1={anchorX} y1={anchorY} x2={x} y2={y}
+                          stroke={color}
+                          strokeWidth={0.8 / renderScale}
+                          strokeDasharray={`${2 / renderScale},${2 / renderScale}`}
+                          opacity={0.4}
+                        />
+                        <circle cx={anchorX} cy={anchorY} r={2 / renderScale} fill={color} opacity={0.6} />
+                        <rect x={x - rw / 2} y={y - lh / 2} width={rw} height={lh} rx={rx} fill="white" opacity={0.94} />
+                        <rect x={x - rw / 2} y={y - lh / 2} width={rw} height={lh} rx={rx} fill="none" stroke={color} strokeWidth={1 / renderScale} />
+                        <text x={x} textAnchor="middle" fontSize={fs} fontWeight={600} fill={color}>
+                          {lines.map((line, li) => (
+                            <tspan key={li} x={x} y={y - ((lines.length - 1) * lineH) / 2 + li * lineH} dominantBaseline="middle">
+                              {line}
+                            </tspan>
+                          ))}
+                        </text>
+                      </g>
+                    );
+                  },
+                )}
+
+              {/* ── Parameter bin boundaries (boolean params) ── */}
+              {paramBinBoundaryPath && (
+                <>
+                  <path
+                    d={paramBinBoundaryPath}
+                    fill="none"
+                    stroke="white"
+                    strokeWidth={4 / renderScale}
+                    strokeLinecap="round"
+                    opacity={0.8}
+                    pointerEvents="none"
+                  />
+                  <path
+                    d={paramBinBoundaryPath}
+                    fill="none"
+                    stroke="#374151"
+                    strokeWidth={1.5 / renderScale}
+                    strokeLinecap="round"
+                    opacity={0.6}
+                    pointerEvents="none"
+                  />
+                </>
+              )}
+
+              {/* ── Parameter bin region labels ── */}
+              {paramBinRegions.length > 0 &&
+                paramBinRegions.map((region, i) => {
+                  const color =
+                    paramCellBins?.binColors[region.bin] ?? MIXED_COLOR;
+                  const fs = 10 / renderScale;
+                  const labelText = region.bin;
+                  const textW = labelText.length * fs * 0.55;
+                  const padX = 5 / renderScale;
+                  const padY = 3 / renderScale;
+                  const rw = textW + padX * 2;
+                  const rh = fs + padY * 2;
+                  return (
+                    <g key={`param-bin-${i}`} pointerEvents="none">
+                      <rect
+                        x={region.cx - rw / 2}
+                        y={region.cy - rh / 2}
+                        width={rw}
+                        height={rh}
+                        rx={4 / renderScale}
+                        fill="white"
+                        opacity={0.92}
+                      />
+                      <rect
+                        x={region.cx - rw / 2}
+                        y={region.cy - rh / 2}
+                        width={rw}
+                        height={rh}
+                        rx={4 / renderScale}
+                        fill="none"
+                        stroke={color}
+                        strokeWidth={1.5 / renderScale}
+                      />
+                      <text
+                        x={region.cx}
+                        y={region.cy}
+                        textAnchor="middle"
+                        dominantBaseline="central"
+                        fontSize={fs}
+                        fontWeight={700}
+                        fill={color}
+                      >
+                        {labelText}
+                      </text>
+                    </g>
+                  );
+                })}
 
               {/* ── Macro territory labels: multi-line, outside tiles, with leader lines ── */}
-              {focusedTerritoryId === null && hoveredTerritoryId === null &&
+              {!selectedParam &&
+                focusedTerritoryId === null &&
                 macroLabelPositions.map(
                   ({
                     terr: t,
@@ -2085,201 +3128,232 @@ export function HexMap({
                     anchorY,
                   }) => {
                     const color = getTerritoryColor(t.id);
-                    const fs = 11 / scale;
+                    const fs = 11 / renderScale;
                     const lineH = fs * 1.3;
-                    const bw = 1.5 / scale;
-                    const rx = 5 / scale;
+                    const bw = 1.5 / renderScale;
+                    const rx = 5 / renderScale;
                     return (
                       <g key={`macro-label-${t.id}`} pointerEvents="none">
                         <line
-                          x1={anchorX} y1={anchorY} x2={px} y2={py}
-                          stroke={color} strokeWidth={1 / scale}
-                          strokeDasharray={`${4 / scale},${3 / scale}`} opacity={0.45}
+                          x1={anchorX}
+                          y1={anchorY}
+                          x2={px}
+                          y2={py}
+                          stroke={color}
+                          strokeWidth={1 / renderScale}
+                          strokeDasharray={`${4 / renderScale},${3 / renderScale}`}
+                          opacity={0.45}
                         />
-                        <circle cx={anchorX} cy={anchorY} r={3 / scale}
-                          fill={color} opacity={0.8} />
+                        <circle
+                          cx={anchorX}
+                          cy={anchorY}
+                          r={3 / renderScale}
+                          fill={color}
+                          opacity={0.8}
+                        />
                         <rect
-                          x={px - rw / 2 - 1 / scale} y={py - rh / 2 - 1 / scale}
-                          width={rw + 2 / scale} height={rh + 2 / scale}
-                          rx={rx + 1 / scale} fill="white"
+                          x={px - rw / 2 - 1 / renderScale}
+                          y={py - rh / 2 - 1 / renderScale}
+                          width={rw + 2 / renderScale}
+                          height={rh + 2 / renderScale}
+                          rx={rx + 1 / renderScale}
+                          fill="white"
                         />
                         <rect
-                          x={px - rw / 2} y={py - rh / 2}
-                          width={rw} height={rh} rx={rx}
-                          fill="none" stroke={color} strokeWidth={bw} opacity={0.9}
+                          x={px - rw / 2}
+                          y={py - rh / 2}
+                          width={rw}
+                          height={rh}
+                          rx={rx}
+                          fill="none"
+                          stroke={color}
+                          strokeWidth={bw}
+                          opacity={0.9}
                         />
-                        <text x={px} textAnchor="middle" fontSize={fs}
-                          fontWeight={700} fill={color}>
+                        <text
+                          x={px}
+                          textAnchor="middle"
+                          fontSize={fs}
+                          fontWeight={700}
+                          fill={color}
+                        >
                           {lines.map((line, li) => (
-                            <tspan key={li} x={px}
-                              y={py - (lines.length - 1) * lineH / 2 + li * lineH}
+                            <tspan
+                              key={li}
+                              x={px}
+                              y={
+                                py -
+                                ((lines.length - 1) * lineH) / 2 +
+                                li * lineH
+                              }
                               dominantBaseline="middle"
-                            >{line}</tspan>
+                            >
+                              {line}
+                            </tspan>
                           ))}
                         </text>
                       </g>
                     );
                   },
                 )}
-            </g>
-          )}
 
-          {layoutMode === "map" && voronoiMapData && (
-            /* ===== POLYGON MAP MODE (Standard Voronoi) ===== */
-            <g>
-              {/* clipPath definitions: each cluster clips to union of its sub-cells */}
-              <defs>
-                {voronoiMapData.cells.map((cell) => (
-                  <clipPath
-                    key={`clip-${cell.cluster.id}`}
-                    id={`voronoi-clip-${cell.cluster.id}`}
-                  >
-                    {cell.subCellPaths.map((d, i) => (
-                      <path key={i} d={d} />
-                    ))}
-                  </clipPath>
-                ))}
-              </defs>
-
-              {/* Per-cluster rendering */}
-              {voronoiMapData.cells.map((cell) => {
-                const syntheticTile = voronoiTileMap.get(cell.cluster.id);
-                if (!syntheticTile) return null;
-
-                const fill = getHexFill(syntheticTile);
-                const isHovered = hoveredClusterId === cell.cluster.id;
-                const isInspected =
-                  inspectedClusterId === cell.cluster.id &&
-                  focusedTerritoryId !== null;
-
-                // Bounding box of the cluster region
-                const xs = cell.polygon.map(([x]) => x);
-                const ys = cell.polygon.map(([, y]) => y);
-                const bw = Math.max(...xs) - Math.min(...xs);
-                const bh = Math.max(...ys) - Math.min(...ys);
-
-                return (
-                  <g
-                    key={`voronoi-${cell.cluster.id}`}
-                    onMouseEnter={(e) => {
-                      if (syntheticTile) handleMouseEnter(syntheticTile, e);
-                    }}
-                    onMouseMove={handleMouseMove}
-                    onMouseLeave={handleMouseLeave}
-                  >
-                    {/* Cell fill */}
-                    {cell.subCellPaths.map((d, i) => (
-                      <path
-                        key={`sub-${i}`}
-                        d={d}
-                        fill={fill || "#F8FAFC"}
-                        stroke="none"
+              {/* ── Per-cell qualitative labels (outside tiles, with leader lines) ── */}
+              {qualCellLabelPositions.map(
+                ({ id, cx, cy, anchorX, anchorY, lines, rw, rh }) => {
+                  const rx = 5 / renderScale;
+                  const bw = 1.2 / renderScale;
+                  const fs = 9 / renderScale;
+                  const lineH = fs * 1.3;
+                  const borderColor =
+                    lines.length === 1 ? lines[0].color : "#64748B";
+                  // Mute labels outside the focused/hovered territory
+                  const tId = clusterToTerrId.get(id) ?? null;
+                  const activeTerritoryId =
+                    focusedTerritoryId ?? hoveredTerritoryId;
+                  const isMuted =
+                    activeTerritoryId !== null && tId !== activeTerritoryId;
+                  return (
+                    <g
+                      key={`qual-${id}`}
+                      pointerEvents="none"
+                      opacity={isMuted ? 0.08 : 0.92}
+                    >
+                      {/* Leader line */}
+                      <line
+                        x1={anchorX}
+                        y1={anchorY}
+                        x2={cx}
+                        y2={cy}
+                        stroke={borderColor}
+                        strokeWidth={1 / renderScale}
+                        strokeDasharray={`${3 / renderScale},${2 / renderScale}`}
+                        opacity={0.5}
                       />
-                    ))}
-
-                    {/* Territory fill: layered sizes by territory rank */}
-                    {effectiveColorMode === "territory" &&
-                      (() => {
-                        const tc = cell.cluster.tunerCounts;
-                        const present = TUNER_NAMES.filter(
-                          (t) => selectedTuners.has(t) && tc[t] > 0,
-                        ).sort(
-                          (a, b) =>
-                            (tunerTerritoryRank.get(a) ?? 0) -
-                            (tunerTerritoryRank.get(b) ?? 0),
-                        );
-                        if (present.length === 0) return null;
-                        const scaleFactors = [1.0, 0.82, 0.64, 0.5];
-                        return present.map((tuner) => {
-                          const rank = tunerTerritoryRank.get(tuner) ?? 0;
-                          const s = scaleFactors[rank];
-                          return (
-                            <path
-                              key={`terr-fill-${tuner}`}
-                              d={cell.pathD}
-                              fill={TUNER_COLORS[tuner]}
-                              opacity={0.45}
-                              pointerEvents="none"
-                              transform={`translate(${cell.cx * (1 - s)}, ${cell.cy * (1 - s)}) scale(${s})`}
-                            />
-                          );
-                        });
-                      })()}
-
-                    {/* Hover/select highlight — fill only, no stroke (compound path would reveal sub-cells) */}
-                    {isHovered && !isInspected && (
-                      <g
-                        clipPath={`url(#voronoi-clip-${cell.cluster.id})`}
-                        pointerEvents="none"
+                      {/* Anchor dot */}
+                      <circle
+                        cx={anchorX}
+                        cy={anchorY}
+                        r={2.5 / renderScale}
+                        fill={borderColor}
+                        opacity={0.7}
+                      />
+                      {/* White background */}
+                      <rect
+                        x={cx - rw / 2 - 1 / renderScale}
+                        y={cy - rh / 2 - 1 / renderScale}
+                        width={rw + 2 / renderScale}
+                        height={rh + 2 / renderScale}
+                        rx={rx + 1 / renderScale}
+                        fill="white"
+                      />
+                      {/* Border */}
+                      <rect
+                        x={cx - rw / 2}
+                        y={cy - rh / 2}
+                        width={rw}
+                        height={rh}
+                        rx={rx}
+                        fill="white"
+                        stroke={borderColor}
+                        strokeWidth={bw}
+                        opacity={0.95}
+                      />
+                      {/* Multi-line label text — each line in its own color */}
+                      <text
+                        x={cx}
+                        textAnchor="middle"
+                        fontSize={fs}
+                        fontWeight={700}
                       >
-                        <rect
-                          x={Math.min(...xs)}
-                          y={Math.min(...ys)}
-                          width={bw}
-                          height={bh}
-                          fill="rgba(0,0,0,0.06)"
-                        />
-                      </g>
-                    )}
-                    {isInspected && (
-                      <g
-                        clipPath={`url(#voronoi-clip-${cell.cluster.id})`}
-                        pointerEvents="none"
-                      >
-                        <rect
-                          x={Math.min(...xs)}
-                          y={Math.min(...ys)}
-                          width={bw}
-                          height={bh}
-                          fill="rgba(79,70,229,0.1)"
-                        />
-                      </g>
-                    )}
-                  </g>
-                );
-              })}
-
-              {/* Cluster borders (thin, organic edges between different clusters) */}
-              {voronoiMapData.clusterBorderPaths.map((d, idx) => (
-                <path
-                  key={`cluster-border-${idx}`}
-                  d={d}
-                  fill="none"
-                  stroke="#CBD5E1"
-                  strokeWidth={0.8}
-                  strokeLinecap="round"
-                  pointerEvents="none"
-                />
-              ))}
-
-              {/* Territory borders (thick, on top) — hidden in territory color mode */}
-              {effectiveColorMode !== "territory" &&
-                voronoiMapData.territoryBorderPaths.map((d, idx) => (
-                  <path
-                    key={`terr-border-${idx}`}
-                    d={d}
-                    fill="none"
-                    stroke="#475569"
-                    strokeWidth={2.5}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    pointerEvents="none"
-                  />
-                ))}
-
-              {/* Tuner territory borders (per-tuner colored edges) */}
-              {effectiveColorMode === "territory" && mapTerritoryBorders}
+                        {lines.map((l, li) => (
+                          <tspan
+                            key={li}
+                            x={cx}
+                            y={
+                              cy - ((lines.length - 1) * lineH) / 2 + li * lineH
+                            }
+                            dominantBaseline="central"
+                            fill={l.color}
+                          >
+                            {l.label}
+                          </tspan>
+                        ))}
+                      </text>
+                    </g>
+                  );
+                },
+              )}
             </g>
-          )}
         </svg>
-        {/* Focus panel — centered absolute overlay on the map */}
+
+        {/* Param bin legend — bottom-left inside SVG area */}
+        {paramCellBins && (
+          <div
+            style={{
+              position: "absolute",
+              bottom: 12,
+              left: 12,
+              zIndex: 10,
+              background: "rgba(255,255,255,0.92)",
+              backdropFilter: "blur(4px)",
+              borderRadius: 8,
+              border: "1px solid #E5E7EB",
+              boxShadow: "0 2px 8px rgba(0,0,0,0.10)",
+              padding: "6px 10px",
+              pointerEvents: "none",
+            }}
+          >
+            <div
+              style={{
+                fontSize: 9,
+                fontWeight: 700,
+                color: "#374151",
+                marginBottom: 3,
+              }}
+            >
+              {selectedParam} ({selectedParamType})
+            </div>
+            {paramCellBins.binNames.map((bin) => (
+              <div
+                key={bin}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 5,
+                  marginBottom: 1,
+                }}
+              >
+                <div
+                  style={{
+                    width: 10,
+                    height: 10,
+                    borderRadius: 2,
+                    backgroundColor:
+                      paramCellBins.binColors[bin] ?? MIXED_COLOR,
+                    opacity: 0.7,
+                  }}
+                />
+                <span
+                  style={{
+                    fontSize: 9,
+                    fontWeight: 600,
+                    color: paramCellBins.binColors[bin] ?? MIXED_COLOR,
+                  }}
+                >
+                  {bin}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Focus panel — right-side absolute overlay on the map */}
         {focusedTerritoryId !== null && (
           <div
             style={{
               position: "absolute",
               top: 12,
-              left: "60%",
-              transform: "translateX(-50%)",
+              right: 12,
               width: 260,
               maxHeight: height - 84,
               overflowY: "auto",
@@ -2336,9 +3410,16 @@ export function HexMap({
                       </div>
                       <button
                         onClick={() => {
-                          setFocusedTerritoryId(null);
-                          setFocusedSubRegionId(null);
-                          setInspectedClusterId(null);
+                          if (inspectedClusterId !== null) {
+                            setInspectedClusterId(null);
+                          } else if (focusedSubRegionId !== null) {
+                            setFocusedSubRegionId(null);
+                            setInspectedClusterId(null);
+                          } else {
+                            setFocusedTerritoryId(null);
+                            setFocusedSubRegionId(null);
+                            setInspectedClusterId(null);
+                          }
                         }}
                         style={{
                           background: "none",
@@ -2720,127 +3801,334 @@ export function HexMap({
               })()}
           </div>
         )}
-        {/* Controls panel — 30% width */}
+        {/* Controls overlay — top bar */}
         <div
           style={{
-            width: panelWidth,
-            fontSize: 12,
-            height: "100%",
-            overflowY: "auto",
-            flexShrink: 0,
-            borderLeft: "1px solid #E5E7EB",
-            paddingLeft: 16,
-            paddingRight: 8,
+            position: "absolute",
+            top: compact ? 4 : 8,
+            left: compact ? 6 : 12,
+            right: compact ? 6 : 12,
+            zIndex: 10,
+            display: "flex",
+            flexDirection: compact ? "column" : "row",
+            alignItems: compact ? "stretch" : "flex-start",
+            justifyContent: "space-between",
+            gap: compact ? 3 : 0,
+            pointerEvents: "none",
           }}
         >
-          {/* Summary */}
-          <div style={{
-            marginBottom: 14,
-            padding: "8px 10px",
-            background: "#F8FAFC",
-            borderRadius: 6,
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            fontSize: 11,
-            color: "#64748B",
-          }}>
-            <span><b style={{ color: "#1E293B" }}>{stats.totalTrials.toLocaleString()}</b> trials</span>
-            <span><b style={{ color: "#1E293B" }}>{data?.clusters.length || 0}</b> clusters</span>
+          {/* Left: Detail Level + Color Mode */}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: compact ? 4 : 6,
+              background: "rgba(255,255,255,0.92)",
+              backdropFilter: "blur(4px)",
+              borderRadius: compact ? 6 : 8,
+              boxShadow: "0 2px 8px rgba(0,0,0,0.10)",
+              border: "1px solid #E5E7EB",
+              padding: compact ? "3px 6px" : "5px 10px",
+              fontSize: compact ? 10 : 11,
+              pointerEvents: "auto",
+              flexWrap: compact ? "wrap" as const : "nowrap" as const,
+            }}
+          >
+            {/* Detail Level: 🔍 − L4 + */}
+            <svg
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="#9CA3AF"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <circle cx="11" cy="11" r="8" />
+              <line x1="21" y1="21" x2="16.65" y2="16.65" />
+            </svg>
+            <button
+              onClick={() => setDetailLevel(Math.max(0, detailLevel - 1))}
+              disabled={detailLevel === 0}
+              style={{
+                width: 20,
+                height: 20,
+                display: "flex",
+                justifyContent: "center",
+                border: "1px solid #E5E7EB",
+                borderRadius: 4,
+                background: "white",
+                color: detailLevel === 0 ? "#D1D5DB" : "#374151",
+                cursor: detailLevel === 0 ? "default" : "pointer",
+                fontSize: 14,
+                lineHeight: 1,
+              }}
+            >
+              −
+            </button>
+            <span
+              title={`${allLevels[detailLevel]?.clusters.length ?? "…"} clusters`}
+              style={{
+                fontWeight: 700,
+                color: "#4F46E5",
+                minWidth: 22,
+                textAlign: "center",
+                fontSize: 11,
+              }}
+            >
+              L{detailLevel}
+            </span>
+            <button
+              onClick={() => setDetailLevel(Math.min(4, detailLevel + 1))}
+              disabled={detailLevel === 4}
+              style={{
+                width: 20,
+                height: 20,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                border: "1px solid #E5E7EB",
+                borderRadius: 4,
+                background: "white",
+                color: detailLevel === 4 ? "#D1D5DB" : "#374151",
+                cursor: detailLevel === 4 ? "default" : "pointer",
+                fontSize: 14,
+                lineHeight: 1,
+              }}
+            >
+              +
+            </button>
+
+            {/* Divider */}
+            <div
+              style={{
+                width: 1,
+                height: 14,
+                background: "#E5E7EB",
+                margin: "0 2px",
+              }}
+            />
+
+            {/* Color mode buttons */}
+            {(
+              [
+                { mode: "pixel", label: "Sub-region" },
+                { mode: "coverage", label: "Coverage" },
+                { mode: "marginal", label: "Marginal" },
+                { mode: "dominant", label: "Dominant" },
+                { mode: "density", label: "Density" },
+              ] as { mode: ColorMode; label: string }[]
+            ).map(({ mode, label }) => {
+              const isActive = colorMode === mode;
+              const isPreviewing = previewColorMode === mode && !isActive;
+              return (
+                <button
+                  key={mode}
+                  onClick={() => setColorMode(mode)}
+                  onMouseEnter={() => setPreviewColorMode(mode)}
+                  onMouseLeave={() => setPreviewColorMode(null)}
+                  style={{
+                    padding: "3px 7px",
+                    fontSize: 10,
+                    border: "1px solid",
+                    borderColor: isActive ? "#4F46E5" : isPreviewing ? "#818CF8" : "#E5E7EB",
+                    borderRadius: 4,
+                    background: isActive ? "#EEF2FF" : isPreviewing ? "#F5F3FF" : "white",
+                    color: isActive ? "#4F46E5" : isPreviewing ? "#6366F1" : "#6B7280",
+                    cursor: "pointer",
+                    boxShadow: isPreviewing ? "0 0 0 2px rgba(99,102,241,0.25)" : "none",
+                    transition: "all 0.12s ease",
+                  }}
+                >
+                  {label}
+                </button>
+              );
+            })}
+
+            {/* Divider */}
+            <div
+              style={{
+                width: 1,
+                height: 14,
+                background: "#E5E7EB",
+                margin: "0 2px",
+              }}
+            />
+
+            {/* Parameter selector */}
+            <select
+              value={selectedParam ?? ""}
+              onChange={(e) => setSelectedParam(e.target.value || null)}
+              style={{
+                padding: "3px 6px",
+                fontSize: 10,
+                border: "1px solid #E5E7EB",
+                borderRadius: 4,
+                background: selectedParam ? "#EEF2FF" : "white",
+                color: selectedParam ? "#4F46E5" : "#6B7280",
+                cursor: "pointer",
+                maxWidth: 140,
+              }}
+            >
+              <option value="">All params</option>
+              {paramNames.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+
+            {/* Debug toggle */}
+            {!compact && <div
+              style={{
+                width: 1,
+                height: 14,
+                background: "#E5E7EB",
+                margin: "0 2px",
+              }}
+            />}
+            {!compact && (<button
+              onClick={() => setShowParamDebug((v) => !v)}
+              style={{
+                padding: "2px 6px",
+                fontSize: 9,
+                borderRadius: 4,
+                border: "1px solid #E5E7EB",
+                cursor: "pointer",
+                background: showParamDebug ? "#FEF3C7" : "white",
+                color: showParamDebug ? "#92400E" : "#9CA3AF",
+              }}
+            >
+              Debug
+            </button>)}
           </div>
 
-          {/* Detail Level */}
-          <div style={{ marginBottom: 14 }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <span style={{ fontWeight: 600, fontSize: 11, color: "#374151" }}>Detail</span>
-              <div style={{ display: "flex", gap: 2 }}>
-                {([0, 1, 2, 3, 4] as const).map((lv) => {
-                  const count = allLevels[lv]?.clusters.length ?? "…";
-                  const isActive = detailLevel === lv;
-                  return (
-                    <button
-                      key={lv}
-                      onClick={() => setDetailLevel(lv)}
-                      onMouseEnter={() => setPreviewDetailLevel(lv)}
-                      onMouseLeave={() => setPreviewDetailLevel(null)}
-                      title={`Level ${lv}: ${count} clusters`}
+          {/* Debug panel: parameter types */}
+          {showParamDebug && (
+            <div
+              style={{
+                position: "absolute",
+                top: 38,
+                left: 8,
+                zIndex: 30,
+                background: "rgba(255,255,255,0.96)",
+                backdropFilter: "blur(4px)",
+                border: "1px solid #E5E7EB",
+                borderRadius: 8,
+                boxShadow: "0 4px 16px rgba(0,0,0,0.12)",
+                padding: "8px 12px",
+                maxHeight: 400,
+                overflowY: "auto",
+                pointerEvents: "auto",
+                fontSize: 10,
+              }}
+            >
+              <div
+                style={{ fontWeight: 700, marginBottom: 4, color: "#374151" }}
+              >
+                Parameter Types ({paramTypeMap.size})
+              </div>
+              <table style={{ borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ borderBottom: "1px solid #E5E7EB" }}>
+                    <th
                       style={{
-                        padding: "3px 0",
-                        width: 36,
-                        fontSize: 10,
-                        fontWeight: isActive ? 600 : 400,
-                        border: "1px solid",
-                        borderColor: isActive ? "#4F46E5" : "#E5E7EB",
-                        borderRadius: 4,
-                        background: isActive ? "#EEF2FF" : "white",
-                        color: isActive ? "#4F46E5" : "#9CA3AF",
-                        cursor: "pointer",
-                        textAlign: "center",
-                        lineHeight: 1.2,
+                        textAlign: "left",
+                        padding: "2px 8px 2px 0",
+                        color: "#6B7280",
                       }}
                     >
-                      L{lv}
-                      <br />
-                      <span style={{ fontSize: 8 }}>{count}</span>
-                    </button>
-                  );
-                })}
+                      Name
+                    </th>
+                    <th
+                      style={{
+                        textAlign: "left",
+                        padding: "2px 0",
+                        color: "#6B7280",
+                      }}
+                    >
+                      Type
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Array.from(paramTypeMap.entries()).map(([name, type]) => {
+                    const typeColor =
+                      type === "boolean"
+                        ? "#10B981"
+                        : type === "numeric"
+                          ? "#3B82F6"
+                          : "#F59E0B";
+                    return (
+                      <tr
+                        key={name}
+                        style={{ borderBottom: "1px solid #F3F4F6" }}
+                      >
+                        <td
+                          style={{
+                            padding: "2px 8px 2px 0",
+                            fontFamily: "monospace",
+                            cursor: "pointer",
+                            color:
+                              selectedParam === name ? "#4F46E5" : "#374151",
+                            fontWeight: selectedParam === name ? 700 : 400,
+                          }}
+                          onClick={() => setSelectedParam(name)}
+                        >
+                          {name}
+                        </td>
+                        <td
+                          style={{
+                            padding: "2px 0",
+                            color: typeColor,
+                            fontWeight: 600,
+                          }}
+                        >
+                          {type}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              <div style={{ marginTop: 6, color: "#9CA3AF", fontSize: 9 }}>
+                <span style={{ color: "#10B981" }}>boolean</span>{" "}
+                <span style={{ color: "#3B82F6" }}>numeric</span>{" "}
+                <span style={{ color: "#F59E0B" }}>categorical</span>
+                {" | click name to select"}
               </div>
             </div>
-          </div>
+          )}
 
-          <div style={{ borderTop: "1px solid #F1F5F9", margin: "0 0 14px" }} />
-
-          {/* Color mode */}
-          <div style={{ marginBottom: 14 }}>
-            <div style={{ fontWeight: 600, fontSize: 11, marginBottom: 6, color: "#374151" }}>
-              Color
-            </div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
-              {(
-                [
-                  { mode: "pixel", label: "Sub-region" },
-                  { mode: "coverage", label: "Coverage" },
-                  { mode: "marginal", label: "Marginal" },
-                  { mode: "dominant", label: "Dominant" },
-                  { mode: "density", label: "Density" },
-                ] as { mode: ColorMode; label: string }[]
-              ).map(({ mode, label }) => {
-                const isActive = colorMode === mode;
-                return (
-                  <button
-                    key={mode}
-                    onClick={() => setColorMode(mode)}
-                    onMouseEnter={() => setPreviewColorMode(mode)}
-                    onMouseLeave={() => setPreviewColorMode(null)}
-                    style={{
-                      padding: "4px 8px",
-                      fontSize: 10,
-                      border: "1px solid",
-                      borderColor: isActive ? "#4F46E5" : "#E5E7EB",
-                      borderRadius: 4,
-                      background: isActive ? "#EEF2FF" : "white",
-                      color: isActive ? "#4F46E5" : "#6B7280",
-                      cursor: "pointer",
-                    }}
-                  >
-                    {label}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          <div style={{ borderTop: "1px solid #F1F5F9", margin: "0 0 14px" }} />
-
-          {/* Tuner filter */}
-          <div style={{ marginBottom: 14 }}>
-            <div style={{ fontWeight: 600, fontSize: 11, marginBottom: 6, color: "#374151" }}>
-              Tuners
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+          {/* Right: Tuner toggles + Qual label toggles */}
+          <div
+            style={{
+              display: "flex",
+              flexDirection: compact ? "row" : "column",
+              gap: compact ? 3 : 4,
+              alignItems: compact ? "center" : "flex-end",
+              justifyContent: compact ? "space-between" : undefined,
+            }}
+          >
+            {/* Tuner toggles */}
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: compact ? 2 : 4,
+                background: "rgba(255,255,255,0.92)",
+                backdropFilter: "blur(4px)",
+                borderRadius: compact ? 6 : 8,
+                boxShadow: "0 2px 8px rgba(0,0,0,0.10)",
+                border: "1px solid #E5E7EB",
+                padding: compact ? "3px 6px" : "5px 10px",
+                pointerEvents: "auto",
+              }}
+            >
               {TUNER_NAMES.map((tuner) => {
                 const isOn = selectedTuners.has(tuner);
+                const isPreviewing = previewTuner === tuner;
                 return (
                   <button
                     key={tuner}
@@ -2850,49 +4138,177 @@ export function HexMap({
                     style={{
                       display: "flex",
                       alignItems: "center",
-                      gap: 7,
-                      width: "100%",
-                      padding: "5px 8px",
-                      fontSize: 10,
+                      gap: compact ? 3 : 5,
+                      padding: compact ? "2px 5px" : "3px 8px",
+                      fontSize: compact ? 9 : 10,
                       border: "1px solid",
-                      borderColor: isOn ? TUNER_COLORS[tuner] + "88" : "#F1F5F9",
+                      borderColor: isPreviewing
+                        ? TUNER_COLORS[tuner]
+                        : isOn
+                          ? TUNER_COLORS[tuner] + "88"
+                          : "#F1F5F9",
                       borderRadius: 5,
-                      background: isOn ? "white" : "#FAFAFA",
+                      background: isPreviewing ? TUNER_COLORS[tuner] + "15" : isOn ? "white" : "#FAFAFA",
                       cursor: "pointer",
-                      opacity: isOn ? 1 : 0.45,
-                      transition: "opacity 0.15s",
+                      opacity: isOn ? 1 : isPreviewing ? 0.8 : 0.4,
+                      boxShadow: isPreviewing ? `0 0 0 2px ${TUNER_COLORS[tuner]}40` : "none",
+                      transition: "all 0.12s ease",
                     }}
                   >
                     <div
                       style={{
-                        width: 10,
-                        height: 10,
+                        width: 8,
+                        height: 8,
                         borderRadius: 2,
                         backgroundColor: TUNER_COLORS[tuner],
                         flexShrink: 0,
                       }}
                     />
-                    <span style={{ flex: 1, textAlign: "left", color: "#374151", fontWeight: 500 }}>
+                    <span style={{ color: "#374151", fontWeight: 500 }}>
                       {TUNER_DISPLAY_NAMES[tuner]}
-                    </span>
-                    <span style={{ color: "#B0B8C4", fontSize: 9 }}>
-                      {stats.tunerTotals[tuner]?.toLocaleString()}
                     </span>
                   </button>
                 );
               })}
             </div>
-          </div>
 
-          {/* Tip */}
-          {focusedTerritoryId === null && (
-            <div style={{ fontSize: 10, color: "#B0B8C4", lineHeight: 1.5 }}>
-              Click a cell for details
+            {/* Qualitative label toggles */}
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 0,
+                background: "rgba(255,255,255,0.92)",
+                backdropFilter: "blur(4px)",
+                borderRadius: compact ? 6 : 8,
+                boxShadow: "0 2px 8px rgba(0,0,0,0.10)",
+                border: "1px solid #E5E7EB",
+                padding: compact ? "3px 6px" : "4px 8px",
+                pointerEvents: "auto",
+              }}
+            >
+              {(() => {
+                const criteria: Record<QualitativeLabel, string> = {
+                  "Failure-prone": "Highest failure rate (cov=0)",
+                  "High Novelty": "Highest marginal coverage",
+                  Saturated: "High coverage, low marginal",
+                  "High Coverage": "Highest average coverage",
+                  "Low Coverage": "Lowest average coverage",
+                  Volatile: "Highest coverage IQR",
+                  "High Density": "Most trials explored",
+                  "Low Density": "Fewest trials explored",
+                };
+                return (
+                  <>
+                    <span
+                      style={{ fontSize: 9, color: "#9CA3AF", fontWeight: 600 }}
+                    >
+                      Labels
+                    </span>
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: compact ? "row" : "column",
+                        flexWrap: compact ? "wrap" as const : undefined,
+                        gap: compact ? 3 : 1,
+                      }}
+                    >
+                      {QUAL_LABEL_NAMES.map((ql) => {
+                        const isOn = selectedQualLabels.has(ql);
+                        const color = QUAL_LABEL_COLORS[ql];
+                        return (
+                          <div
+                            key={ql}
+                            onClick={() => {
+                              setSelectedQualLabels((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(ql)) next.delete(ql);
+                                else next.add(ql);
+                                return next;
+                              });
+                            }}
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 4,
+                              cursor: "pointer",
+                              opacity: isOn ? 1 : 0.35,
+                              transition: "opacity 0.15s",
+                              fontSize: 9,
+                              lineHeight: "14px",
+                            }}
+                          >
+                            <div
+                              style={{
+                                width: 6,
+                                height: 6,
+                                borderRadius: "50%",
+                                backgroundColor: color,
+                                flexShrink: 0,
+                              }}
+                            />
+                            <span style={{ fontWeight: 600, color, fontSize: compact ? 8 : undefined }}>{ql}</span>
+                            {!compact && <span style={{ color: "#9CA3AF", fontSize: 8 }}>
+                              {criteria[ql]}
+                            </span>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </>
+                );
+              })()}
             </div>
-          )}
+          </div>
         </div>
-      </div>
 
+        {/* Sync button — shown in right panel of split view */}
+        {showSyncButton && (
+          <button
+            onClick={onSyncToggle}
+            style={{
+              position: "absolute",
+              bottom: 12,
+              left: 12,
+              zIndex: 20,
+              display: "flex",
+              alignItems: "center",
+              gap: 5,
+              padding: "5px 10px",
+              fontSize: 11,
+              fontWeight: 600,
+              border: "1px solid",
+              borderColor: syncEnabled ? "#4F46E5" : "#E5E7EB",
+              borderRadius: 6,
+              background: syncEnabled
+                ? "rgba(238,242,255,0.95)"
+                : "rgba(255,255,255,0.92)",
+              backdropFilter: "blur(4px)",
+              boxShadow: "0 2px 8px rgba(0,0,0,0.10)",
+              color: syncEnabled ? "#4F46E5" : "#6B7280",
+              cursor: "pointer",
+            }}
+            title="Sync drill level with left view"
+          >
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <polyline points="17 1 21 5 17 9" />
+              <path d="M3 11V9a4 4 0 0 1 4-4h14" />
+              <polyline points="7 23 3 19 7 15" />
+              <path d="M21 13v2a4 4 0 0 1-4 4H3" />
+            </svg>
+            Sync {syncEnabled ? "ON" : "OFF"}
+          </button>
+        )}
+      </div>
     </div>
   );
 }
