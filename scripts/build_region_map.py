@@ -495,6 +495,7 @@ def process_program(program: str) -> dict | None:
             "idx": n["idx"],
             "q": n["q"],
             "r": n["r"],
+            "discrete": n["discrete"],
             "trialCount": n["trialCount"],
             "tunerCounts": n["tunerCounts"],
             "meanCoverage": round(n["meanCoverage"], 1),
@@ -508,11 +509,25 @@ def process_program(program: str) -> dict | None:
         for i, n in enumerate(active_nodes)
     ]
 
+    # ── Compact paramMeta (only fields needed for label generation) ──
+    compact_param_meta: dict = {}
+    for p in all_params:
+        m = param_meta.get(p, {})
+        entry: dict = {"type": m.get("type", "numeric")}
+        if entry["type"] == "numeric":
+            entry["binEdges"] = m.get("binEdges", [0, 1])
+        elif entry["type"] == "categorical":
+            entry["categories"] = m.get("categories", [])
+        compact_param_meta[p] = entry
+
     return {
         "program": program,
         "totalTrials": int(total_trials),
         "nParams": len(all_params),
         "globalMeanCoverage": round(global_mean_cov, 1),
+        "allParams": all_params,
+        "paramMeta": compact_param_meta,
+        "importance": {p: round(v, 6) for p, v in importance.items()},
         "nodes": output_nodes,
         "regions_param": regions_a,
         "regions_param_cov": regions_b,

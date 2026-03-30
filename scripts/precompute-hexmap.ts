@@ -27,7 +27,6 @@ import {
   type Trial,
   type HexTile,
   type SubRegion,
-  type DetailRegion,
   type ParamStats,
   type TunerType,
 } from "../src/utils/hexMapUtils.js";
@@ -73,37 +72,29 @@ interface SerializedLevel {
     pixelCentroidX: number;
     pixelCentroidY: number;
     label: string;
-    subRegions: {
-      id: number;
-      territoryId: number;
-      clusterIds: number[];
-      tileKeys: string[];
-      trialIndices: number[];
-      totalTrials: number;
-      tunerCounts: Record<TunerType, number>;
-      pixelCentroidX: number;
-      pixelCentroidY: number;
-      label: string;
-      detailRegions: {
-        id: number;
-        territoryId: number;
-        parentSubRegionId: number;
-        clusterIds: number[];
-        tileKeys: string[];
-        trialIndices: number[];
-        totalTrials: number;
-        tunerCounts: Record<TunerType, number>;
-        pixelCentroidX: number;
-        pixelCentroidY: number;
-        label: string;
-      }[];
-    }[];
+    subRegions: SerializedSubRegion[];
   }[];
   gridRadius: number;
   hexSize: number;
   paramImportance: { name: string; importance: number }[];
   paramStats: Record<string, ParamStats>;
   labelParams: string[];
+}
+
+interface SerializedSubRegion {
+  id: number;
+  territoryId: number;
+  clusterIds: number[];
+  tileKeys: string[];
+  trialIndices: number[];
+  totalTrials: number;
+  tunerCounts: Record<TunerType, number>;
+  pixelCentroidX: number;
+  pixelCentroidY: number;
+  label: string;
+  splittable: boolean;
+  depth: number;
+  children: SerializedSubRegion[];
 }
 
 interface PrecomputedMultiLevelJSON {
@@ -156,23 +147,7 @@ function serializeLevel(
     y: t.y,
   }));
 
-  function serDR(dr: DetailRegion) {
-    return {
-      id: dr.id,
-      territoryId: dr.territoryId,
-      parentSubRegionId: dr.parentSubRegionId,
-      clusterIds: dr.clusters.map((c) => c.id),
-      tileKeys: dr.tiles.map(tileKey),
-      trialIndices: trialIndices(dr.trials, idx),
-      totalTrials: dr.totalTrials,
-      tunerCounts: dr.tunerCounts,
-      pixelCentroidX: dr.pixelCentroidX,
-      pixelCentroidY: dr.pixelCentroidY,
-      label: dr.label,
-    };
-  }
-
-  function serSR(sr: SubRegion) {
+  function serSR(sr: SubRegion): SerializedSubRegion {
     return {
       id: sr.id,
       territoryId: sr.territoryId,
@@ -184,7 +159,9 @@ function serializeLevel(
       pixelCentroidX: sr.pixelCentroidX,
       pixelCentroidY: sr.pixelCentroidY,
       label: sr.label,
-      detailRegions: sr.detailRegions.map(serDR),
+      splittable: sr.splittable,
+      depth: sr.depth,
+      children: sr.children.map(serSR),
     };
   }
 

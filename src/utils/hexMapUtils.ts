@@ -62,26 +62,9 @@ export interface HexTile {
 }
 
 /**
- * Fine-grained unit within a SubRegion, for zoom-in detail view.
- * Label is contrastive vs sibling detail regions (local contrast).
- */
-export interface DetailRegion {
-  id: number;
-  territoryId: number;
-  parentSubRegionId: number;
-  clusters: Cluster[];
-  tiles: HexTile[];
-  trials: Trial[];
-  totalTrials: number;
-  tunerCounts: Record<TunerType, number>;
-  pixelCentroidX: number;
-  pixelCentroidY: number;
-  label: string;
-}
-
-/**
  * Connected sub-group within a Territory.
- * Label is contrastive vs parent territory (not global).
+ * Label is contrastive vs parent (territory or parent sub-region).
+ * Recursively splittable: children are binary splits gated by label meaningfulness.
  */
 export interface SubRegion {
   id: number;
@@ -93,8 +76,10 @@ export interface SubRegion {
   tunerCounts: Record<TunerType, number>;
   pixelCentroidX: number;
   pixelCentroidY: number;
-  label: string; // sub vs macro-rest (local contrast)
-  detailRegions: DetailRegion[]; // zoom-in level; populated in processHexMapData
+  label: string;
+  children: SubRegion[];  // recursive binary splits (empty = leaf)
+  splittable: boolean;     // true if children exist with meaningful labels
+  depth: number;           // 0 = first split of territory
 }
 
 /** Spatially connected group of hex clusters (BFS on hex grid). */
@@ -175,12 +160,20 @@ function analyzeParams(trials: Trial[]): Map<string, ParamStats> {
       stats.set(name, { name, type: "categorical", categories: unique });
     } else {
       const nums = values.filter((v) => typeof v === "number") as number[];
-      stats.set(name, {
-        name,
-        type: "numeric",
-        min: Math.min(...nums),
-        max: Math.max(...nums),
-      });
+      // Detect integer-valued params with few unique values as categorical
+      const unique = [...new Set(nums)];
+      const allInt = nums.every((v) => Number.isInteger(v));
+      if (allInt && unique.length <= 20) {
+        const cats = unique.sort((a, b) => a - b).map(String);
+        stats.set(name, { name, type: "categorical", categories: cats });
+      } else {
+        stats.set(name, {
+          name,
+          type: "numeric",
+          min: Math.min(...nums),
+          max: Math.max(...nums),
+        });
+      }
     }
   }
 
@@ -965,7 +958,7 @@ function makeSubRegionObj(
   territoryId: number,
   clusters: Cluster[],
   tiles: HexTile[],
-): Omit<SubRegion, "label" | "detailRegions"> {
+): Omit<SubRegion, "label" | "children" | "splittable" | "depth"> {
   const tunerCounts: Record<TunerType, number> = {
     SymTuner: 0,
     CMA_ES: 0,
@@ -998,167 +991,137 @@ function makeSubRegionObj(
   };
 }
 
-function makeDetailRegionObj(
-  id: number,
-  territoryId: number,
-  parentSubRegionId: number,
-  clusters: Cluster[],
-  tiles: HexTile[],
-): Omit<DetailRegion, "label"> {
-  const tunerCounts: Record<TunerType, number> = {
-    SymTuner: 0, CMA_ES: 0, Genetic: 0,
-    SuccessiveHalving: 0, TPE: 0, BayesianOptimization: 0,
-  };
-  let totalTrials = 0, pcx = 0, pcy = 0;
-  for (const c of clusters) {
-    totalTrials += c.totalTrials;
-    for (const t of TUNER_NAMES) tunerCounts[t] += c.tunerCounts[t];
-  }
-  for (const t of tiles) { pcx += t.x; pcy += t.y; }
-  return {
-    id, territoryId, parentSubRegionId, clusters, tiles,
-    trials: clusters.flatMap((c) => c.trials),
-    totalTrials, tunerCounts,
-    pixelCentroidX: tiles.length > 0 ? pcx / tiles.length : 0,
-    pixelCentroidY: tiles.length > 0 ? pcy / tiles.length : 0,
-  };
-}
-
 /**
- * Divide a sub-region into detail regions for zoom-in display.
- * Finer than sub-regions but still coarse: small SRs stay as 1,
- * large SRs split into 2–4 spatially-connected detail regions.
+ * Multi-way split: K-means with moderate k, then keep only groups that
+ * produce a meaningful contrastive label. Unlabeled groups are merged
+ * into a single unlabeled sub-region. Each labeled sub-region can be
+ * recursively split further (children).
  */
-function buildDetailRegionsForSubRegion(
-  sr: Omit<SubRegion, "label" | "detailRegions">,
+function multiWaySplit(
+  region: { clusters: Cluster[]; tiles: HexTile[]; trials: Trial[]; territoryId: number },
+  parentTrials: Trial[],
   labelParams: string[],
   paramStats: Map<string, ParamStats>,
-): Omit<DetailRegion, "label">[] {
-  const clusters = sr.clusters;
-  const m = clusters.length;
-
-  const srHexMap = new Map<string, Cluster>();
-  for (const c of clusters) srHexMap.set(`${c.hexQ},${c.hexR}`, c);
+  importanceMap: Map<string, number>,
+  depth: number,
+  maxDepth: number,
+  nextId: { value: number },
+): SubRegion[] {
+  const clusters = region.clusters;
+  const n = clusters.length;
 
   const tileByKey = new Map<string, HexTile>();
-  for (const tile of sr.tiles) tileByKey.set(`${tile.q},${tile.r}`, tile);
+  for (const tile of region.tiles) tileByKey.set(`${tile.q},${tile.r}`, tile);
 
-  // Small SRs: single detail region (no benefit in splitting further)
-  const k = m < 4 ? 1 : m < 12 ? 2 : m < 30 ? 3 : 4;
-
-  if (k === 1) {
-    return [makeDetailRegionObj(0, sr.territoryId, sr.id, clusters, sr.tiles)];
+  // Too small or too deep → single leaf
+  if (n < 4 || depth >= maxDepth) {
+    const raw = makeSubRegionObj(nextId.value++, region.territoryId, clusters, region.tiles);
+    return [{ ...raw, label: "", children: [], splittable: false, depth }];
   }
 
-  const vecs = clusters.map((c) => {
-    const v = clusterCentroidToVec(c.centroid, paramStats, labelParams);
-    return v.length > 0 ? v : [c.hexQ, c.hexR];
-  });
+  // Choose k: sqrt(n) clamped to [3, 8]
+  const k = Math.max(3, Math.min(8, Math.ceil(Math.sqrt(n))));
+
+  const vecs = clusters.map((c) =>
+    clusterCentroidToVec(c.centroid, paramStats, labelParams)
+  );
+  if (vecs[0].length === 0) {
+    const raw = makeSubRegionObj(nextId.value++, region.territoryId, clusters, region.tiles);
+    return [{ ...raw, label: "", children: [], splittable: false, depth }];
+  }
+
   const assigns = smallKMeans(vecs, k);
 
-  const groups: Cluster[][] = Array.from({ length: k }, () => []);
-  for (let i = 0; i < m; i++) groups[assigns[i]].push(clusters[i]);
-
-  const allComps: Cluster[][] = [];
-  for (const g of groups) {
-    if (g.length === 0) continue;
-    allComps.push(...hexConnectedComponentsSubset(g, srHexMap));
+  // Group clusters by assignment
+  const groups = new Map<number, Cluster[]>();
+  for (let i = 0; i < n; i++) {
+    const g = assigns[i];
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g)!.push(clusters[i]);
   }
 
-  // Merge only isolated singletons (threshold=2), keep meaningful fragments
-  let finalComps = mergeSmallComponents(allComps, srHexMap, 2);
-
-  // Spatial fallback if collapsed to 1
-  if (finalComps.length === 1 && m >= 4) {
-    const spatialVecs = clusters.map((c) => [c.hexQ, c.hexR]);
-    const sa = smallKMeans(spatialVecs, 2);
-    const g0: Cluster[] = [], g1: Cluster[] = [];
-    for (let i = 0; i < m; i++) (sa[i] === 0 ? g0 : g1).push(clusters[i]);
-    const sc: Cluster[][] = [];
-    if (g0.length > 0) sc.push(...hexConnectedComponentsSubset(g0, srHexMap));
-    if (g1.length > 0) sc.push(...hexConnectedComponentsSubset(g1, srHexMap));
-    if (sc.length > 1) finalComps = mergeSmallComponents(sc, srHexMap, 2);
-  }
-
-  return finalComps.map((drClusters, idx) => {
-    const drTiles = drClusters
+  // Build candidate sub-region objects for each group
+  const candidates: { raw: ReturnType<typeof makeSubRegionObj>; groupClusters: Cluster[]; tiles: HexTile[] }[] = [];
+  for (const [, groupClusters] of groups) {
+    if (groupClusters.length === 0) continue;
+    const groupTiles = groupClusters
       .map((c) => tileByKey.get(`${c.hexQ},${c.hexR}`))
-      .filter((t): t is HexTile => t !== undefined);
-    return makeDetailRegionObj(idx, sr.territoryId, sr.id, drClusters, drTiles);
-  });
+      .filter((t): t is HexTile => !!t);
+    const raw = makeSubRegionObj(nextId.value++, region.territoryId, groupClusters, groupTiles);
+    candidates.push({ raw, groupClusters, tiles: groupTiles });
+  }
+
+  // Generate contrastive labels for all groups vs parent
+  const labels = generateSubRegionLabels(
+    candidates.map((c) => c.raw),
+    parentTrials,
+    paramStats,
+    labelParams,
+    importanceMap,
+  );
+
+  // Separate labeled vs unlabeled groups
+  const labeled: { raw: typeof candidates[0]["raw"]; label: string; groupClusters: Cluster[]; tiles: HexTile[] }[] = [];
+  const unlabeledClusters: Cluster[] = [];
+  const unlabeledTiles: HexTile[] = [];
+
+  for (let i = 0; i < candidates.length; i++) {
+    if (labels[i]) {
+      labeled.push({ ...candidates[i], label: labels[i] });
+    } else {
+      // Reclaim the ID used for this unlabeled group
+      unlabeledClusters.push(...candidates[i].groupClusters);
+      unlabeledTiles.push(...candidates[i].tiles);
+    }
+  }
+
+  // If no groups got a label, return single unlabeled leaf
+  if (labeled.length === 0) {
+    // Reclaim all candidate IDs
+    nextId.value -= candidates.length;
+    const raw = makeSubRegionObj(nextId.value++, region.territoryId, clusters, region.tiles);
+    return [{ ...raw, label: "", children: [], splittable: false, depth }];
+  }
+
+  const results: SubRegion[] = [];
+
+  // Labeled sub-regions: recursively try to split further
+  for (const item of labeled) {
+    const children = multiWaySplit(
+      { clusters: item.groupClusters, tiles: item.tiles, trials: item.raw.trials, territoryId: region.territoryId },
+      item.raw.trials, labelParams, paramStats, importanceMap, depth + 1, maxDepth, nextId,
+    );
+    const splittable = children.length > 1 || (children.length === 1 && children[0].splittable);
+    results.push({ ...item.raw, label: item.label, children, splittable, depth });
+  }
+
+  // Merge all unlabeled clusters into one unlabeled sub-region (if any)
+  if (unlabeledClusters.length > 0) {
+    const raw = makeSubRegionObj(nextId.value++, region.territoryId, unlabeledClusters, unlabeledTiles);
+    results.push({ ...raw, label: "", children: [], splittable: false, depth });
+  }
+
+  return results;
 }
 
 /**
- * Divide a territory into spatially-connected sub-regions.
- * Uses k-means on cluster centroids, then splits disconnected components,
- * then merges any component below MIN_CLUSTER_SIZE.
+ * Divide a territory into sub-regions using multi-way meaningful splits.
+ * K-means with moderate k, keep groups with contrastive labels, merge the rest.
  */
 export function buildSubRegionsForTerritory(
   territory: Omit<Territory, "label" | "subRegions">,
   topParams: string[],
   paramStats: Map<string, ParamStats>,
-): Omit<SubRegion, "label" | "detailRegions">[] {
-  const clusters = territory.clusters;
-  const n = clusters.length;
+  importanceMap: Map<string, number>,
+  maxDepth: number = 3,
+): SubRegion[] {
+  const nextId = { value: 0 };
+  const results = multiWaySplit(
+    { clusters: territory.clusters, tiles: territory.tiles, trials: territory.trials, territoryId: territory.id },
+    territory.trials, topParams, paramStats, importanceMap, 0, maxDepth, nextId,
+  );
 
-  const terrHexMap = new Map<string, Cluster>();
-  for (const c of clusters) terrHexMap.set(`${c.hexQ},${c.hexR}`, c);
-
-  const tileByKey = new Map<string, HexTile>();
-  for (const tile of territory.tiles)
-    tileByKey.set(`${tile.q},${tile.r}`, tile);
-
-  // Determine k: balanced — small territories 1~2, medium 2~3, large up to 4
-  const k = n < 5 ? 1 : n <= 15 ? 2 : n <= 50 ? 3 : 4;
-
-  if (k === 1) {
-    return [makeSubRegionObj(0, territory.id, clusters, territory.tiles)];
-  }
-
-  // K-means on cluster centroids using provided (SHAP-filtered) params.
-  // If params produce empty vectors (no SHAP data available), fall back to
-  // hex grid coordinates so spatial splitting still works.
-  const vecs = clusters.map((c) => {
-    const v = clusterCentroidToVec(c.centroid, paramStats, topParams);
-    return v.length > 0 ? v : [c.hexQ, c.hexR];
-  });
-  const assigns = smallKMeans(vecs, k);
-
-  // Group by assignment
-  const groups: Cluster[][] = Array.from({ length: k }, () => []);
-  for (let i = 0; i < n; i++) groups[assigns[i]].push(clusters[i]);
-
-  // Split each group into connected components
-  const allComps: Cluster[][] = [];
-  for (const g of groups) {
-    if (g.length === 0) continue;
-    allComps.push(...hexConnectedComponentsSubset(g, terrHexMap));
-  }
-
-  // Merge only genuinely tiny fragments: at most 8% of territory, capped at 4 clusters.
-  // Keeping the cap low prevents large territories from collapsing to a single component.
-  const mergeThreshold = Math.min(4, Math.ceil(n * 0.08));
-  let finalComps = mergeSmallComponents(allComps, terrHexMap, mergeThreshold);
-
-  // Safety net: if everything collapsed to 1 component on a large territory,
-  // fall back to a pure spatial split (hex coords) with k=2.
-  if (finalComps.length === 1 && n >= 8) {
-    const spatialVecs = clusters.map((c) => [c.hexQ, c.hexR]);
-    const spatialAssigns = smallKMeans(spatialVecs, 2);
-    const g0: Cluster[] = [], g1: Cluster[] = [];
-    for (let i = 0; i < n; i++) (spatialAssigns[i] === 0 ? g0 : g1).push(clusters[i]);
-    const spatialComps: Cluster[][] = [];
-    if (g0.length > 0) spatialComps.push(...hexConnectedComponentsSubset(g0, terrHexMap));
-    if (g1.length > 0) spatialComps.push(...hexConnectedComponentsSubset(g1, terrHexMap));
-    if (spatialComps.length > 1) finalComps = mergeSmallComponents(spatialComps, terrHexMap, 2);
-  }
-
-  return finalComps.map((srClusters, idx) => {
-    const srTiles = srClusters
-      .map((c) => tileByKey.get(`${c.hexQ},${c.hexR}`))
-      .filter((t): t is HexTile => t !== undefined);
-    return makeSubRegionObj(idx, territory.id, srClusters, srTiles);
-  });
+  return results;
 }
 
 // ============================================================
@@ -1893,19 +1856,7 @@ export function buildMergedLevel(
   );
 
   const territories: Territory[] = preLabelTerritories.map((t, i) => {
-    const srRaws = buildSubRegionsForTerritory(t, labelParams, paramStats);
-    const srLabels = generateSubRegionLabels(
-      srRaws, t.trials, paramStats, labelParams, importanceMap,
-    );
-    const subRegions: SubRegion[] = srRaws.map((sr, j) => {
-      const drRaws = buildDetailRegionsForSubRegion(sr, labelParams, paramStats);
-      const drLabels = generateSubRegionLabels(drRaws, sr.trials, paramStats, labelParams, importanceMap);
-      const detailRegions: DetailRegion[] = drRaws.map((dr, di) => ({
-        ...dr,
-        label: drLabels[di] ?? "",
-      }));
-      return { ...sr, label: srLabels[j], detailRegions };
-    });
+    const subRegions = buildSubRegionsForTerritory(t, labelParams, paramStats, importanceMap);
     return { ...t, label: macroLabels[i], subRegions };
   });
 
@@ -2031,24 +1982,7 @@ export function processHexMapData(
   // 9b. Sub-regions: adjacency-constrained k-means within each territory
   //     Sub labels: sub vs macro-rest (local contrast — finer-grained)
   const territories: Territory[] = preLabelTerritories.map((t, i) => {
-    const srRaws = buildSubRegionsForTerritory(t, labelParams, paramStats);
-    const srLabels = generateSubRegionLabels(
-      srRaws,
-      t.trials,
-      paramStats,
-      labelParams,
-      importanceMap,
-    );
-    // 9c. Detail regions: finer split within each sub-region (for future zoom-in)
-    const subRegions: SubRegion[] = srRaws.map((sr, j) => {
-      const drRaws = buildDetailRegionsForSubRegion(sr, labelParams, paramStats);
-      const drLabels = generateSubRegionLabels(drRaws, sr.trials, paramStats, labelParams, importanceMap);
-      const detailRegions: DetailRegion[] = drRaws.map((dr, di) => ({
-        ...dr,
-        label: drLabels[di] ?? "",
-      }));
-      return { ...sr, label: srLabels[j], detailRegions };
-    });
+    const subRegions = buildSubRegionsForTerritory(t, labelParams, paramStats, importanceMap);
     return { ...t, label: macroLabels[i], subRegions };
   });
 
@@ -2125,38 +2059,28 @@ export function deserializePrecomputed(json: any): HexMapData[] {
     const resolveTrials = (indices: number[]): Trial[] =>
       indices.map((i) => allTrials[i]);
 
-    // Rebuild territories → subRegions → detailRegions
+    // Rebuild territories → subRegions (recursive children)
+    function deserializeSubRegion(ssr: any): SubRegion {
+      const children: SubRegion[] = (ssr.children || []).map((c: any) => deserializeSubRegion(c));
+      return {
+        id: ssr.id,
+        territoryId: ssr.territoryId,
+        clusters: resolveClusters(ssr.clusterIds),
+        tiles: resolveTiles(ssr.tileKeys),
+        trials: resolveTrials(ssr.trialIndices),
+        totalTrials: ssr.totalTrials,
+        tunerCounts: ssr.tunerCounts,
+        pixelCentroidX: ssr.pixelCentroidX,
+        pixelCentroidY: ssr.pixelCentroidY,
+        label: ssr.label,
+        children,
+        splittable: ssr.splittable ?? false,
+        depth: ssr.depth ?? 0,
+      };
+    }
+
     const territories: Territory[] = levelJson.territories.map((st: any) => {
-      const subRegions: SubRegion[] = st.subRegions.map((ssr: any) => {
-        const detailRegions: DetailRegion[] = (ssr.detailRegions || []).map(
-          (sdr: any) => ({
-            id: sdr.id,
-            territoryId: sdr.territoryId,
-            parentSubRegionId: sdr.parentSubRegionId,
-            clusters: resolveClusters(sdr.clusterIds),
-            tiles: resolveTiles(sdr.tileKeys),
-            trials: resolveTrials(sdr.trialIndices),
-            totalTrials: sdr.totalTrials,
-            tunerCounts: sdr.tunerCounts,
-            pixelCentroidX: sdr.pixelCentroidX,
-            pixelCentroidY: sdr.pixelCentroidY,
-            label: sdr.label,
-          }),
-        );
-        return {
-          id: ssr.id,
-          territoryId: ssr.territoryId,
-          clusters: resolveClusters(ssr.clusterIds),
-          tiles: resolveTiles(ssr.tileKeys),
-          trials: resolveTrials(ssr.trialIndices),
-          totalTrials: ssr.totalTrials,
-          tunerCounts: ssr.tunerCounts,
-          pixelCentroidX: ssr.pixelCentroidX,
-          pixelCentroidY: ssr.pixelCentroidY,
-          label: ssr.label,
-          detailRegions,
-        } as SubRegion;
-      });
+      const subRegions: SubRegion[] = (st.subRegions || []).map((ssr: any) => deserializeSubRegion(ssr));
 
       return {
         id: st.id,

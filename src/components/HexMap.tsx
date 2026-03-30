@@ -25,7 +25,6 @@ import {
   type HexTile,
   type Territory,
   type SubRegion,
-  type DetailRegion,
   type Trial,
   type TunerType,
 } from "../utils/hexMapUtils";
@@ -34,20 +33,13 @@ import {
 // Types
 // ============================================================
 
-type ColorMode =
-  | "dominant"
-  | "territory"
-  | "pixel"
-  | "density"
-  | "coverage"
-  | "marginal";
+type ColorMode = "dominant" | "territory" | "pixel" | "density" | "coverage";
 export interface DrillState {
   detailLevel: number;
   focusedTerritoryId: number | null;
-  focusedSubRegionId: number | null;
+  focusedSubRegionPath: number[]; // stack of sub-region IDs for recursive drill-down
   hoveredTerritoryId: number | null;
   hoveredSubRegionId: number | null;
-  hoveredDetailRegionId: number | null;
   hoveredClusterId: number | null;
 }
 
@@ -56,9 +48,6 @@ interface HexMapProps {
   compact?: boolean;
   onDrillStateChange?: (state: DrillState) => void;
   syncDrillState?: DrillState | null;
-  showSyncButton?: boolean;
-  syncEnabled?: boolean;
-  onSyncToggle?: () => void;
 }
 
 interface SubRegionVisual {
@@ -72,12 +61,8 @@ interface SubRegionVisual {
 type QualitativeLabel =
   | "Failure-prone"
   | "High Novelty"
-  | "Saturated"
   | "High Coverage"
-  | "Low Coverage"
-  | "Volatile"
-  | "High Density"
-  | "Low Density";
+  | "High Density";
 
 interface SRMetrics {
   trialCount: number;
@@ -112,23 +97,15 @@ const HEX_SIZE_DEFAULT = 32;
 const QUAL_LABEL_COLORS: Record<QualitativeLabel, string> = {
   "Failure-prone": "#EF4444",
   "High Novelty": "#8B5CF6",
-  Saturated: "#F59E0B",
   "High Coverage": "#10B981",
-  "Low Coverage": "#F97316",
-  Volatile: "#3B82F6",
   "High Density": "#06B6D4",
-  "Low Density": "#A855F7",
 };
 
 const QUAL_LABEL_NAMES: QualitativeLabel[] = [
   "Failure-prone",
   "High Novelty",
-  "Saturated",
   "High Coverage",
-  "Low Coverage",
-  "Volatile",
   "High Density",
-  "Low Density",
 ];
 
 function clamp01(value: number): number {
@@ -152,16 +129,16 @@ function mixHexColors(colorA: string, colorB: string, t: number): string {
     .formatHex();
 }
 
-// Neutral territory palette — visually distinct without semantic meaning
+// Neutral territory palette — lighter tones for hex fill, visually distinct
 const TERRITORY_PALETTE = [
-  "#64748B", // slate-500
-  "#78716C", // stone-500
-  "#6B7280", // gray-500
-  "#71717A", // zinc-500
-  "#737373", // neutral-500
-  "#7C8594", // blue-gray
-  "#8B7E74", // warm-gray
-  "#6E7B8B", // cool-slate
+  "#94A3B8", // slate-400
+  "#A8A29E", // stone-400
+  "#9CA3AF", // gray-400
+  "#A1A1AA", // zinc-400
+  "#A3A3A3", // neutral-400
+  "#9DAAB8", // blue-gray light
+  "#B0A69C", // warm-gray light
+  "#92A0B0", // cool-slate light
 ];
 
 function getTerritoryColor(territoryId: number): string {
@@ -234,7 +211,12 @@ function computeSRMetrics(trials: Trial[]): SRMetrics {
 // Component
 // ============================================================
 
-export function HexMap({ program = "gawk", compact = false, onDrillStateChange, syncDrillState, showSyncButton = false, syncEnabled = false, onSyncToggle }: HexMapProps) {
+export function HexMap({
+  program = "gawk",
+  compact = false,
+  onDrillStateChange,
+  syncDrillState,
+}: HexMapProps) {
   // Responsive sizing: measure the container
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerSize, setContainerSize] = useState({
@@ -264,22 +246,27 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
   const [previewColorMode, setPreviewColorMode] = useState<ColorMode | null>(
     null,
   );
-  // hover: drives sub-region / territory highlight
+  const [coverageMetric, setCoverageMetric] = useState<"mean" | "min" | "max">("mean");
+  // hover: drives territory highlight + tooltip
   const [hoveredClusterId, setHoveredClusterId] = useState<number | null>(null);
+  const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(
+    null,
+  );
   // 1st click: territory focus; 2nd click within territory: cluster inspect
   const [focusedTerritoryId, setFocusedTerritoryId] = useState<number | null>(
     null,
   );
-  // null = territory overview; number = highlighted sub-region within focused territory
-  const [focusedSubRegionId, setFocusedSubRegionId] = useState<number | null>(
-    null,
+  // Recursive sub-region drill-down path: stack of sub-region IDs
+  const [focusedSubRegionPath, setFocusedSubRegionPath] = useState<number[]>(
+    [],
   );
+  // Derived: leaf sub-region ID (last in path) or null
+  const focusedSubRegionId =
+    focusedSubRegionPath.length > 0
+      ? focusedSubRegionPath[focusedSubRegionPath.length - 1]
+      : null;
   // sub-region label hover — temporarily highlights without changing click state
   const [hoveredSubRegionId, setHoveredSubRegionId] = useState<number | null>(
-    null,
-  );
-  // detail-region hover — highlights at drill level 2
-  const [hoveredDetailRegionId, setHoveredDetailRegionId] = useState<number | null>(
     null,
   );
   // territory hover — highlights the hovered territory's sub-region on tile hover
@@ -292,7 +279,9 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
   );
   // Animated view focus — when a territory is clicked, smoothly pan/zoom to it
   const [viewFocus, setViewFocus] = useState<{
-    cx: number; cy: number; zoomScale: number;
+    cx: number;
+    cy: number;
+    zoomScale: number;
   } | null>(null);
   // Control panel tuner hover — highlight tiles containing that tuner
   const [previewTuner, setPreviewTuner] = useState<TunerType | null>(null);
@@ -302,7 +291,6 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
     Set<QualitativeLabel>
   >(new Set());
   const [selectedParam, setSelectedParam] = useState<string | null>(null);
-  const [showParamDebug, setShowParamDebug] = useState(false);
 
   const [selectedTuners, setSelectedTuners] = useState<Set<TunerType>>(
     new Set(TUNER_NAMES),
@@ -313,12 +301,22 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
   // Report drill state changes to parent
   useEffect(() => {
     onDrillStateChange?.({
-      detailLevel, focusedTerritoryId, focusedSubRegionId,
-      hoveredTerritoryId, hoveredSubRegionId, hoveredDetailRegionId, hoveredClusterId,
+      detailLevel,
+      focusedTerritoryId,
+      focusedSubRegionPath,
+      hoveredTerritoryId,
+      hoveredSubRegionId,
+      hoveredClusterId,
     });
-  }, [detailLevel, focusedTerritoryId, focusedSubRegionId,
-      hoveredTerritoryId, hoveredSubRegionId, hoveredDetailRegionId, hoveredClusterId,
-      onDrillStateChange]);
+  }, [
+    detailLevel,
+    focusedTerritoryId,
+    focusedSubRegionPath,
+    hoveredTerritoryId,
+    hoveredSubRegionId,
+    hoveredClusterId,
+    onDrillStateChange,
+  ]);
 
   // Track whether we're applying synced state (to skip detail-level reset)
   const isSyncingRef = useRef(false);
@@ -329,13 +327,14 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
     isSyncingRef.current = true;
     setDetailLevel(syncDrillState.detailLevel);
     setFocusedTerritoryId(syncDrillState.focusedTerritoryId);
-    setFocusedSubRegionId(syncDrillState.focusedSubRegionId);
+    setFocusedSubRegionPath(syncDrillState.focusedSubRegionPath);
     setHoveredTerritoryId(syncDrillState.hoveredTerritoryId);
     setHoveredSubRegionId(syncDrillState.hoveredSubRegionId);
-    setHoveredDetailRegionId(syncDrillState.hoveredDetailRegionId);
     setHoveredClusterId(syncDrillState.hoveredClusterId);
     // Reset flag after React processes the batched state updates
-    requestAnimationFrame(() => { isSyncingRef.current = false; });
+    requestAnimationFrame(() => {
+      isSyncingRef.current = false;
+    });
   }, [syncDrillState]);
 
   const svgRef = useRef<SVGSVGElement>(null);
@@ -382,7 +381,7 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
   const HEX_SIZE = data?.hexSize ?? HEX_SIZE_DEFAULT;
 
   // Compute transform to fit and center the honeycomb
-  const CONTROLS_PAD = 80; // px reserved for top overlay controls
+  const CONTROLS_PAD = 150; // px reserved for top overlay controls
 
   const { centerX, centerY, scale } = useMemo(() => {
     const availH = height - CONTROLS_PAD;
@@ -443,7 +442,7 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
   useEffect(() => {
     if (isSyncingRef.current) return;
     setFocusedTerritoryId(null);
-    setFocusedSubRegionId(null);
+    setFocusedSubRegionPath([]);
     setInspectedClusterId(null);
     setHoveredClusterId(null);
     setViewFocus(null);
@@ -464,20 +463,28 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
       targetClusterIds = new Set<number>();
       const focusedTerr = territories.find((t) => t.id === focusedTerritoryId);
       if (focusedTerr) {
-        const sr = focusedTerr.subRegions.find((s) => s.id === focusedSubRegionId);
+        const sr = focusedTerr.subRegions.find(
+          (s) => s.id === focusedSubRegionId,
+        );
         if (sr) targetClusterIds = new Set(sr.clusters.map((c) => c.id));
       }
     } else {
       // Level 1: zoom to territory
       const terr = territories.find((t) => t.id === focusedTerritoryId);
-      if (!terr) { setViewFocus(null); return; }
+      if (!terr) {
+        setViewFocus(null);
+        return;
+      }
       targetClusterIds = new Set(terr.clusters.map((c) => c.id));
     }
 
     const targetTiles = data.hexTiles.filter(
       (t) => t.cluster && targetClusterIds.has(t.cluster.id),
     );
-    if (targetTiles.length === 0) { setViewFocus(null); return; }
+    if (targetTiles.length === 0) {
+      setViewFocus(null);
+      return;
+    }
 
     const xs = targetTiles.map((t) => t.x);
     const ys = targetTiles.map((t) => t.y);
@@ -494,7 +501,16 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
     const zoomScale = Math.min(zx, zy, scale * 5);
 
     setViewFocus({ cx, cy, zoomScale });
-  }, [focusedTerritoryId, focusedSubRegionId, data, territories, HEX_SIZE, height, svgWidth, scale]);
+  }, [
+    focusedTerritoryId,
+    focusedSubRegionId,
+    data,
+    territories,
+    HEX_SIZE,
+    height,
+    svgWidth,
+    scale,
+  ]);
 
   // cluster.id → territory.id (used for focus-mode opacity and click routing)
   const clusterToTerrId = useMemo(() => {
@@ -527,15 +543,19 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
 
     for (const terr of territories) {
       const territoryColor = getTerritoryColor(terr.id);
-      const sortedSubRegions = [...terr.subRegions].sort(
+      // Only assign distinct palette colors to sub-regions with meaningful labels
+      const labeledSubRegions = terr.subRegions.filter(
+        (sr) => sr.label.trim().length > 0,
+      );
+      const sortedLabeled = [...labeledSubRegions].sort(
         (a, b) => b.totalTrials - a.totalTrials,
       );
 
-      sortedSubRegions.forEach((sr, index) => {
+      sortedLabeled.forEach((sr, index) => {
         const palette = getSubRegionPaletteColor(
           territoryColor,
           index,
-          sortedSubRegions.length,
+          sortedLabeled.length,
         );
 
         for (const cluster of sr.clusters) {
@@ -547,34 +567,108 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
           });
         }
       });
+
+      // Unlabeled sub-regions get territory base color (no visual distinction)
+      for (const sr of terr.subRegions) {
+        if (sr.label.trim().length > 0) continue;
+        for (const cluster of sr.clusters) {
+          if (!map.has(cluster.id)) {
+            map.set(cluster.id, {
+              territoryId: terr.id,
+              subRegionId: sr.id,
+              fill: territoryColor,
+              stroke: territoryColor,
+            });
+          }
+        }
+      }
     }
 
     return map;
   }, [territories]);
 
-  // Detail-region visual: fill/stroke for clusters within the focused sub-region
-  const clusterToDetailRegionVisual = useMemo(() => {
-    const map = new Map<number, { detailRegionId: number; fill: string; stroke: string }>();
+  // Child sub-region visual: fill/stroke for clusters within the focused sub-region's children
+  const clusterToChildSubRegionVisual = useMemo(() => {
+    const map = new Map<
+      number,
+      { childId: number; fill: string; stroke: string }
+    >();
     if (focusedSubRegionId === null) return map;
 
-    // Find the focused sub-region
+    // Resolve the focused sub-region through the path
     const focusedTerr = territories.find((t) => t.id === focusedTerritoryId);
-    if (focusedTerr) {
-      const sr = focusedTerr.subRegions.find((s) => s.id === focusedSubRegionId);
-      if (sr) {
-        const srColor = clusterToSubRegionVisual.get(sr.clusters[0]?.id)?.fill
-          ?? getTerritoryColor(focusedTerr.id);
-        const sorted = [...sr.detailRegions].sort((a, b) => b.totalTrials - a.totalTrials);
-        sorted.forEach((dr, index) => {
-          const palette = getSubRegionPaletteColor(srColor, index, sorted.length);
-          for (const c of dr.clusters) {
-            map.set(c.id, { detailRegionId: dr.id, fill: palette.fill, stroke: palette.stroke });
-          }
+    if (!focusedTerr) return map;
+
+    let current: SubRegion | undefined;
+    let regions: SubRegion[] = focusedTerr.subRegions;
+    for (const id of focusedSubRegionPath) {
+      current = regions.find((s) => s.id === id);
+      if (!current) return map;
+      regions = current.children;
+    }
+    if (!current || current.children.length === 0) return map;
+
+    const srColor =
+      clusterToSubRegionVisual.get(current.clusters[0]?.id)?.fill ??
+      getTerritoryColor(focusedTerr.id);
+    const sorted = [...current.children].sort(
+      (a, b) => b.totalTrials - a.totalTrials,
+    );
+    sorted.forEach((child, index) => {
+      const palette = getSubRegionPaletteColor(srColor, index, sorted.length);
+      for (const c of child.clusters) {
+        map.set(c.id, {
+          childId: child.id,
+          fill: palette.fill,
+          stroke: palette.stroke,
         });
+      }
+    });
+    return map;
+  }, [
+    territories,
+    focusedTerritoryId,
+    focusedSubRegionPath,
+    focusedSubRegionId,
+    clusterToSubRegionVisual,
+  ]);
+
+  // Active sub-region ID mapping: resolves cluster → sub-region ID at current drill depth.
+  // At depth 0 (no path): maps to top-level sub-region IDs
+  // At deeper depths: maps to children of the focused sub-region
+  const clusterToActiveSubRegionId = useMemo(() => {
+    const map = new Map<number, number>();
+    if (focusedSubRegionPath.length === 0) {
+      // Top-level: same as clusterToSubRegionId
+      for (const terr of territories) {
+        for (const sr of terr.subRegions) {
+          for (const c of sr.clusters) map.set(c.id, sr.id);
+        }
+      }
+    } else {
+      // Resolve current focused sub-region and map its children
+      const focusedTerr = territories.find((t) => t.id === focusedTerritoryId);
+      if (focusedTerr) {
+        let current: SubRegion | undefined;
+        let regions: SubRegion[] = focusedTerr.subRegions;
+        for (const id of focusedSubRegionPath) {
+          current = regions.find((s) => s.id === id);
+          if (!current) break;
+          regions = current.children;
+        }
+        if (current && current.children.length > 0) {
+          // Map clusters to child sub-region IDs
+          for (const child of current.children) {
+            for (const c of child.clusters) map.set(c.id, child.id);
+          }
+        } else if (current) {
+          // Leaf: all clusters map to this sub-region
+          for (const c of current.clusters) map.set(c.id, current.id);
+        }
       }
     }
     return map;
-  }, [territories, focusedTerritoryId, focusedSubRegionId, clusterToSubRegionVisual]);
+  }, [territories, focusedTerritoryId, focusedSubRegionPath]);
 
   // ── Qualitative: per-cluster metrics & class (independent of parameter sub-regions) ──
   // Step 1: per-cluster metrics from cluster.trials directly
@@ -593,7 +687,7 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
       (m) => m.trialCount >= 2,
     );
     if (supported.length === 0)
-      return { p80Coverage: 0, p80Marginal: 0, p20Marginal: 0, p80Iqr: 0 };
+      return { p80Coverage: 0, p80Marginal: 0, p80TrialCount: 0 };
     return {
       p80Coverage: qualPct(
         supported.map((m) => m.meanCoverage),
@@ -603,12 +697,8 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
         supported.map((m) => m.meanMarginalCoverage),
         80,
       ),
-      p20Marginal: qualPct(
-        supported.map((m) => m.meanMarginalCoverage),
-        20,
-      ),
-      p80Iqr: qualPct(
-        supported.map((m) => m.coverageIqr),
+      p80TrialCount: qualPct(
+        supported.map((m) => m.trialCount),
         80,
       ),
     };
@@ -629,15 +719,10 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
       } else if (hasSupport) {
         if (m.meanMarginalCoverage > clusterQualThresholds.p80Marginal) {
           label = "High Novelty";
-        } else if (
-          m.meanCoverage > clusterQualThresholds.p80Coverage &&
-          m.meanMarginalCoverage < clusterQualThresholds.p20Marginal
-        ) {
-          label = "Saturated";
         } else if (m.meanCoverage > clusterQualThresholds.p80Coverage) {
           label = "High Coverage";
-        } else if (m.coverageIqr > clusterQualThresholds.p80Iqr) {
-          label = "Volatile";
+        } else if (m.trialCount > clusterQualThresholds.p80TrialCount) {
+          label = "High Density";
         }
       }
       map.set(cid, label);
@@ -651,14 +736,17 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
     const terr = territories.find((t) => t.id === focusedTerritoryId);
     if (!terr) return null;
 
-    const terrAvgCov =
-      terr.trials.length > 0
-        ? terr.trials.reduce((s, t) => s + t.coverage, 0) / terr.trials.length
-        : 0;
-    const terrMaxCov =
-      terr.trials.length > 0
-        ? Math.max(...terr.trials.map((t) => t.coverage))
-        : 0;
+    // Use cluster-level meanBranchCoverage (same metric as coverage color mode)
+    const clusterCovs = terr.clusters.map((c) => c.meanBranchCoverage);
+    const terrAvgCov = clusterCovs.length > 0
+      ? clusterCovs.reduce((s, v) => s + v, 0) / clusterCovs.length
+      : 0;
+    const terrMaxCov = clusterCovs.length > 0
+      ? Math.max(...clusterCovs)
+      : 0;
+    const terrMinCov = clusterCovs.length > 0
+      ? Math.min(...clusterCovs)
+      : 0;
 
     const subMetrics = [...terr.subRegions]
       .sort((a, b) => b.totalTrials - a.totalTrials)
@@ -679,9 +767,8 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
         return { sr, avgCov, maxCov, dominant, dominantPct };
       });
 
-    return { terr, terrAvgCov, terrMaxCov, subMetrics };
+    return { terr, terrAvgCov, terrMaxCov, terrMinCov, subMetrics };
   }, [focusedTerritoryId, territories]);
-
 
   // Tuner territory sizes: how many clusters each tuner occupies → sorted rank
   const tunerTerritoryRank = useMemo(() => {
@@ -711,33 +798,42 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
     return d3.scaleSequential(d3.interpolateYlOrRd).domain([0, maxTrials]);
   }, [data, selectedTuners]);
 
-  const positiveBranchCoverages = useMemo(() => {
-    if (!data) return [];
-    return data.clusters
-      .map((c) => c.meanBranchCoverage)
-      .filter((v) => v > 0)
-      .sort((a, b) => a - b);
-  }, [data]);
+  // Extract coverage value from cluster based on selected metric
+  const getClusterCov = useCallback(
+    (c: { meanBranchCoverage: number; maxBranchCoverage: number; trials: { coverage: number }[] }): number => {
+      if (coverageMetric === "max") return c.maxBranchCoverage;
+      if (coverageMetric === "min") {
+        if (c.trials.length === 0) return 0;
+        return Math.min(...c.trials.map((t) => t.coverage));
+      }
+      return c.meanBranchCoverage;
+    },
+    [coverageMetric],
+  );
+
+  // Global coverage range from clusters (used for all coverage displays)
+  const globalCovRange = useMemo(() => {
+    if (!data || data.clusters.length === 0) return { min: 0, max: 1, mean: 0.5 };
+    const vals = data.clusters.map(getClusterCov);
+    const mean = vals.reduce((s, v) => s + v, 0) / vals.length;
+    return { min: Math.min(...vals), max: Math.max(...vals), mean };
+  }, [data, getClusterCov]);
 
   const getCoverageColor = useCallback(
     (coverage: number): string => {
       const red = "#DC2626";
-      const white = "#FFFFFF";
-      const green = "#16A34A";
+      const low = "#FFFFFF";
+      const high = "#16A34A";
 
-      if (coverage <= 0) {
-        return red;
-      }
-
-      if (positiveBranchCoverages.length === 0) {
-        return white;
-      }
-
-      const idx = d3.bisectRight(positiveBranchCoverages, coverage);
-      const t = Math.max(0, Math.min(1, idx / positiveBranchCoverages.length));
-      return d3.interpolateRgb(white, green)(t);
+      if (coverage <= 0) return red;
+      const gMin = globalCovRange.min;
+      const gMax = globalCovRange.max;
+      const range = gMax - gMin;
+      if (range <= 0) return low;
+      const t = Math.max(0, Math.min(1, (coverage - gMin) / range));
+      return d3.interpolateRgb(low, high)(t);
     },
-    [positiveBranchCoverages],
+    [globalCovRange],
   );
 
   const positiveMarginalCoverages = useMemo(() => {
@@ -839,22 +935,6 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
     [BOOLEAN_PARAMS_SET, CATEGORICAL_PARAMS_SET],
   );
 
-  // Detect ALL parameter types for debug panel
-  const paramTypeMap = useMemo((): Map<
-    string,
-    "boolean" | "numeric" | "categorical"
-  > => {
-    const map = new Map<string, "boolean" | "numeric" | "categorical">();
-    if (!data || data.clusters.length === 0) return map;
-    const seen = new Set<string>();
-    for (const rawKey of Object.keys(data.clusters[0].centroid)) {
-      const base = rawKey.split("__")[0];
-      if (seen.has(base)) continue;
-      seen.add(base);
-      map.set(base, getParamType(rawKey));
-    }
-    return map;
-  }, [data, getParamType]);
 
   // Detect selected parameter type
   const selectedParamType = useMemo(():
@@ -1006,7 +1086,6 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
       }
 
       const { tunerCounts } = tile.cluster;
-      const subRegionVisual = clusterToSubRegionVisual.get(tile.cluster.id);
 
       switch (effectiveColorMode) {
         case "dominant": {
@@ -1028,10 +1107,7 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
         }
 
         case "coverage":
-          return getCoverageColor(tile.cluster.meanBranchCoverage);
-
-        case "marginal":
-          return getMarginalCoverageColor(tile.cluster.avgCoverage);
+          return getCoverageColor(getClusterCov(tile.cluster));
 
         case "territory":
           return "#F8FAFC";
@@ -1040,20 +1116,14 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
         default: {
           const terrId = clusterToTerrId.get(tile.cluster.id);
 
-          // Level 0: overview — uniform territory colors
+          // Overview: territory colors
           if (focusedTerritoryId === null) {
             return terrId != null ? getTerritoryColor(terrId) : "#F8FAFC";
           }
 
-          // Level 2: sub-region focused — only focused sub-region tiles render
-          if (focusedSubRegionId !== null) {
-            const drVisual = clusterToDetailRegionVisual.get(tile.cluster.id);
-            return drVisual?.fill ?? subRegionVisual?.fill ?? "#F8FAFC";
-          }
-
-          // Level 1: territory focused — sub-region colors inside, muted outside
+          // Territory focused: full color inside, muted outside
           if (terrId === focusedTerritoryId) {
-            return subRegionVisual?.fill ?? "#F8FAFC";
+            return terrId != null ? getTerritoryColor(terrId) : "#F8FAFC";
           }
           return terrId != null
             ? mixHexColors(getTerritoryColor(terrId), "#E2E8F0", 0.6)
@@ -1064,13 +1134,14 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
     [
       effectiveColorMode,
       clusterToSubRegionVisual,
-      clusterToDetailRegionVisual,
+      clusterToChildSubRegionVisual,
       clusterToSubRegionId,
       clusterToTerrId,
       focusedTerritoryId,
       focusedSubRegionId,
       densityScale,
       getCoverageColor,
+      getClusterCov,
       getMarginalCoverageColor,
       selectedTuners,
       paramCellBins,
@@ -1182,14 +1253,12 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
       return {
         macro: [] as { d: string; terr: Territory }[],
         sub: [] as { d: string; sr: SubRegion; terr: Territory }[],
-        detail: [] as { d: string; dr: DetailRegion; sr: SubRegion; terr: Territory }[],
       };
     }
 
-    // Build lookups: hex key → territoryId, sub-region key, detail-region key, visibility
+    // Build lookups: hex key → territoryId, sub-region key, visibility
     const hexToTerr = new Map<string, number>();
     const hexToSub = new Map<string, { tId: number; srId: number }>();
-    const hexToDetail = new Map<string, { tId: number; srId: number; drId: number }>();
     const visibleHex = new Set<string>();
     for (const terr of territories) {
       for (const tile of terr.tiles) {
@@ -1204,12 +1273,10 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
           visibleHex.add(k);
       }
       for (const sr of terr.subRegions) {
+        // Only draw sub-region boundaries for labeled sub-regions
+        if (!sr.label.trim()) continue;
         for (const tile of sr.tiles)
           hexToSub.set(`${tile.q},${tile.r}`, { tId: terr.id, srId: sr.id });
-        for (const dr of sr.detailRegions) {
-          for (const tile of dr.tiles)
-            hexToDetail.set(`${tile.q},${tile.r}`, { tId: terr.id, srId: sr.id, drId: dr.id });
-        }
       }
     }
 
@@ -1221,44 +1288,14 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
 
     const macroPathMap = new Map<number, string>();
     const subPathMap = new Map<string, string>();
-    const detailPathMap = new Map<string, string>();
 
     for (const terr of territories) {
       let macroD = "";
       for (const sr of terr.subRegions) {
         let subD = "";
-        for (const dr of sr.detailRegions) {
-          let detailD = "";
-          for (const tile of dr.tiles) {
-            const tk = `${tile.q},${tile.r}`;
-            if (!visibleHex.has(tk)) continue;
-            for (let ei = 0; ei < 6; ei++) {
-              const dir = HEX_DIRECTIONS[ei];
-              const nk = `${tile.q + dir.dq},${tile.r + dir.dr}`;
-              const nTerr = hexToTerr.get(nk);
-              const nSub = hexToSub.get(nk);
-              const nDetail = hexToDetail.get(nk);
-              const neighborVisible = visibleHex.has(nk);
-              const va = verts[ei];
-              const vb = verts[(ei + 1) % 6];
-              const seg = `M${tile.x + va.x},${tile.y + va.y}L${tile.x + vb.x},${tile.y + vb.y}`;
-
-              if (!neighborVisible || nTerr !== terr.id) {
-                macroD += seg;
-              } else if (nSub && nSub.srId !== sr.id) {
-                subD += seg;
-              } else if (nDetail && nDetail.drId !== dr.id) {
-                detailD += seg;
-              }
-            }
-          }
-          detailPathMap.set(`${terr.id}-${sr.id}-${dr.id}`, detailD);
-        }
-        // Also collect sub-region edges from tiles not in any detail-region
         for (const tile of sr.tiles) {
           const tk = `${tile.q},${tile.r}`;
           if (!visibleHex.has(tk)) continue;
-          if (hexToDetail.has(tk)) continue; // already handled above
           for (let ei = 0; ei < 6; ei++) {
             const dir = HEX_DIRECTIONS[ei];
             const nk = `${tile.q + dir.dq},${tile.r + dir.dr}`;
@@ -1293,25 +1330,18 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
           terr: t,
         })),
       ),
-      detail: territories.flatMap((t) =>
-        t.subRegions.flatMap((sr) =>
-          sr.detailRegions.map((dr) => ({
-            d: detailPathMap.get(`${t.id}-${sr.id}-${dr.id}`) ?? "",
-            dr,
-            sr,
-            terr: t,
-          })),
-        ),
-      ),
     };
   }, [data, territories, HEX_DIRECTIONS, selectedTuners]);
 
   // Outer boundary of the focused sub-region (all edges that touch outside)
   const focusedSubRegionBorder = useMemo(() => {
-    if (focusedSubRegionId === null || focusedTerritoryId === null || !data) return "";
+    if (focusedSubRegionId === null || focusedTerritoryId === null || !data)
+      return "";
     const focusedTerr = territories.find((t) => t.id === focusedTerritoryId);
     if (!focusedTerr) return "";
-    const focusedSr = focusedTerr.subRegions.find((s) => s.id === focusedSubRegionId);
+    const focusedSr = focusedTerr.subRegions.find(
+      (s) => s.id === focusedSubRegionId,
+    );
     if (!focusedSr) return "";
     // Collect all tile keys belonging to focused sub-region
     const srTileKeys = new Set<string>();
@@ -1344,11 +1374,20 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
       }
     }
     return d;
-  }, [focusedSubRegionId, focusedTerritoryId, data, territories, HEX_DIRECTIONS, selectedTuners, HEX_SIZE]);
+  }, [
+    focusedSubRegionId,
+    focusedTerritoryId,
+    data,
+    territories,
+    HEX_DIRECTIONS,
+    selectedTuners,
+    HEX_SIZE,
+  ]);
 
   // Hovered sub-region outer border (works across all color modes)
   const hoveredSubRegionBorder = useMemo(() => {
-    if (hoveredSubRegionId === null || focusedTerritoryId === null || !data) return "";
+    if (hoveredSubRegionId === null || focusedTerritoryId === null || !data)
+      return "";
     // Don't draw hover border if this is the already-focused sub-region (it has its own border)
     if (hoveredSubRegionId === focusedSubRegionId) return "";
     const terr = territories.find((t) => t.id === focusedTerritoryId);
@@ -1357,7 +1396,12 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
     if (!sr) return "";
     const srTileKeys = new Set<string>();
     for (const tile of sr.tiles) {
-      if (tile.cluster && TUNER_NAMES.some((t) => selectedTuners.has(t) && tile.cluster!.tunerCounts[t] > 0))
+      if (
+        tile.cluster &&
+        TUNER_NAMES.some(
+          (t) => selectedTuners.has(t) && tile.cluster!.tunerCounts[t] > 0,
+        )
+      )
         srTileKeys.add(`${tile.q},${tile.r}`);
     }
     const verts = Array.from({ length: 6 }, (_, i) => ({
@@ -1379,7 +1423,16 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
       }
     }
     return d;
-  }, [hoveredSubRegionId, focusedSubRegionId, focusedTerritoryId, data, territories, HEX_DIRECTIONS, selectedTuners, HEX_SIZE]);
+  }, [
+    hoveredSubRegionId,
+    focusedSubRegionId,
+    focusedTerritoryId,
+    data,
+    territories,
+    HEX_DIRECTIONS,
+    selectedTuners,
+    HEX_SIZE,
+  ]);
 
   // ============================================================
   // Label placement helpers
@@ -1388,7 +1441,7 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
   // Active rendering scale — uses zoom level when focused on a territory
   const renderScale = viewFocus ? viewFocus.zoomScale : scale;
   const renderCenter = useMemo(
-    () => viewFocus ? { x: viewFocus.cx, y: viewFocus.cy } : dataCenter,
+    () => (viewFocus ? { x: viewFocus.cx, y: viewFocus.cy } : dataCenter),
     [viewFocus, dataCenter],
   );
 
@@ -1443,11 +1496,7 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
   // with leader lines back to the centroid.
   // ============================================================
   const subLabelPositions = useMemo(() => {
-    if (focusedTerritoryId === null || !data) return [];
-    const terr = territories.find((t) => t.id === focusedTerritoryId);
-    if (!terr) return [];
-    // Skip if territory has only 1 sub-region (nothing to differentiate)
-    if (terr.subRegions.length <= 1) return [];
+    if (!data) return [];
 
     const fs = 10 / renderScale;
     const pad = 4 / renderScale;
@@ -1474,167 +1523,178 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
       anchorY: number;
     }[] = [];
 
-    // Territory-level bounding box — labels go outside ALL tiles
-    const allTxs = terr.tiles.map((t) => t.x);
-    const allTys = terr.tiles.map((t) => t.y);
-    const tMinX = Math.min(...allTxs) - HEX_SIZE;
-    const tMaxX = Math.max(...allTxs) + HEX_SIZE;
-    const tMinY = Math.min(...allTys) - HEX_SIZE;
-    const tMaxY = Math.max(...allTys) + HEX_SIZE;
+    // When focused on a territory, only show that territory's sub-region labels
+    const targetTerritories =
+      focusedTerritoryId !== null
+        ? territories.filter((t) => t.id === focusedTerritoryId)
+        : territories;
 
-    // When a parameter is selected, compute per-sub-region param summary
-    const srParamLabel = new Map<number, string>();
-    if (selectedParam) {
-      for (const sr of terr.subRegions) {
-        if (sr.clusters.length === 0) continue;
-        const vals = sr.clusters.map((c) => c.centroid[selectedParam] ?? 0);
-        const isBoolean = vals.every((v) => v < 0.05 || v > 0.95);
-        if (isBoolean) {
-          const trueCount = vals.filter((v) => v > 0.5).length;
-          const pct = Math.round((trueCount / vals.length) * 100);
-          srParamLabel.set(
-            sr.id,
-            pct > 50
-              ? `${selectedParam}=T (${pct}%)`
-              : `${selectedParam}=F (${100 - pct}%)`,
-          );
-        } else {
-          const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
-          const min = Math.min(...vals);
-          const max = Math.max(...vals);
-          const range = max - min;
-          srParamLabel.set(
-            sr.id,
-            range < 0.01
-              ? `${selectedParam} ≈ ${mean.toFixed(2)}`
-              : `${selectedParam}: ${mean.toFixed(2)} [${min.toFixed(2)}–${max.toFixed(2)}]`,
-          );
-        }
-      }
-    }
+    for (const terr of targetTerritories) {
+      // Skip if territory has only 1 sub-region (nothing to differentiate)
+      if (terr.subRegions.length <= 1) continue;
 
-    const sorted = [...terr.subRegions]
-      .filter((sr) =>
-        selectedParam ? srParamLabel.has(sr.id) : sr.label.trim().length > 0,
-      )
-      .sort((a, b) => b.totalTrials - a.totalTrials);
+      // Territory-level bounding box — labels go outside ALL tiles
+      const allTxs = terr.tiles.map((t) => t.x);
+      const allTys = terr.tiles.map((t) => t.y);
+      const tMinX = Math.min(...allTxs) - HEX_SIZE;
+      const tMaxX = Math.max(...allTxs) + HEX_SIZE;
+      const tMinY = Math.min(...allTys) - HEX_SIZE;
+      const tMaxY = Math.max(...allTys) + HEX_SIZE;
 
-    for (const sr of sorted) {
-      const labelText = selectedParam
-        ? (srParamLabel.get(sr.id) ?? "")
-        : sr.label;
-      const lines = labelText.split(", ");
-      const maxLineLen = Math.max(...lines.map((l) => l.length));
-      const rw = maxLineLen * charW + pad * 2;
-      const rh = lines.length * lineH + pad * 2;
-      const anchorX = sr.pixelCentroidX;
-      const anchorY = sr.pixelCentroidY;
-      const margin = HEX_SIZE * 0.6;
-
-      // Sort edges by distance from sub-region centroid → closest edge first
-      const edgeDists: { dir: string; dist: number }[] = [
-        { dir: "left", dist: Math.abs(anchorX - tMinX) },
-        { dir: "right", dist: Math.abs(anchorX - tMaxX) },
-        { dir: "above", dist: Math.abs(anchorY - tMinY) },
-        { dir: "below", dist: Math.abs(anchorY - tMaxY) },
-      ];
-      edgeDists.sort((a, b) => a.dist - b.dist);
-
-      const edgeCandidates: Record<string, { x: number; y: number }[]> = {
-        left: [
-          { x: tMinX - margin - rw / 2, y: anchorY },
-          { x: tMinX - margin - rw / 2, y: anchorY - rh },
-          { x: tMinX - margin - rw / 2, y: anchorY + rh },
-        ],
-        above: [
-          { x: anchorX, y: tMinY - margin - rh / 2 },
-          { x: anchorX - rw * 0.5, y: tMinY - margin - rh / 2 },
-          { x: anchorX + rw * 0.5, y: tMinY - margin - rh / 2 },
-        ],
-        right: [
-          { x: tMaxX + margin + rw / 2, y: anchorY },
-          { x: tMaxX + margin + rw / 2, y: anchorY - rh },
-          { x: tMaxX + margin + rw / 2, y: anchorY + rh },
-        ],
-        below: [
-          { x: anchorX, y: tMaxY + margin + rh / 2 },
-          { x: anchorX - rw * 0.5, y: tMaxY + margin + rh / 2 },
-          { x: anchorX + rw * 0.5, y: tMaxY + margin + rh / 2 },
-        ],
-      };
-
-      // Build candidates in closest-edge-first order
-      const candidates: { x: number; y: number }[] = [];
-      for (const { dir } of edgeDists) {
-        candidates.push(...edgeCandidates[dir]);
-      }
-
-      // Candidates are already outside territory bbox — only check viewport & label overlap
-      let chosen: { x: number; y: number } | null = null;
-      for (const c of candidates) {
-        const b: Bbox = {
-          x: c.x - rw / 2 - gap,
-          y: c.y - rh / 2 - gap,
-          w: rw + gap * 2,
-          h: rh + gap * 2,
-        };
-        if (
-          labelInsideView(c.x, c.y, rw, rh) &&
-          !placed.some((p) => bbOverlaps(b, p))
-        ) {
-          chosen = c;
-          placed.push(b);
-          break;
-        }
-      }
-
-      // Fallback: try further out from territory edges, closest-edge-first
-      if (!chosen) {
-        for (const extraMult of [1.5, 2.5, 4]) {
-          if (chosen) break;
-          const em = HEX_SIZE * extraMult;
-          const fbEdge: Record<string, { x: number; y: number }> = {
-            left: { x: tMinX - margin - em - rw / 2, y: anchorY },
-            above: { x: anchorX, y: tMinY - margin - em - rh / 2 },
-            right: { x: tMaxX + margin + em + rw / 2, y: anchorY },
-            below: { x: anchorX, y: tMaxY + margin + em + rh / 2 },
-          };
-          const fbCandidates = edgeDists.map(({ dir }) => fbEdge[dir]);
-          for (const c of fbCandidates) {
-            const b: Bbox = {
-              x: c.x - rw / 2 - gap,
-              y: c.y - rh / 2 - gap,
-              w: rw + gap * 2,
-              h: rh + gap * 2,
-            };
-            if (
-              labelInsideView(c.x, c.y, rw, rh) &&
-              !placed.some((p) => bbOverlaps(b, p))
-            ) {
-              chosen = c;
-              placed.push(b);
-              break;
-            }
+      // When a parameter is selected, compute per-sub-region param summary
+      const srParamLabel = new Map<number, string>();
+      if (selectedParam) {
+        for (const sr of terr.subRegions) {
+          if (sr.clusters.length === 0) continue;
+          const vals = sr.clusters.map((c) => c.centroid[selectedParam] ?? 0);
+          const isBoolean = vals.every((v) => v < 0.05 || v > 0.95);
+          if (isBoolean) {
+            const trueCount = vals.filter((v) => v > 0.5).length;
+            const pct = Math.round((trueCount / vals.length) * 100);
+            srParamLabel.set(
+              sr.id,
+              pct > 50
+                ? `${selectedParam}=T (${pct}%)`
+                : `${selectedParam}=F (${100 - pct}%)`,
+            );
+          } else {
+            const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+            const min = Math.min(...vals);
+            const max = Math.max(...vals);
+            const range = max - min;
+            srParamLabel.set(
+              sr.id,
+              range < 0.01
+                ? `${selectedParam} ≈ ${mean.toFixed(2)}`
+                : `${selectedParam}: ${mean.toFixed(2)} [${min.toFixed(2)}–${max.toFixed(2)}]`,
+            );
           }
         }
       }
 
-      // Last resort: don't show rather than overlap tiles
-      if (!chosen) {
-        continue;
-      }
+      const sorted = [...terr.subRegions]
+        .filter((sr) =>
+          selectedParam ? srParamLabel.has(sr.id) : sr.label.trim().length > 0,
+        )
+        .sort((a, b) => b.totalTrials - a.totalTrials);
 
-      results.push({
-        sr,
-        x: chosen.x,
-        y: chosen.y,
-        rw,
-        rh,
-        lines,
-        color: getTerritoryColor(terr.id),
-        anchorX,
-        anchorY,
-      });
+      for (const sr of sorted) {
+        const labelText = selectedParam
+          ? (srParamLabel.get(sr.id) ?? "")
+          : sr.label;
+        const lines = labelText.split(", ");
+        const maxLineLen = Math.max(...lines.map((l) => l.length));
+        const rw = maxLineLen * charW + pad * 2;
+        const rh = lines.length * lineH + pad * 2;
+        const anchorX = sr.pixelCentroidX;
+        const anchorY = sr.pixelCentroidY;
+        const margin = HEX_SIZE * 0.6;
+
+        // Sort edges by distance from sub-region centroid → closest edge first
+        const edgeDists: { dir: string; dist: number }[] = [
+          { dir: "left", dist: Math.abs(anchorX - tMinX) },
+          { dir: "right", dist: Math.abs(anchorX - tMaxX) },
+          { dir: "above", dist: Math.abs(anchorY - tMinY) },
+          { dir: "below", dist: Math.abs(anchorY - tMaxY) },
+        ];
+        edgeDists.sort((a, b) => a.dist - b.dist);
+
+        const edgeCandidates: Record<string, { x: number; y: number }[]> = {
+          left: [
+            { x: tMinX - margin - rw / 2, y: anchorY },
+            { x: tMinX - margin - rw / 2, y: anchorY - rh },
+            { x: tMinX - margin - rw / 2, y: anchorY + rh },
+          ],
+          above: [
+            { x: anchorX, y: tMinY - margin - rh / 2 },
+            { x: anchorX - rw * 0.5, y: tMinY - margin - rh / 2 },
+            { x: anchorX + rw * 0.5, y: tMinY - margin - rh / 2 },
+          ],
+          right: [
+            { x: tMaxX + margin + rw / 2, y: anchorY },
+            { x: tMaxX + margin + rw / 2, y: anchorY - rh },
+            { x: tMaxX + margin + rw / 2, y: anchorY + rh },
+          ],
+          below: [
+            { x: anchorX, y: tMaxY + margin + rh / 2 },
+            { x: anchorX - rw * 0.5, y: tMaxY + margin + rh / 2 },
+            { x: anchorX + rw * 0.5, y: tMaxY + margin + rh / 2 },
+          ],
+        };
+
+        // Build candidates in closest-edge-first order
+        const candidates: { x: number; y: number }[] = [];
+        for (const { dir } of edgeDists) {
+          candidates.push(...edgeCandidates[dir]);
+        }
+
+        // Candidates are already outside territory bbox — only check viewport & label overlap
+        let chosen: { x: number; y: number } | null = null;
+        for (const c of candidates) {
+          const b: Bbox = {
+            x: c.x - rw / 2 - gap,
+            y: c.y - rh / 2 - gap,
+            w: rw + gap * 2,
+            h: rh + gap * 2,
+          };
+          if (
+            labelInsideView(c.x, c.y, rw, rh) &&
+            !placed.some((p) => bbOverlaps(b, p))
+          ) {
+            chosen = c;
+            placed.push(b);
+            break;
+          }
+        }
+
+        // Fallback: try further out from territory edges, closest-edge-first
+        if (!chosen) {
+          for (const extraMult of [1.5, 2.5, 4]) {
+            if (chosen) break;
+            const em = HEX_SIZE * extraMult;
+            const fbEdge: Record<string, { x: number; y: number }> = {
+              left: { x: tMinX - margin - em - rw / 2, y: anchorY },
+              above: { x: anchorX, y: tMinY - margin - em - rh / 2 },
+              right: { x: tMaxX + margin + em + rw / 2, y: anchorY },
+              below: { x: anchorX, y: tMaxY + margin + em + rh / 2 },
+            };
+            const fbCandidates = edgeDists.map(({ dir }) => fbEdge[dir]);
+            for (const c of fbCandidates) {
+              const b: Bbox = {
+                x: c.x - rw / 2 - gap,
+                y: c.y - rh / 2 - gap,
+                w: rw + gap * 2,
+                h: rh + gap * 2,
+              };
+              if (
+                labelInsideView(c.x, c.y, rw, rh) &&
+                !placed.some((p) => bbOverlaps(b, p))
+              ) {
+                chosen = c;
+                placed.push(b);
+                break;
+              }
+            }
+          }
+        }
+
+        // Last resort: don't show rather than overlap tiles
+        if (!chosen) {
+          continue;
+        }
+
+        results.push({
+          sr,
+          x: chosen.x,
+          y: chosen.y,
+          rw,
+          rh,
+          lines,
+          color: getTerritoryColor(terr.id),
+          anchorX,
+          anchorY,
+        });
+      }
     }
     return results;
   }, [
@@ -1648,13 +1708,24 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
   ]);
 
   // ============================================================
-  // Detail-region labels — shown when a sub-region is focused (level 2)
+  // Child sub-region labels — shown when a sub-region with children is focused
   // ============================================================
   const detailLabelPositions = useMemo(() => {
-    if (focusedSubRegionId === null || focusedTerritoryId === null || !data) return [];
-    const parentTerr = territories.find((t) => t.id === focusedTerritoryId) ?? null;
-    const targetSr = parentTerr?.subRegions.find((s) => s.id === focusedSubRegionId) ?? null;
-    if (!targetSr || !parentTerr || targetSr.detailRegions.length <= 1) return [];
+    if (focusedSubRegionId === null || focusedTerritoryId === null || !data)
+      return [];
+    const parentTerr =
+      territories.find((t) => t.id === focusedTerritoryId) ?? null;
+    if (!parentTerr) return [];
+
+    // Resolve focused sub-region through the path
+    let targetSr: SubRegion | undefined;
+    let regions: SubRegion[] = parentTerr.subRegions;
+    for (const id of focusedSubRegionPath) {
+      targetSr = regions.find((s) => s.id === id);
+      if (!targetSr) return [];
+      regions = targetSr.children;
+    }
+    if (!targetSr || targetSr.children.length <= 1) return [];
 
     const fs = 9 / renderScale;
     const pad = 3 / renderScale;
@@ -1664,7 +1735,9 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
 
     type Bbox = { x: number; y: number; w: number; h: number };
     function bbOverlaps(a: Bbox, b: Bbox) {
-      return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+      return (
+        a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y
+      );
     }
     const placed: Bbox[] = [];
 
@@ -1677,22 +1750,28 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
     const bMaxY = Math.max(...allTys) + HEX_SIZE;
 
     const results: {
-      dr: DetailRegion;
-      x: number; y: number; rw: number; rh: number;
-      lines: string[]; color: string; anchorX: number; anchorY: number;
+      dr: SubRegion;
+      x: number;
+      y: number;
+      rw: number;
+      rh: number;
+      lines: string[];
+      color: string;
+      anchorX: number;
+      anchorY: number;
     }[] = [];
 
-    const sorted = [...targetSr.detailRegions]
-      .filter((dr) => dr.label.trim().length > 0)
+    const sorted = [...targetSr.children]
+      .filter((child) => child.label.trim().length > 0)
       .sort((a, b) => b.totalTrials - a.totalTrials);
 
-    for (const dr of sorted) {
-      const lines = dr.label.split(", ");
+    for (const child of sorted) {
+      const lines = child.label.split(", ");
       const maxLineLen = Math.max(...lines.map((l) => l.length));
       const rw = maxLineLen * charW + pad * 2;
       const rh = lines.length * lineH + pad * 2;
-      const anchorX = dr.pixelCentroidX;
-      const anchorY = dr.pixelCentroidY;
+      const anchorX = child.pixelCentroidX;
+      const anchorY = child.pixelCentroidY;
       const margin = HEX_SIZE * 0.5;
 
       const edgeDists: { dir: string; dist: number }[] = [
@@ -1715,8 +1794,16 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
 
       let chosen: { x: number; y: number } | null = null;
       for (const c of candidates) {
-        const b: Bbox = { x: c.x - rw / 2 - gap, y: c.y - rh / 2 - gap, w: rw + gap * 2, h: rh + gap * 2 };
-        if (labelInsideView(c.x, c.y, rw, rh) && !placed.some((p) => bbOverlaps(b, p))) {
+        const b: Bbox = {
+          x: c.x - rw / 2 - gap,
+          y: c.y - rh / 2 - gap,
+          w: rw + gap * 2,
+          h: rh + gap * 2,
+        };
+        if (
+          labelInsideView(c.x, c.y, rw, rh) &&
+          !placed.some((p) => bbOverlaps(b, p))
+        ) {
           chosen = c;
           placed.push(b);
           break;
@@ -1724,15 +1811,32 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
       }
       if (!chosen) continue;
 
-      const srVisual = clusterToSubRegionVisual.get(dr.clusters[0]?.id);
+      const childVisual = clusterToChildSubRegionVisual.get(
+        child.clusters[0]?.id,
+      );
       results.push({
-        dr, x: chosen.x, y: chosen.y, rw, rh, lines,
-        color: srVisual?.stroke ?? getTerritoryColor(parentTerr.id),
-        anchorX, anchorY,
+        dr: child,
+        x: chosen.x,
+        y: chosen.y,
+        rw,
+        rh,
+        lines,
+        color: childVisual?.stroke ?? getTerritoryColor(parentTerr.id),
+        anchorX,
+        anchorY,
       });
     }
     return results;
-  }, [focusedSubRegionId, territories, renderScale, data, HEX_SIZE, labelInsideView, clusterToSubRegionVisual]);
+  }, [
+    focusedSubRegionId,
+    focusedSubRegionPath,
+    territories,
+    renderScale,
+    data,
+    HEX_SIZE,
+    labelInsideView,
+    clusterToChildSubRegionVisual,
+  ]);
 
   // ============================================================
   // Macro label placement — just outside each territory's own
@@ -2070,34 +2174,14 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
       (v) => v.m.meanMarginalCoverage,
     );
     pickBest(
-      "Saturated",
-      (v) => v.m.meanMarginalCoverage < v.m.meanCoverage,
-      (v) => v.m.meanCoverage - v.m.meanMarginalCoverage,
-    );
-    pickBest(
       "High Coverage",
       () => true,
       (v) => v.m.meanCoverage,
     );
     pickBest(
-      "Low Coverage",
-      () => true,
-      (v) => -v.m.meanCoverage,
-    );
-    pickBest(
-      "Volatile",
-      () => true,
-      (v) => v.m.coverageIqr,
-    );
-    pickBest(
       "High Density",
       () => true,
       (v) => v.m.trialCount,
-    );
-    pickBest(
-      "Low Density",
-      (v) => v.m.trialCount > 0,
-      (v) => -v.m.trialCount,
     );
 
     // Group by clusterId — same cell may qualify for multiple labels
@@ -2462,32 +2546,30 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
 
   // Mouse handlers
   const handleMouseEnter = useCallback(
-    (tile: HexTile, _e: React.MouseEvent) => {
+    (tile: HexTile, e: React.MouseEvent) => {
       if (!tile.cluster) return;
       setHoveredClusterId(tile.cluster.id);
-      // In pixel mode at overview level, no hover highlighting
-      if (effectiveColorMode === "pixel" && focusedTerritoryId === null) return;
-      // Highlight the sub-region & territory this tile belongs to
-      if (!selectedParam) {
-        const srId = clusterToSubRegionId.get(tile.cluster.id) ?? null;
-        setHoveredSubRegionId(srId);
-        // At drill level 2, also highlight detail region
-        const drVisual = clusterToDetailRegionVisual.get(tile.cluster.id);
-        setHoveredDetailRegionId(drVisual?.detailRegionId ?? null);
-      }
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (rect)
+        setTooltipPos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+      // Highlight territory
       const tId = clusterToTerrId.get(tile.cluster.id) ?? null;
       setHoveredTerritoryId(tId);
     },
-    [clusterToSubRegionId, clusterToTerrId, clusterToDetailRegionVisual, selectedParam, effectiveColorMode, focusedTerritoryId],
+    [clusterToTerrId],
   );
 
-  const handleMouseMove = useCallback((_e: React.MouseEvent) => {}, []);
+  const handleMouseMove = useCallback((e: React.MouseEvent) => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (rect)
+      setTooltipPos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+  }, []);
 
   const handleMouseLeave = useCallback(() => {
     setHoveredClusterId(null);
     setHoveredSubRegionId(null);
-    setHoveredDetailRegionId(null);
     setHoveredTerritoryId(null);
+    setTooltipPos(null);
   }, []);
 
   const toggleTuner = useCallback((tuner: TunerType) => {
@@ -2564,186 +2646,164 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
           style={{ flexShrink: 0 }}
         >
           {/* ===== HEX GRID ===== */}
-            <g
-              style={{
-                transform: viewFocus
-                  ? `translate(${centerX}px, ${centerY}px) scale(${viewFocus.zoomScale}) translate(${-viewFocus.cx}px, ${-viewFocus.cy}px)`
-                  : `translate(${centerX}px, ${centerY}px) scale(${scale}) translate(${-dataCenter.x}px, ${-dataCenter.y}px)`,
-                transition: "transform 600ms cubic-bezier(0.4, 0, 0.2, 1)",
+          <g
+            style={{
+              transform: viewFocus
+                ? `translate(${centerX}px, ${centerY}px) scale(${viewFocus.zoomScale}) translate(${-viewFocus.cx}px, ${-viewFocus.cy}px)`
+                : `translate(${centerX}px, ${centerY}px) scale(${scale}) translate(${-dataCenter.x}px, ${-dataCenter.y}px)`,
+              transition: "transform 600ms cubic-bezier(0.4, 0, 0.2, 1)",
+            }}
+          >
+            {/* Transparent background — click clears focus */}
+            <rect
+              x={-50000}
+              y={-50000}
+              width={100000}
+              height={100000}
+              fill="transparent"
+              onClick={() => {
+                if (inspectedClusterId !== null) {
+                  setInspectedClusterId(null);
+                } else if (focusedSubRegionId !== null) {
+                  setFocusedSubRegionPath([]);
+                  setInspectedClusterId(null);
+                } else {
+                  setFocusedTerritoryId(null);
+                  setFocusedSubRegionPath([]);
+                  setInspectedClusterId(null);
+                }
               }}
-            >
-              {/* Transparent background — click clears focus */}
-              <rect
-                x={-50000}
-                y={-50000}
-                width={100000}
-                height={100000}
-                fill="transparent"
-                onClick={() => {
-                  if (inspectedClusterId !== null) {
-                    setInspectedClusterId(null);
-                  } else if (focusedSubRegionId !== null) {
-                    setFocusedSubRegionId(null);
-                    setInspectedClusterId(null);
-                  } else {
-                    setFocusedTerritoryId(null);
-                    setFocusedSubRegionId(null);
-                    setInspectedClusterId(null);
+              style={{ cursor: "default" }}
+            />
+
+            {/* ── Hex tiles: no hover-sensitive props so hover doesn't re-render all tiles ── */}
+            {data.hexTiles.map((tile) => {
+              if (!tile.cluster) return null;
+
+              const hasSelectedTuner = TUNER_NAMES.some(
+                (t) =>
+                  selectedTuners.has(t) && tile.cluster!.tunerCounts[t] > 0,
+              );
+              if (!hasSelectedTuner) return null;
+
+              const baseFill = getHexFill(tile);
+              const fill =
+                previewTuner !== null &&
+                (tile.cluster!.tunerCounts[previewTuner] ?? 0) > 0
+                  ? TUNER_COLORS[previewTuner]
+                  : baseFill;
+              const isInspected =
+                inspectedClusterId === tile.cluster.id &&
+                focusedTerritoryId !== null;
+              const tileTerrId = clusterToTerrId.get(tile.cluster.id);
+              // In pixel mode at overview level, skip territory muting
+              const isOverviewPixel =
+                effectiveColorMode === "pixel" && focusedTerritoryId === null;
+              const activeTerritoryId = isOverviewPixel
+                ? null
+                : (focusedTerritoryId ?? hoveredTerritoryId);
+              const isMuted =
+                activeTerritoryId !== null && tileTerrId !== activeTerritoryId;
+              const isTunerMuted =
+                previewTuner !== null &&
+                (tile.cluster!.tunerCounts[previewTuner] ?? 0) === 0;
+              const tileOpacity = isTunerMuted ? 0.1 : isMuted ? 0.12 : 1;
+
+              return (
+                <g
+                  key={`${tile.q},${tile.r}`}
+                  transform={`translate(${tile.x}, ${tile.y})`}
+                  onMouseEnter={(e) => handleMouseEnter(tile, e)}
+                  onMouseMove={handleMouseMove}
+                  onMouseLeave={handleMouseLeave}
+                  onClick={(e) => {
+                    if (effectiveColorMode === "pixel") {
+                      e.stopPropagation();
+                      const tId = clusterToTerrId.get(tile.cluster!.id) ?? null;
+
+                      if (
+                        focusedTerritoryId === null ||
+                        tId !== focusedTerritoryId
+                      ) {
+                        // Focus territory
+                        setFocusedTerritoryId(tId);
+                        setFocusedSubRegionPath([]);
+                        setInspectedClusterId(null);
+                      } else {
+                        // Territory focused: inspect cluster directly
+                        setInspectedClusterId(tile.cluster!.id);
+                      }
+                    }
+                  }}
+                  style={
+                    effectiveColorMode === "pixel"
+                      ? { cursor: "pointer" }
+                      : undefined
                   }
-                }}
-                style={{ cursor: "default" }}
-              />
+                  opacity={tileOpacity}
+                >
+                  <path
+                    d={hexPath}
+                    fill={fill || "#F8FAFC"}
+                    stroke={isInspected ? "#4F46E5" : "#E2E8F0"}
+                    strokeWidth={isInspected ? 3 : 0.5}
+                  />
+                </g>
+              );
+            })}
 
-              {/* ── Hex tiles: no hover-sensitive props so hover doesn't re-render all tiles ── */}
-              {data.hexTiles.map((tile) => {
-                if (!tile.cluster) return null;
-
-                const hasSelectedTuner = TUNER_NAMES.some(
-                  (t) =>
-                    selectedTuners.has(t) && tile.cluster!.tunerCounts[t] > 0,
+            {/* ── Hover highlight: dashed outer border of hovered sub-region (disabled) ── */}
+            {false && hoveredSubRegionBorder && (
+              <>
+                <path
+                  d={hoveredSubRegionBorder}
+                  fill="none"
+                  stroke="white"
+                  strokeWidth={5}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  opacity={0.7}
+                  pointerEvents="none"
+                />
+                <path
+                  d={hoveredSubRegionBorder}
+                  fill="none"
+                  stroke="#1E293B"
+                  strokeWidth={2.5}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  pointerEvents="none"
+                />
+              </>
+            )}
+            {/* ── Hover highlight at overview level: single tile ── */}
+            {hoveredClusterId !== null &&
+              focusedTerritoryId === null &&
+              (() => {
+                const tile = data.hexTiles.find(
+                  (t) => t.cluster?.id === hoveredClusterId,
                 );
-                if (!hasSelectedTuner) return null;
-
-                // Level 2 (sub-region focused): hide tiles outside focused sub-region
-                if (
-                  effectiveColorMode === "pixel" &&
-                  focusedSubRegionId !== null &&
-                  clusterToSubRegionId.get(tile.cluster.id) !== focusedSubRegionId
-                ) return null;
-
-                const baseFill = getHexFill(tile);
-                const fill =
-                  previewTuner !== null &&
-                  (tile.cluster!.tunerCounts[previewTuner] ?? 0) > 0
-                    ? TUNER_COLORS[previewTuner]
-                    : baseFill;
-                const isInspected =
-                  inspectedClusterId === tile.cluster.id &&
-                  focusedTerritoryId !== null;
-                const tileTerrId = clusterToTerrId.get(tile.cluster.id);
-                // In pixel mode at overview level, skip territory/sub-region muting
-                const isOverviewPixel = effectiveColorMode === "pixel" && focusedTerritoryId === null;
-                const activeTerritoryId = isOverviewPixel
-                  ? null
-                  : (focusedTerritoryId ?? hoveredTerritoryId);
-                const isMuted =
-                  activeTerritoryId !== null &&
-                  tileTerrId !== activeTerritoryId;
-                const activeSubRegionId = isOverviewPixel || selectedParam
-                  ? null
-                  : (hoveredSubRegionId ?? focusedSubRegionId);
-                const isSubMuted =
-                  !isMuted &&
-                  activeSubRegionId !== null &&
-                  clusterToSubRegionId.get(tile.cluster.id) !==
-                    activeSubRegionId;
-                const activeDetailRegionId =
-                  focusedSubRegionId !== null && !selectedParam
-                    ? hoveredDetailRegionId
-                    : null;
-                const isDetailMuted =
-                  !isMuted &&
-                  !isSubMuted &&
-                  activeDetailRegionId !== null &&
-                  (clusterToDetailRegionVisual.get(tile.cluster.id)?.detailRegionId ?? null) !== activeDetailRegionId;
-                const isTunerMuted =
-                  previewTuner !== null &&
-                  (tile.cluster!.tunerCounts[previewTuner] ?? 0) === 0;
-                const tileOpacity = isTunerMuted
-                  ? 0.1
-                  : isMuted
-                    ? 0.12
-                    : isSubMuted
-                      ? 0.22
-                      : isDetailMuted
-                        ? 0.3
-                        : 1;
-
+                if (!tile) return null;
                 return (
                   <g
-                    key={`${tile.q},${tile.r}`}
                     transform={`translate(${tile.x}, ${tile.y})`}
-                    onMouseEnter={(e) => handleMouseEnter(tile, e)}
-                    onMouseMove={handleMouseMove}
-                    onMouseLeave={handleMouseLeave}
-                    onClick={(e) => {
-                      if (effectiveColorMode === "pixel") {
-                        e.stopPropagation();
-                        const tId = clusterToTerrId.get(tile.cluster!.id) ?? null;
-                        const sId = clusterToSubRegionId.get(tile.cluster!.id) ?? null;
-
-                        if (focusedTerritoryId === null || tId !== focusedTerritoryId) {
-                          // Level 0 → Level 1: focus territory
-                          setFocusedTerritoryId(tId);
-                          setFocusedSubRegionId(null);
-                          setInspectedClusterId(null);
-                        } else if (focusedSubRegionId === null || sId !== focusedSubRegionId) {
-                          // Level 1 → Level 2: focus sub-region
-                          setFocusedSubRegionId(sId);
-                          setInspectedClusterId(null);
-                        } else {
-                          // Level 2: inspect cluster
-                          setInspectedClusterId(tile.cluster!.id);
-                        }
-                      }
-                    }}
-                    style={effectiveColorMode === "pixel" ? { cursor: "pointer" } : undefined}
-                    opacity={tileOpacity}
+                    pointerEvents="none"
                   >
                     <path
                       d={hexPath}
-                      fill={fill || "#F8FAFC"}
-                      stroke={
-                        isInspected
-                          ? "#4F46E5"
-                          : effectiveColorMode === "pixel" && focusedTerritoryId === null
-                            ? "#E2E8F0"
-                            : effectiveColorMode === "pixel" && focusedSubRegionId !== null
-                              ? (clusterToDetailRegionVisual.get(tile.cluster.id)
-                                  ?.stroke ?? clusterToSubRegionVisual.get(tile.cluster.id)
-                                  ?.stroke ?? "#E2E8F0")
-                              : (clusterToSubRegionVisual.get(tile.cluster.id)
-                                  ?.stroke ?? "#E2E8F0")
-                      }
-                      strokeWidth={isInspected ? 3 : 0.5}
+                      fill="none"
+                      stroke="#1E293B"
+                      strokeWidth={2.5}
                     />
                   </g>
                 );
-              })}
+              })()}
 
-              {/* ── Hover highlight: dashed outer border of hovered sub-region ── */}
-              {hoveredSubRegionBorder && (
-                <>
-                  <path d={hoveredSubRegionBorder} fill="none" stroke="white" strokeWidth={5} strokeLinecap="round" strokeLinejoin="round" opacity={0.7} pointerEvents="none" />
-                  <path d={hoveredSubRegionBorder} fill="none" stroke="#1E293B" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" pointerEvents="none" />
-                </>
-              )}
-              {/* ── Hover highlight at overview level: single tile ── */}
-              {hoveredClusterId !== null && focusedTerritoryId === null &&
-                (() => {
-                  const tile = data.hexTiles.find(
-                    (t) => t.cluster?.id === hoveredClusterId,
-                  );
-                  if (!tile) return null;
-                  return (
-                    <g
-                      transform={`translate(${tile.x}, ${tile.y})`}
-                      pointerEvents="none"
-                    >
-                      <path
-                        d={hexPath}
-                        fill="none"
-                        stroke="#1E293B"
-                        strokeWidth={2.5}
-                      />
-                    </g>
-                  );
-                })()}
+            {renderTerritoryFillsAndBorders}
 
-              {renderTerritoryFillsAndBorders}
-
-              {/* ── Macro boundaries: white halo pass (drawn first, behind) ── */}
-              {focusedSubRegionId === null && boundaryData.macro.map(({ d, terr }) => {
+            {/* ── Macro boundaries: white halo pass (drawn first, behind) ── */}
+            {focusedSubRegionId === null &&
+              boundaryData.macro.map(({ d, terr }) => {
                 if (!d) return null;
                 const isFocused = terr.id === focusedTerritoryId;
                 const isMuted = focusedTerritoryId !== null && !isFocused;
@@ -2763,8 +2823,9 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
                 );
               })}
 
-              {/* ── Macro boundaries: colored line pass ─────────────────── */}
-              {focusedSubRegionId === null && boundaryData.macro.map(({ d, terr }) => {
+            {/* ── Macro boundaries: colored line pass ─────────────────── */}
+            {focusedSubRegionId === null &&
+              boundaryData.macro.map(({ d, terr }) => {
                 if (!d) return null;
                 const isFocused = terr.id === focusedTerritoryId;
                 const isMuted = focusedTerritoryId !== null && !isFocused;
@@ -2783,499 +2844,164 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
                 );
               })}
 
-              {/* ── Sub-region boundaries: neutral, focus mode only (hidden at drill level 2) ──────── */}
-              {focusedTerritoryId !== null && focusedSubRegionId === null &&
-                (() => {
-                  const at = territories.find(
-                    (t) => t.id === focusedTerritoryId,
-                  );
-                  return at && at.subRegions.length > 1;
-                })() && (
-                  <>
-                    {/* white halo (thin) */}
-                    {boundaryData.sub
-                      .filter(
-                        ({ terr }) =>
-                          terr.id === focusedTerritoryId,
-                      )
-                      .map(({ d, sr, terr }) =>
-                        d ? (
-                          <path
-                            key={`sub-halo-${terr.id}-${sr.id}`}
-                            d={d}
-                            fill="none"
-                            stroke="white"
-                            strokeWidth={3}
-                            strokeLinecap="round"
-                            opacity={0.55}
-                            pointerEvents="none"
-                          />
-                        ) : null,
-                      )}
-                    {/* slate dashed line — neutral, reads as "internal division" not a new territory */}
-                    {boundaryData.sub
-                      .filter(
-                        ({ terr }) =>
-                          terr.id === focusedTerritoryId,
-                      )
-                      .map(({ d, sr, terr }) =>
-                        d ? (
-                          <path
-                            key={`sub-line-${terr.id}-${sr.id}`}
-                            d={d}
-                            fill="none"
-                            stroke="#64748B"
-                            strokeWidth={1.5}
-                            strokeDasharray={`${5},${4}`}
-                            strokeLinecap="round"
-                            opacity={0.7}
-                            pointerEvents="none"
-                          />
-                        ) : null,
-                      )}
-                  </>
-                )}
-
-              {/* ── Detail-region boundaries: sub-region focus mode only ──── */}
-              {focusedSubRegionId !== null && focusedTerritoryId !== null &&
-                (() => {
-                  const terr = territories.find((t) => t.id === focusedTerritoryId);
-                  const sr = terr?.subRegions.find((s) => s.id === focusedSubRegionId);
-                  return sr ? sr.detailRegions.length > 1 : false;
-                })() && (
-                  <>
-                    {boundaryData.detail
-                      .filter(({ sr, terr }) => sr.id === focusedSubRegionId && terr.id === focusedTerritoryId)
-                      .map(({ d, dr, sr, terr }) =>
-                        d ? (
-                          <path
-                            key={`detail-halo-${terr.id}-${sr.id}-${dr.id}`}
-                            d={d}
-                            fill="none"
-                            stroke="white"
-                            strokeWidth={2.5}
-                            strokeLinecap="round"
-                            opacity={0.5}
-                            pointerEvents="none"
-                          />
-                        ) : null,
-                      )}
-                    {boundaryData.detail
-                      .filter(({ sr, terr }) => sr.id === focusedSubRegionId && terr.id === focusedTerritoryId)
-                      .map(({ d, dr, sr, terr }) =>
-                        d ? (
-                          <path
-                            key={`detail-line-${terr.id}-${sr.id}-${dr.id}`}
-                            d={d}
-                            fill="none"
-                            stroke="#94A3B8"
-                            strokeWidth={1}
-                            strokeDasharray={`${3},${3}`}
-                            strokeLinecap="round"
-                            opacity={0.7}
-                            pointerEvents="none"
-                          />
-                        ) : null,
-                      )}
-                  </>
-                )}
-
-              {/* ── Focused sub-region outer border ── */}
-              {focusedSubRegionId !== null && focusedSubRegionBorder && (
-                <>
-                  <path
-                    d={focusedSubRegionBorder}
-                    fill="none"
-                    stroke="white"
-                    strokeWidth={6}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    opacity={0.85}
-                    pointerEvents="none"
-                  />
-                  <path
-                    d={focusedSubRegionBorder}
-                    fill="none"
-                    stroke="#475569"
-                    strokeWidth={2.5}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    opacity={0.8}
-                    pointerEvents="none"
-                  />
-                </>
-              )}
-
-              {/* ── Sub-region labels: multi-line, outside tiles, with leader lines (hidden at drill level 2) ── */}
-              {!selectedParam && focusedSubRegionId === null &&
-                subLabelPositions.map(
-                  ({
-                    sr,
-                    x,
-                    y,
-                    rw,
-                    rh: lh,
-                    lines,
-                    color,
-                    anchorX,
-                    anchorY,
-                  }) => {
-                    const isLabelHovered = hoveredSubRegionId === sr.id;
-                    const fs = 10 / renderScale;
-                    const lineH = fs * 1.3;
-                    const rx = 4 / renderScale;
-                    return (
-                      <g
-                        key={`sr-label-${sr.territoryId}-${sr.id}`}
-                        style={{ cursor: "pointer" }}
-                        opacity={
-                          hoveredSubRegionId !== null && !isLabelHovered
-                            ? 0.25
-                            : 1
-                        }
-                        onMouseEnter={() => setHoveredSubRegionId(sr.id)}
-                        onMouseLeave={() => setHoveredSubRegionId(null)}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setFocusedSubRegionId((prev) =>
-                            prev === sr.id ? null : sr.id,
-                          );
-                        }}
-                      >
-                        <line
-                          x1={anchorX}
-                          y1={anchorY}
-                          x2={x}
-                          y2={y}
-                          stroke={color}
-                          strokeWidth={1 / renderScale}
-                          strokeDasharray={`${3 / renderScale},${2 / renderScale}`}
-                          opacity={0.5}
-                        />
-                        <circle
-                          cx={anchorX}
-                          cy={anchorY}
-                          r={2.5 / renderScale}
-                          fill={color}
-                          opacity={0.7}
-                        />
-                        <rect
-                          x={x - rw / 2}
-                          y={y - lh / 2}
-                          width={rw}
-                          height={lh}
-                          rx={rx}
-                          fill="white"
-                          opacity={0.96}
-                        />
-                        <rect
-                          x={x - rw / 2}
-                          y={y - lh / 2}
-                          width={rw}
-                          height={lh}
-                          rx={rx}
-                          fill="none"
-                          stroke={color}
-                          strokeWidth={1.5 / renderScale}
-                        />
-                        <text
-                          x={x}
-                          textAnchor="middle"
-                          fontSize={fs}
-                          fontWeight={600}
-                          fill={color}
-                        >
-                          {lines.map((line, li) => (
-                            <tspan
-                              key={li}
-                              x={x}
-                              y={
-                                y -
-                                ((lines.length - 1) * lineH) / 2 +
-                                li * lineH
-                              }
-                              dominantBaseline="middle"
-                            >
-                              {line}
-                            </tspan>
-                          ))}
-                        </text>
-                      </g>
-                    );
-                  },
-                )}
-
-              {/* ── Detail-region labels: shown at drill level 2 ── */}
-              {!selectedParam &&
-                detailLabelPositions.map(
-                  ({ dr, x, y, rw, rh: lh, lines, color, anchorX, anchorY }) => {
-                    const isLabelHovered = hoveredDetailRegionId === dr.id;
-                    const fs = 9 / renderScale;
-                    const lineH = fs * 1.3;
-                    const rx = 3 / renderScale;
-                    return (
-                      <g
-                        key={`dr-label-${dr.id}`}
+            {/* ── Sub-region boundaries (disabled) ──────── */}
+            {false && focusedSubRegionId === null && (
+              <>
+                {/* white halo (thin) */}
+                {boundaryData.sub
+                  .filter(
+                    ({ terr }) =>
+                      focusedTerritoryId === null ||
+                      terr.id === focusedTerritoryId,
+                  )
+                  .map(({ d, sr, terr }) =>
+                    d ? (
+                      <path
+                        key={`sub-halo-${terr.id}-${sr.id}`}
+                        d={d}
+                        fill="none"
+                        stroke="white"
+                        strokeWidth={3}
+                        strokeLinecap="round"
+                        opacity={0.55}
                         pointerEvents="none"
-                        opacity={hoveredDetailRegionId !== null && !isLabelHovered ? 0.25 : 1}
-                      >
-                        <line
-                          x1={anchorX} y1={anchorY} x2={x} y2={y}
-                          stroke={color}
-                          strokeWidth={0.8 / renderScale}
-                          strokeDasharray={`${2 / renderScale},${2 / renderScale}`}
-                          opacity={0.4}
-                        />
-                        <circle cx={anchorX} cy={anchorY} r={2 / renderScale} fill={color} opacity={0.6} />
-                        <rect x={x - rw / 2} y={y - lh / 2} width={rw} height={lh} rx={rx} fill="white" opacity={0.94} />
-                        <rect x={x - rw / 2} y={y - lh / 2} width={rw} height={lh} rx={rx} fill="none" stroke={color} strokeWidth={1 / renderScale} />
-                        <text x={x} textAnchor="middle" fontSize={fs} fontWeight={600} fill={color}>
-                          {lines.map((line, li) => (
-                            <tspan key={li} x={x} y={y - ((lines.length - 1) * lineH) / 2 + li * lineH} dominantBaseline="middle">
-                              {line}
-                            </tspan>
-                          ))}
-                        </text>
-                      </g>
-                    );
-                  },
-                )}
+                      />
+                    ) : null,
+                  )}
+                {/* slate dashed line — neutral, reads as "internal division" not a new territory */}
+                {boundaryData.sub
+                  .filter(
+                    ({ terr }) =>
+                      focusedTerritoryId === null ||
+                      terr.id === focusedTerritoryId,
+                  )
+                  .map(({ d, sr, terr }) =>
+                    d ? (
+                      <path
+                        key={`sub-line-${terr.id}-${sr.id}`}
+                        d={d}
+                        fill="none"
+                        stroke="#64748B"
+                        strokeWidth={1.5}
+                        strokeDasharray={`${5},${4}`}
+                        strokeLinecap="round"
+                        opacity={0.7}
+                        pointerEvents="none"
+                      />
+                    ) : null,
+                  )}
+              </>
+            )}
 
-              {/* ── Parameter bin boundaries (boolean params) ── */}
-              {paramBinBoundaryPath && (
-                <>
-                  <path
-                    d={paramBinBoundaryPath}
-                    fill="none"
-                    stroke="white"
-                    strokeWidth={4 / renderScale}
-                    strokeLinecap="round"
-                    opacity={0.8}
-                    pointerEvents="none"
-                  />
-                  <path
-                    d={paramBinBoundaryPath}
-                    fill="none"
-                    stroke="#374151"
-                    strokeWidth={1.5 / renderScale}
-                    strokeLinecap="round"
-                    opacity={0.6}
-                    pointerEvents="none"
-                  />
-                </>
-              )}
+            {/* ── Focused sub-region outer border (disabled) ── */}
+            {false && focusedSubRegionId !== null && focusedSubRegionBorder && (
+              <>
+                <path
+                  d={focusedSubRegionBorder}
+                  fill="none"
+                  stroke="white"
+                  strokeWidth={6}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  opacity={0.85}
+                  pointerEvents="none"
+                />
+                <path
+                  d={focusedSubRegionBorder}
+                  fill="none"
+                  stroke="#475569"
+                  strokeWidth={2.5}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  opacity={0.8}
+                  pointerEvents="none"
+                />
+              </>
+            )}
 
-              {/* ── Parameter bin region labels ── */}
-              {paramBinRegions.length > 0 &&
-                paramBinRegions.map((region, i) => {
-                  const color =
-                    paramCellBins?.binColors[region.bin] ?? MIXED_COLOR;
+            {/* ── Sub-region labels (disabled) ── */}
+            {false &&
+              !selectedParam &&
+              focusedSubRegionId === null &&
+              subLabelPositions.map(
+                ({ sr, x, y, rw, rh: lh, lines, color, anchorX, anchorY }) => {
+                  const isLabelHovered = hoveredSubRegionId === sr.id;
                   const fs = 10 / renderScale;
-                  const labelText = region.bin;
-                  const textW = labelText.length * fs * 0.55;
-                  const padX = 5 / renderScale;
-                  const padY = 3 / renderScale;
-                  const rw = textW + padX * 2;
-                  const rh = fs + padY * 2;
+                  const lineH = fs * 1.3;
+                  const rx = 4 / renderScale;
                   return (
-                    <g key={`param-bin-${i}`} pointerEvents="none">
-                      <rect
-                        x={region.cx - rw / 2}
-                        y={region.cy - rh / 2}
-                        width={rw}
-                        height={rh}
-                        rx={4 / renderScale}
-                        fill="white"
-                        opacity={0.92}
+                    <g
+                      key={`sr-label-${sr.territoryId}-${sr.id}`}
+                      style={{ cursor: "pointer" }}
+                      opacity={
+                        hoveredSubRegionId !== null && !isLabelHovered
+                          ? 0.25
+                          : 1
+                      }
+                      onMouseEnter={() => setHoveredSubRegionId(sr.id)}
+                      onMouseLeave={() => setHoveredSubRegionId(null)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setFocusedSubRegionPath((prev) =>
+                          prev[prev.length - 1] === sr.id
+                            ? prev.slice(0, -1)
+                            : [...prev, sr.id],
+                        );
+                      }}
+                    >
+                      <line
+                        x1={anchorX}
+                        y1={anchorY}
+                        x2={x}
+                        y2={y}
+                        stroke={color}
+                        strokeWidth={1 / renderScale}
+                        strokeDasharray={`${3 / renderScale},${2 / renderScale}`}
+                        opacity={0.5}
+                      />
+                      <circle
+                        cx={anchorX}
+                        cy={anchorY}
+                        r={2.5 / renderScale}
+                        fill={color}
+                        opacity={0.7}
                       />
                       <rect
-                        x={region.cx - rw / 2}
-                        y={region.cy - rh / 2}
+                        x={x - rw / 2}
+                        y={y - lh / 2}
                         width={rw}
-                        height={rh}
-                        rx={4 / renderScale}
+                        height={lh}
+                        rx={rx}
+                        fill="white"
+                        opacity={0.96}
+                      />
+                      <rect
+                        x={x - rw / 2}
+                        y={y - lh / 2}
+                        width={rw}
+                        height={lh}
+                        rx={rx}
                         fill="none"
                         stroke={color}
                         strokeWidth={1.5 / renderScale}
                       />
                       <text
-                        x={region.cx}
-                        y={region.cy}
+                        x={x}
                         textAnchor="middle"
-                        dominantBaseline="central"
                         fontSize={fs}
-                        fontWeight={700}
+                        fontWeight={600}
                         fill={color}
                       >
-                        {labelText}
-                      </text>
-                    </g>
-                  );
-                })}
-
-              {/* ── Macro territory labels: multi-line, outside tiles, with leader lines ── */}
-              {!selectedParam &&
-                focusedTerritoryId === null &&
-                macroLabelPositions.map(
-                  ({
-                    terr: t,
-                    lines,
-                    x: px,
-                    y: py,
-                    rw,
-                    rh,
-                    anchorX,
-                    anchorY,
-                  }) => {
-                    const color = getTerritoryColor(t.id);
-                    const fs = 11 / renderScale;
-                    const lineH = fs * 1.3;
-                    const bw = 1.5 / renderScale;
-                    const rx = 5 / renderScale;
-                    return (
-                      <g key={`macro-label-${t.id}`} pointerEvents="none">
-                        <line
-                          x1={anchorX}
-                          y1={anchorY}
-                          x2={px}
-                          y2={py}
-                          stroke={color}
-                          strokeWidth={1 / renderScale}
-                          strokeDasharray={`${4 / renderScale},${3 / renderScale}`}
-                          opacity={0.45}
-                        />
-                        <circle
-                          cx={anchorX}
-                          cy={anchorY}
-                          r={3 / renderScale}
-                          fill={color}
-                          opacity={0.8}
-                        />
-                        <rect
-                          x={px - rw / 2 - 1 / renderScale}
-                          y={py - rh / 2 - 1 / renderScale}
-                          width={rw + 2 / renderScale}
-                          height={rh + 2 / renderScale}
-                          rx={rx + 1 / renderScale}
-                          fill="white"
-                        />
-                        <rect
-                          x={px - rw / 2}
-                          y={py - rh / 2}
-                          width={rw}
-                          height={rh}
-                          rx={rx}
-                          fill="none"
-                          stroke={color}
-                          strokeWidth={bw}
-                          opacity={0.9}
-                        />
-                        <text
-                          x={px}
-                          textAnchor="middle"
-                          fontSize={fs}
-                          fontWeight={700}
-                          fill={color}
-                        >
-                          {lines.map((line, li) => (
-                            <tspan
-                              key={li}
-                              x={px}
-                              y={
-                                py -
-                                ((lines.length - 1) * lineH) / 2 +
-                                li * lineH
-                              }
-                              dominantBaseline="middle"
-                            >
-                              {line}
-                            </tspan>
-                          ))}
-                        </text>
-                      </g>
-                    );
-                  },
-                )}
-
-              {/* ── Per-cell qualitative labels (outside tiles, with leader lines) ── */}
-              {qualCellLabelPositions.map(
-                ({ id, cx, cy, anchorX, anchorY, lines, rw, rh }) => {
-                  const rx = 5 / renderScale;
-                  const bw = 1.2 / renderScale;
-                  const fs = 9 / renderScale;
-                  const lineH = fs * 1.3;
-                  const borderColor =
-                    lines.length === 1 ? lines[0].color : "#64748B";
-                  // Mute labels outside the focused/hovered territory
-                  const tId = clusterToTerrId.get(id) ?? null;
-                  const activeTerritoryId =
-                    focusedTerritoryId ?? hoveredTerritoryId;
-                  const isMuted =
-                    activeTerritoryId !== null && tId !== activeTerritoryId;
-                  return (
-                    <g
-                      key={`qual-${id}`}
-                      pointerEvents="none"
-                      opacity={isMuted ? 0.08 : 0.92}
-                    >
-                      {/* Leader line */}
-                      <line
-                        x1={anchorX}
-                        y1={anchorY}
-                        x2={cx}
-                        y2={cy}
-                        stroke={borderColor}
-                        strokeWidth={1 / renderScale}
-                        strokeDasharray={`${3 / renderScale},${2 / renderScale}`}
-                        opacity={0.5}
-                      />
-                      {/* Anchor dot */}
-                      <circle
-                        cx={anchorX}
-                        cy={anchorY}
-                        r={2.5 / renderScale}
-                        fill={borderColor}
-                        opacity={0.7}
-                      />
-                      {/* White background */}
-                      <rect
-                        x={cx - rw / 2 - 1 / renderScale}
-                        y={cy - rh / 2 - 1 / renderScale}
-                        width={rw + 2 / renderScale}
-                        height={rh + 2 / renderScale}
-                        rx={rx + 1 / renderScale}
-                        fill="white"
-                      />
-                      {/* Border */}
-                      <rect
-                        x={cx - rw / 2}
-                        y={cy - rh / 2}
-                        width={rw}
-                        height={rh}
-                        rx={rx}
-                        fill="white"
-                        stroke={borderColor}
-                        strokeWidth={bw}
-                        opacity={0.95}
-                      />
-                      {/* Multi-line label text — each line in its own color */}
-                      <text
-                        x={cx}
-                        textAnchor="middle"
-                        fontSize={fs}
-                        fontWeight={700}
-                      >
-                        {lines.map((l, li) => (
+                        {lines.map((line, li) => (
                           <tspan
                             key={li}
-                            x={cx}
+                            x={x}
                             y={
-                              cy - ((lines.length - 1) * lineH) / 2 + li * lineH
+                              y - ((lines.length - 1) * lineH) / 2 + li * lineH
                             }
-                            dominantBaseline="central"
-                            fill={l.color}
+                            dominantBaseline="middle"
                           >
-                            {l.label}
+                            {line}
                           </tspan>
                         ))}
                       </text>
@@ -3283,7 +3009,318 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
                   );
                 },
               )}
-            </g>
+
+            {/* ── Child sub-region labels (disabled) ── */}
+            {false &&
+              !selectedParam &&
+              detailLabelPositions.map(
+                ({ dr, x, y, rw, rh: lh, lines, color, anchorX, anchorY }) => {
+                  const fs = 9 / renderScale;
+                  const lineH = fs * 1.3;
+                  const rx = 3 / renderScale;
+                  return (
+                    <g key={`dr-label-${dr.id}`} pointerEvents="none">
+                      <line
+                        x1={anchorX}
+                        y1={anchorY}
+                        x2={x}
+                        y2={y}
+                        stroke={color}
+                        strokeWidth={0.8 / renderScale}
+                        strokeDasharray={`${2 / renderScale},${2 / renderScale}`}
+                        opacity={0.4}
+                      />
+                      <circle
+                        cx={anchorX}
+                        cy={anchorY}
+                        r={2 / renderScale}
+                        fill={color}
+                        opacity={0.6}
+                      />
+                      <rect
+                        x={x - rw / 2}
+                        y={y - lh / 2}
+                        width={rw}
+                        height={lh}
+                        rx={rx}
+                        fill="white"
+                        opacity={0.94}
+                      />
+                      <rect
+                        x={x - rw / 2}
+                        y={y - lh / 2}
+                        width={rw}
+                        height={lh}
+                        rx={rx}
+                        fill="none"
+                        stroke={color}
+                        strokeWidth={1 / renderScale}
+                      />
+                      <text
+                        x={x}
+                        textAnchor="middle"
+                        fontSize={fs}
+                        fontWeight={600}
+                        fill={color}
+                      >
+                        {lines.map((line, li) => (
+                          <tspan
+                            key={li}
+                            x={x}
+                            y={
+                              y - ((lines.length - 1) * lineH) / 2 + li * lineH
+                            }
+                            dominantBaseline="middle"
+                          >
+                            {line}
+                          </tspan>
+                        ))}
+                      </text>
+                    </g>
+                  );
+                },
+              )}
+
+            {/* ── Parameter bin boundaries (boolean params) ── */}
+            {paramBinBoundaryPath && (
+              <>
+                <path
+                  d={paramBinBoundaryPath}
+                  fill="none"
+                  stroke="white"
+                  strokeWidth={4 / renderScale}
+                  strokeLinecap="round"
+                  opacity={0.8}
+                  pointerEvents="none"
+                />
+                <path
+                  d={paramBinBoundaryPath}
+                  fill="none"
+                  stroke="#374151"
+                  strokeWidth={1.5 / renderScale}
+                  strokeLinecap="round"
+                  opacity={0.6}
+                  pointerEvents="none"
+                />
+              </>
+            )}
+
+            {/* ── Parameter bin region labels ── */}
+            {paramBinRegions.length > 0 &&
+              paramBinRegions.map((region, i) => {
+                const color =
+                  paramCellBins?.binColors[region.bin] ?? MIXED_COLOR;
+                const fs = 10 / renderScale;
+                const labelText = region.bin;
+                const textW = labelText.length * fs * 0.55;
+                const padX = 5 / renderScale;
+                const padY = 3 / renderScale;
+                const rw = textW + padX * 2;
+                const rh = fs + padY * 2;
+                return (
+                  <g key={`param-bin-${i}`} pointerEvents="none">
+                    <rect
+                      x={region.cx - rw / 2}
+                      y={region.cy - rh / 2}
+                      width={rw}
+                      height={rh}
+                      rx={4 / renderScale}
+                      fill="white"
+                      opacity={0.92}
+                    />
+                    <rect
+                      x={region.cx - rw / 2}
+                      y={region.cy - rh / 2}
+                      width={rw}
+                      height={rh}
+                      rx={4 / renderScale}
+                      fill="none"
+                      stroke={color}
+                      strokeWidth={1.5 / renderScale}
+                    />
+                    <text
+                      x={region.cx}
+                      y={region.cy}
+                      textAnchor="middle"
+                      dominantBaseline="central"
+                      fontSize={fs}
+                      fontWeight={700}
+                      fill={color}
+                    >
+                      {labelText}
+                    </text>
+                  </g>
+                );
+              })}
+
+            {/* ── Per-territory parameter summary labels (disabled) ── */}
+            {false &&
+              selectedParam &&
+              focusedTerritoryId === null &&
+              macroLabelPositions.map(
+                ({
+                  terr: t,
+                  lines,
+                  x: px,
+                  y: py,
+                  rw,
+                  rh,
+                  anchorX,
+                  anchorY,
+                }) => {
+                  const color = getTerritoryColor(t.id);
+                  const fs = 11 / renderScale;
+                  const lineH = fs * 1.3;
+                  const bw = 1.5 / renderScale;
+                  const rx = 5 / renderScale;
+                  return (
+                    <g key={`macro-label-${t.id}`} pointerEvents="none">
+                      <line
+                        x1={anchorX}
+                        y1={anchorY}
+                        x2={px}
+                        y2={py}
+                        stroke={color}
+                        strokeWidth={1 / renderScale}
+                        strokeDasharray={`${4 / renderScale},${3 / renderScale}`}
+                        opacity={0.45}
+                      />
+                      <circle
+                        cx={anchorX}
+                        cy={anchorY}
+                        r={3 / renderScale}
+                        fill={color}
+                        opacity={0.8}
+                      />
+                      <rect
+                        x={px - rw / 2 - 1 / renderScale}
+                        y={py - rh / 2 - 1 / renderScale}
+                        width={rw + 2 / renderScale}
+                        height={rh + 2 / renderScale}
+                        rx={rx + 1 / renderScale}
+                        fill="white"
+                      />
+                      <rect
+                        x={px - rw / 2}
+                        y={py - rh / 2}
+                        width={rw}
+                        height={rh}
+                        rx={rx}
+                        fill="none"
+                        stroke={color}
+                        strokeWidth={bw}
+                        opacity={0.9}
+                      />
+                      <text
+                        x={px}
+                        textAnchor="middle"
+                        fontSize={fs}
+                        fontWeight={700}
+                        fill={color}
+                      >
+                        {lines.map((line, li) => (
+                          <tspan
+                            key={li}
+                            x={px}
+                            y={
+                              py - ((lines.length - 1) * lineH) / 2 + li * lineH
+                            }
+                            dominantBaseline="middle"
+                          >
+                            {line}
+                          </tspan>
+                        ))}
+                      </text>
+                    </g>
+                  );
+                },
+              )}
+
+            {/* ── Per-cell qualitative labels (outside tiles, with leader lines) ── */}
+            {qualCellLabelPositions.map(
+              ({ id, cx, cy, anchorX, anchorY, lines, rw, rh }) => {
+                const rx = 5 / renderScale;
+                const bw = 1.2 / renderScale;
+                const fs = 9 / renderScale;
+                const lineH = fs * 1.3;
+                const borderColor =
+                  lines.length === 1 ? lines[0].color : "#64748B";
+                // Mute labels outside the focused/hovered territory
+                const tId = clusterToTerrId.get(id) ?? null;
+                const activeTerritoryId =
+                  focusedTerritoryId ?? hoveredTerritoryId;
+                const isMuted =
+                  activeTerritoryId !== null && tId !== activeTerritoryId;
+                return (
+                  <g
+                    key={`qual-${id}`}
+                    pointerEvents="none"
+                    opacity={isMuted ? 0.08 : 0.92}
+                  >
+                    {/* Leader line */}
+                    <line
+                      x1={anchorX}
+                      y1={anchorY}
+                      x2={cx}
+                      y2={cy}
+                      stroke={borderColor}
+                      strokeWidth={1 / renderScale}
+                      strokeDasharray={`${3 / renderScale},${2 / renderScale}`}
+                      opacity={0.5}
+                    />
+                    {/* Anchor dot */}
+                    <circle
+                      cx={anchorX}
+                      cy={anchorY}
+                      r={2.5 / renderScale}
+                      fill={borderColor}
+                      opacity={0.7}
+                    />
+                    {/* White background */}
+                    <rect
+                      x={cx - rw / 2 - 1 / renderScale}
+                      y={cy - rh / 2 - 1 / renderScale}
+                      width={rw + 2 / renderScale}
+                      height={rh + 2 / renderScale}
+                      rx={rx + 1 / renderScale}
+                      fill="white"
+                    />
+                    {/* Border */}
+                    <rect
+                      x={cx - rw / 2}
+                      y={cy - rh / 2}
+                      width={rw}
+                      height={rh}
+                      rx={rx}
+                      fill="white"
+                      stroke={borderColor}
+                      strokeWidth={bw}
+                      opacity={0.95}
+                    />
+                    {/* Multi-line label text — each line in its own color */}
+                    <text
+                      x={cx}
+                      textAnchor="middle"
+                      fontSize={fs}
+                      fontWeight={700}
+                    >
+                      {lines.map((l, li) => (
+                        <tspan
+                          key={li}
+                          x={cx}
+                          y={cy - ((lines.length - 1) * lineH) / 2 + li * lineH}
+                          dominantBaseline="central"
+                          fill={l.color}
+                        >
+                          {l.label}
+                        </tspan>
+                      ))}
+                    </text>
+                  </g>
+                );
+              },
+            )}
+          </g>
         </svg>
 
         {/* Param bin legend — bottom-left inside SVG area */}
@@ -3352,10 +3389,10 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
           <div
             style={{
               position: "absolute",
-              top: 12,
+              top: CONTROLS_PAD + 4,
               right: 12,
               width: 260,
-              maxHeight: height - 84,
+              maxHeight: height - CONTROLS_PAD - 20,
               overflowY: "auto",
               background: "white",
               borderRadius: 10,
@@ -3368,7 +3405,7 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
           >
             {focusedTerritoryMetrics &&
               (() => {
-                const { terr, terrAvgCov, terrMaxCov, subMetrics } =
+                const { terr, terrAvgCov, terrMaxCov, terrMinCov, subMetrics } =
                   focusedTerritoryMetrics;
                 const terrColor = getTerritoryColor(terr.id);
                 return (
@@ -3405,19 +3442,16 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
                             color: "#1E293B",
                           }}
                         >
-                          {terr.label || `Territory ${terr.id}`}
+                          {`Territory ${terr.id}`}
                         </span>
                       </div>
                       <button
                         onClick={() => {
                           if (inspectedClusterId !== null) {
                             setInspectedClusterId(null);
-                          } else if (focusedSubRegionId !== null) {
-                            setFocusedSubRegionId(null);
-                            setInspectedClusterId(null);
                           } else {
                             setFocusedTerritoryId(null);
-                            setFocusedSubRegionId(null);
+                            setFocusedSubRegionPath([]);
                             setInspectedClusterId(null);
                           }
                         }}
@@ -3438,9 +3472,9 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
                     <div
                       style={{
                         display: "grid",
-                        gridTemplateColumns: "1fr 1fr 1fr",
+                        gridTemplateColumns: "1fr 1fr 1fr 1fr",
                         gap: 4,
-                        marginBottom: 14,
+                        marginBottom: 10,
                       }}
                     >
                       {[
@@ -3448,8 +3482,9 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
                           label: "Trials",
                           value: terr.totalTrials.toLocaleString(),
                         },
-                        { label: "Avg Cov", value: terrAvgCov.toFixed(1) },
-                        { label: "Max Cov", value: terrMaxCov.toFixed(1) },
+                        { label: "Min Cov", value: terrMinCov.toFixed(3) },
+                        { label: "Avg Cov", value: terrAvgCov.toFixed(3) },
+                        { label: "Max Cov", value: terrMaxCov.toFixed(3) },
                       ].map(({ label, value }) => (
                         <div
                           key={label}
@@ -3482,8 +3517,146 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
                       ))}
                     </div>
 
-                    {/* Sub-region list */}
-                    {subMetrics.length > 0 && (
+                    {/* Coverage range bar */}
+                    {(() => {
+                      const gMin = globalCovRange.min;
+                      const gMax = globalCovRange.max;
+                      const range = gMax - gMin || 1;
+                      const toPos = (v: number) =>
+                        Math.max(0, Math.min(100, ((v - gMin) / range) * 100));
+                      const minPos = toPos(terrMinCov);
+                      const maxPos = toPos(terrMaxCov);
+                      const avgPos = toPos(terrAvgCov);
+                      return (
+                        <div style={{ marginBottom: 14 }}>
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              fontSize: 8,
+                              color: "#94A3B8",
+                              marginBottom: 2,
+                            }}
+                          >
+                            <span>{gMin.toFixed(3)}</span>
+                            <span style={{ fontSize: 8, color: "#64748B" }}>
+                              Global Branch Coverage Range
+                            </span>
+                            <span>{gMax.toFixed(3)}</span>
+                          </div>
+                          <div
+                            style={{
+                              position: "relative",
+                              height: 8,
+                              background: "#E5E7EB",
+                              borderRadius: 4,
+                            }}
+                          >
+                            {/* Territory range */}
+                            <div
+                              style={{
+                                position: "absolute",
+                                left: `${minPos}%`,
+                                width: `${Math.max(maxPos - minPos, 1)}%`,
+                                height: "100%",
+                                background: terrColor,
+                                opacity: 0.35,
+                                borderRadius: 4,
+                              }}
+                            />
+                            {/* Avg marker */}
+                            <div
+                              style={{
+                                position: "absolute",
+                                left: `${avgPos}%`,
+                                top: -1,
+                                width: 2,
+                                height: 10,
+                                background: terrColor,
+                                borderRadius: 1,
+                                transform: "translateX(-1px)",
+                              }}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    {/* Tuner distribution */}
+                    <div style={{ marginBottom: 14 }}>
+                      <div
+                        style={{
+                          fontSize: 10,
+                          fontWeight: 600,
+                          color: "#374151",
+                          marginBottom: 6,
+                        }}
+                      >
+                        Tuner Distribution
+                      </div>
+                      {TUNER_NAMES.filter((t) => selectedTuners.has(t))
+                        .map((t) => ({ tuner: t, count: terr.tunerCounts[t] }))
+                        .sort((a, b) => b.count - a.count)
+                        .map(({ tuner, count }) => {
+                          const pct =
+                            terr.totalTrials > 0
+                              ? (count / terr.totalTrials) * 100
+                              : 0;
+                          // Compute avg coverage from clusters where this tuner has trials
+                          const tunerClusterCovs = terr.clusters
+                            .filter((c) => c.tunerCounts[tuner] > 0)
+                            .map((c) => c.meanBranchCoverage);
+                          const avgCov =
+                            tunerClusterCovs.length > 0
+                              ? tunerClusterCovs.reduce((s, v) => s + v, 0) /
+                                tunerClusterCovs.length
+                              : 0;
+                          return (
+                            <div key={tuner} style={{ marginBottom: 6 }}>
+                              <div
+                                style={{
+                                  display: "flex",
+                                  justifyContent: "space-between",
+                                  fontSize: 9,
+                                  marginBottom: 2,
+                                }}
+                              >
+                                <span
+                                  style={{
+                                    fontWeight: 600,
+                                    color: TUNER_COLORS[tuner],
+                                  }}
+                                >
+                                  {TUNER_DISPLAY_NAMES[tuner]}
+                                </span>
+                                <span style={{ color: "#6B7280" }}>
+                                  {count} ({pct.toFixed(0)}%) · avg{" "}
+                                  {avgCov.toFixed(3)}
+                                </span>
+                              </div>
+                              <div
+                                style={{
+                                  height: 4,
+                                  background: "#E5E7EB",
+                                  borderRadius: 2,
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    height: "100%",
+                                    width: `${pct}%`,
+                                    background: TUNER_COLORS[tuner],
+                                    borderRadius: 2,
+                                  }}
+                                />
+                              </div>
+                            </div>
+                          );
+                        })}
+                    </div>
+
+                    {/* Sub-region list (disabled) */}
+                    {false && subMetrics.length > 0 && (
                       <>
                         <div
                           style={{
@@ -3512,8 +3685,10 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
                                 <div
                                   key={sr.id}
                                   onClick={() =>
-                                    setFocusedSubRegionId((prev) =>
-                                      prev === sr.id ? null : sr.id,
+                                    setFocusedSubRegionPath((prev) =>
+                                      prev[prev.length - 1] === sr.id
+                                        ? prev.slice(0, -1)
+                                        : [...prev, sr.id],
                                     )
                                   }
                                   onMouseEnter={() =>
@@ -3751,7 +3926,7 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
                                 color: "#10B981",
                               }}
                             >
-                              {inspectedCluster.avgCoverage.toFixed(1)}
+                              {inspectedCluster.meanBranchCoverage.toFixed(3)}
                             </div>
                           </div>
                         </div>
@@ -3831,7 +4006,7 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
               padding: compact ? "3px 6px" : "5px 10px",
               fontSize: compact ? 10 : 11,
               pointerEvents: "auto",
-              flexWrap: compact ? "wrap" as const : "nowrap" as const,
+              flexWrap: compact ? ("wrap" as const) : ("nowrap" as const),
             }}
           >
             {/* Detail Level: 🔍 − L4 + */}
@@ -3913,9 +4088,8 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
             {/* Color mode buttons */}
             {(
               [
-                { mode: "pixel", label: "Sub-region" },
+                { mode: "pixel", label: "Territory" },
                 { mode: "coverage", label: "Coverage" },
-                { mode: "marginal", label: "Marginal" },
                 { mode: "dominant", label: "Dominant" },
                 { mode: "density", label: "Density" },
               ] as { mode: ColorMode; label: string }[]
@@ -3932,12 +4106,26 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
                     padding: "3px 7px",
                     fontSize: 10,
                     border: "1px solid",
-                    borderColor: isActive ? "#4F46E5" : isPreviewing ? "#818CF8" : "#E5E7EB",
+                    borderColor: isActive
+                      ? "#4F46E5"
+                      : isPreviewing
+                        ? "#818CF8"
+                        : "#E5E7EB",
                     borderRadius: 4,
-                    background: isActive ? "#EEF2FF" : isPreviewing ? "#F5F3FF" : "white",
-                    color: isActive ? "#4F46E5" : isPreviewing ? "#6366F1" : "#6B7280",
+                    background: isActive
+                      ? "#EEF2FF"
+                      : isPreviewing
+                        ? "#F5F3FF"
+                        : "white",
+                    color: isActive
+                      ? "#4F46E5"
+                      : isPreviewing
+                        ? "#6366F1"
+                        : "#6B7280",
                     cursor: "pointer",
-                    boxShadow: isPreviewing ? "0 0 0 2px rgba(99,102,241,0.25)" : "none",
+                    boxShadow: isPreviewing
+                      ? "0 0 0 2px rgba(99,102,241,0.25)"
+                      : "none",
                     transition: "all 0.12s ease",
                   }}
                 >
@@ -3946,160 +4134,157 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
               );
             })}
 
-            {/* Divider */}
-            <div
-              style={{
-                width: 1,
-                height: 14,
-                background: "#E5E7EB",
-                margin: "0 2px",
-              }}
-            />
-
-            {/* Parameter selector */}
-            <select
-              value={selectedParam ?? ""}
-              onChange={(e) => setSelectedParam(e.target.value || null)}
-              style={{
-                padding: "3px 6px",
-                fontSize: 10,
-                border: "1px solid #E5E7EB",
-                borderRadius: 4,
-                background: selectedParam ? "#EEF2FF" : "white",
-                color: selectedParam ? "#4F46E5" : "#6B7280",
-                cursor: "pointer",
-                maxWidth: 140,
-              }}
-            >
-              <option value="">All params</option>
-              {paramNames.map((p) => (
-                <option key={p} value={p}>
-                  {p}
-                </option>
-              ))}
-            </select>
-
-            {/* Debug toggle */}
-            {!compact && <div
-              style={{
-                width: 1,
-                height: 14,
-                background: "#E5E7EB",
-                margin: "0 2px",
-              }}
-            />}
-            {!compact && (<button
-              onClick={() => setShowParamDebug((v) => !v)}
-              style={{
-                padding: "2px 6px",
-                fontSize: 9,
-                borderRadius: 4,
-                border: "1px solid #E5E7EB",
-                cursor: "pointer",
-                background: showParamDebug ? "#FEF3C7" : "white",
-                color: showParamDebug ? "#92400E" : "#9CA3AF",
-              }}
-            >
-              Debug
-            </button>)}
-          </div>
-
-          {/* Debug panel: parameter types */}
-          {showParamDebug && (
-            <div
-              style={{
-                position: "absolute",
-                top: 38,
-                left: 8,
-                zIndex: 30,
-                background: "rgba(255,255,255,0.96)",
-                backdropFilter: "blur(4px)",
-                border: "1px solid #E5E7EB",
-                borderRadius: 8,
-                boxShadow: "0 4px 16px rgba(0,0,0,0.12)",
-                padding: "8px 12px",
-                maxHeight: 400,
-                overflowY: "auto",
-                pointerEvents: "auto",
-                fontSize: 10,
-              }}
-            >
-              <div
-                style={{ fontWeight: 700, marginBottom: 4, color: "#374151" }}
-              >
-                Parameter Types ({paramTypeMap.size})
-              </div>
-              <table style={{ borderCollapse: "collapse" }}>
-                <thead>
-                  <tr style={{ borderBottom: "1px solid #E5E7EB" }}>
-                    <th
-                      style={{
-                        textAlign: "left",
-                        padding: "2px 8px 2px 0",
-                        color: "#6B7280",
-                      }}
-                    >
-                      Name
-                    </th>
-                    <th
-                      style={{
-                        textAlign: "left",
-                        padding: "2px 0",
-                        color: "#6B7280",
-                      }}
-                    >
-                      Type
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {Array.from(paramTypeMap.entries()).map(([name, type]) => {
-                    const typeColor =
-                      type === "boolean"
-                        ? "#10B981"
-                        : type === "numeric"
-                          ? "#3B82F6"
-                          : "#F59E0B";
+            {/* Coverage legend + metric selector (visible in coverage mode) */}
+            {effectiveColorMode === "coverage" && (
+              <>
+                <div
+                  style={{
+                    width: 1,
+                    height: 14,
+                    background: "#E5E7EB",
+                    margin: "0 2px",
+                  }}
+                />
+                {/* Metric selector: mean / min / max */}
+                <div style={{ display: "flex", gap: 2 }}>
+                  {(["mean", "min", "max"] as const).map((m) => {
+                    const isActive = coverageMetric === m;
                     return (
-                      <tr
-                        key={name}
-                        style={{ borderBottom: "1px solid #F3F4F6" }}
+                      <button
+                        key={m}
+                        onClick={() => setCoverageMetric(m)}
+                        style={{
+                          padding: "2px 5px",
+                          fontSize: 9,
+                          border: "1px solid",
+                          borderColor: isActive ? "#4F46E5" : "#E5E7EB",
+                          borderRadius: 3,
+                          background: isActive ? "#EEF2FF" : "white",
+                          color: isActive ? "#4F46E5" : "#6B7280",
+                          cursor: "pointer",
+                          fontWeight: isActive ? 600 : 400,
+                        }}
                       >
-                        <td
-                          style={{
-                            padding: "2px 8px 2px 0",
-                            fontFamily: "monospace",
-                            cursor: "pointer",
-                            color:
-                              selectedParam === name ? "#4F46E5" : "#374151",
-                            fontWeight: selectedParam === name ? 700 : 400,
-                          }}
-                          onClick={() => setSelectedParam(name)}
-                        >
-                          {name}
-                        </td>
-                        <td
-                          style={{
-                            padding: "2px 0",
-                            color: typeColor,
-                            fontWeight: 600,
-                          }}
-                        >
-                          {type}
-                        </td>
-                      </tr>
+                        {m}
+                      </button>
                     );
                   })}
-                </tbody>
-              </table>
-              <div style={{ marginTop: 6, color: "#9CA3AF", fontSize: 9 }}>
-                <span style={{ color: "#10B981" }}>boolean</span>{" "}
-                <span style={{ color: "#3B82F6" }}>numeric</span>{" "}
-                <span style={{ color: "#F59E0B" }}>categorical</span>
-                {" | click name to select"}
-              </div>
-            </div>
-          )}
+                </div>
+                {(() => {
+                  const barW = 120;
+                  const gMin = globalCovRange.min;
+                  const gMax = globalCovRange.max;
+                  const gMean = globalCovRange.mean;
+                  const range = gMax - gMin || 1;
+                  const meanPct = ((gMean - gMin) / range) * 100;
+                  return (
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 2,
+                      }}
+                    >
+                      {/* Mean label above bar */}
+                      <div style={{ position: "relative", width: barW, height: 10 }}>
+                        <span
+                          style={{
+                            position: "absolute",
+                            left: `${meanPct}%`,
+                            transform: "translateX(-50%)",
+                            fontSize: 7,
+                            fontWeight: 600,
+                            color: "#374151",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          avg {gMean.toFixed(3)}
+                        </span>
+                      </div>
+                      {/* Gradient bar: min (white) → max (green) */}
+                      <div style={{ position: "relative", width: barW, height: 8 }}>
+                        <div
+                          style={{
+                            width: "100%",
+                            height: "100%",
+                            borderRadius: 4,
+                            background:
+                              "linear-gradient(to right, #FFFFFF, #16A34A)",
+                            border: "1px solid #E5E7EB",
+                          }}
+                        />
+                        {/* Mean marker triangle */}
+                        <div
+                          style={{
+                            position: "absolute",
+                            left: `${meanPct}%`,
+                            top: -2,
+                            width: 0,
+                            height: 0,
+                            borderLeft: "3px solid transparent",
+                            borderRight: "3px solid transparent",
+                            borderTop: "4px solid #374151",
+                            transform: "translateX(-3px)",
+                          }}
+                        />
+                      </div>
+                      {/* Scale endpoints: min / max values */}
+                      <div
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          width: barW,
+                          fontSize: 7,
+                          color: "#6B7280",
+                          fontWeight: 600,
+                        }}
+                      >
+                        <span>{gMin.toFixed(3)}</span>
+                        <span>{gMax.toFixed(3)}</span>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </>
+            )}
+
+            {/* Parameter selector (only in territory/pixel mode) */}
+            {(effectiveColorMode === "pixel" || effectiveColorMode === "territory") && (
+              <>
+                <div
+                  style={{
+                    width: 1,
+                    height: 14,
+                    background: "#E5E7EB",
+                    margin: "0 2px",
+                  }}
+                />
+                <select
+                  value={selectedParam ?? ""}
+                  onChange={(e) => setSelectedParam(e.target.value || null)}
+                  style={{
+                    padding: "3px 6px",
+                    fontSize: 10,
+                    border: "1px solid #E5E7EB",
+                    borderRadius: 4,
+                    background: selectedParam ? "#EEF2FF" : "white",
+                    color: selectedParam ? "#4F46E5" : "#6B7280",
+                    cursor: "pointer",
+                    maxWidth: 140,
+                  }}
+                >
+                  <option value="">All params</option>
+                  {paramNames.map((p) => (
+                    <option key={p} value={p}>
+                      {p}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
+
+            {/* Debug toggle */}
+          </div>
 
           {/* Right: Tuner toggles + Qual label toggles */}
           <div
@@ -4148,10 +4333,16 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
                           ? TUNER_COLORS[tuner] + "88"
                           : "#F1F5F9",
                       borderRadius: 5,
-                      background: isPreviewing ? TUNER_COLORS[tuner] + "15" : isOn ? "white" : "#FAFAFA",
+                      background: isPreviewing
+                        ? TUNER_COLORS[tuner] + "15"
+                        : isOn
+                          ? "white"
+                          : "#FAFAFA",
                       cursor: "pointer",
                       opacity: isOn ? 1 : isPreviewing ? 0.8 : 0.4,
-                      boxShadow: isPreviewing ? `0 0 0 2px ${TUNER_COLORS[tuner]}40` : "none",
+                      boxShadow: isPreviewing
+                        ? `0 0 0 2px ${TUNER_COLORS[tuner]}40`
+                        : "none",
                       transition: "all 0.12s ease",
                     }}
                   >
@@ -4191,12 +4382,8 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
                 const criteria: Record<QualitativeLabel, string> = {
                   "Failure-prone": "Highest failure rate (cov=0)",
                   "High Novelty": "Highest marginal coverage",
-                  Saturated: "High coverage, low marginal",
                   "High Coverage": "Highest average coverage",
-                  "Low Coverage": "Lowest average coverage",
-                  Volatile: "Highest coverage IQR",
                   "High Density": "Most trials explored",
-                  "Low Density": "Fewest trials explored",
                 };
                 return (
                   <>
@@ -4209,7 +4396,7 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
                       style={{
                         display: "flex",
                         flexDirection: compact ? "row" : "column",
-                        flexWrap: compact ? "wrap" as const : undefined,
+                        flexWrap: compact ? ("wrap" as const) : undefined,
                         gap: compact ? 3 : 1,
                       }}
                     >
@@ -4247,10 +4434,20 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
                                 flexShrink: 0,
                               }}
                             />
-                            <span style={{ fontWeight: 600, color, fontSize: compact ? 8 : undefined }}>{ql}</span>
-                            {!compact && <span style={{ color: "#9CA3AF", fontSize: 8 }}>
-                              {criteria[ql]}
-                            </span>}
+                            <span
+                              style={{
+                                fontWeight: 600,
+                                color,
+                                fontSize: compact ? 8 : undefined,
+                              }}
+                            >
+                              {ql}
+                            </span>
+                            {!compact && (
+                              <span style={{ color: "#9CA3AF", fontSize: 8 }}>
+                                {criteria[ql]}
+                              </span>
+                            )}
                           </div>
                         );
                       })}
@@ -4262,52 +4459,81 @@ export function HexMap({ program = "gawk", compact = false, onDrillStateChange, 
           </div>
         </div>
 
-        {/* Sync button — shown in right panel of split view */}
-        {showSyncButton && (
-          <button
-            onClick={onSyncToggle}
-            style={{
-              position: "absolute",
-              bottom: 12,
-              left: 12,
-              zIndex: 20,
-              display: "flex",
-              alignItems: "center",
-              gap: 5,
-              padding: "5px 10px",
-              fontSize: 11,
-              fontWeight: 600,
-              border: "1px solid",
-              borderColor: syncEnabled ? "#4F46E5" : "#E5E7EB",
-              borderRadius: 6,
-              background: syncEnabled
-                ? "rgba(238,242,255,0.95)"
-                : "rgba(255,255,255,0.92)",
-              backdropFilter: "blur(4px)",
-              boxShadow: "0 2px 8px rgba(0,0,0,0.10)",
-              color: syncEnabled ? "#4F46E5" : "#6B7280",
-              cursor: "pointer",
-            }}
-            title="Sync drill level with left view"
-          >
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <polyline points="17 1 21 5 17 9" />
-              <path d="M3 11V9a4 4 0 0 1 4-4h14" />
-              <polyline points="7 23 3 19 7 15" />
-              <path d="M21 13v2a4 4 0 0 1-4 4H3" />
-            </svg>
-            Sync {syncEnabled ? "ON" : "OFF"}
-          </button>
-        )}
+        {/* ── Hover tooltip ── */}
+        {tooltipPos &&
+          hoveredClusterId !== null &&
+          data &&
+          (() => {
+            const cluster = data.clusters.find(
+              (c) => c.id === hoveredClusterId,
+            );
+            if (!cluster) return null;
+            const dominant = getDominantTuner(
+              Object.fromEntries(
+                TUNER_NAMES.filter((t) => selectedTuners.has(t)).map((t) => [
+                  t,
+                  cluster.tunerCounts[t],
+                ]),
+              ) as Record<TunerType, number>,
+            );
+            const dominantCount = cluster.tunerCounts[dominant];
+            const totalSelected = TUNER_NAMES.filter((t) =>
+              selectedTuners.has(t),
+            ).reduce((s, t) => s + cluster.tunerCounts[t], 0);
+            const dominantPct =
+              totalSelected > 0
+                ? Math.round((dominantCount / totalSelected) * 100)
+                : 0;
+            return (
+              <div
+                style={{
+                  position: "absolute",
+                  left: tooltipPos.x + 12,
+                  top: tooltipPos.y - 10,
+                  background: "rgba(15, 23, 42, 0.92)",
+                  color: "white",
+                  padding: "6px 10px",
+                  borderRadius: 6,
+                  fontSize: 11,
+                  lineHeight: "16px",
+                  pointerEvents: "none",
+                  zIndex: 50,
+                  whiteSpace: "nowrap",
+                  boxShadow: "0 2px 8px rgba(0,0,0,0.25)",
+                }}
+              >
+                <div style={{ fontWeight: 600, marginBottom: 3 }}>
+                  {cluster.totalTrials} trials · avg cov{" "}
+                  {cluster.meanBranchCoverage.toFixed(3)}
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                  <div
+                    style={{
+                      width: 6,
+                      height: 6,
+                      borderRadius: "50%",
+                      background: TUNER_COLORS[dominant],
+                    }}
+                  />
+                  <span>
+                    {TUNER_DISPLAY_NAMES[dominant]} {dominantPct}%
+                  </span>
+                  {selectedTuners.size > 1 && (
+                    <span style={{ color: "#94A3B8", marginLeft: 4 }}>
+                      (
+                      {
+                        TUNER_NAMES.filter(
+                          (t) =>
+                            selectedTuners.has(t) && cluster.tunerCounts[t] > 0,
+                        ).length
+                      }{" "}
+                      tuners)
+                    </span>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
       </div>
     </div>
   );

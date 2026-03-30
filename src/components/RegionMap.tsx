@@ -35,6 +35,7 @@ interface RegionNode {
   idx: number;
   q: number;
   r: number;
+  discrete: number[];
   trialCount: number;
   tunerCounts: Record<string, number>;
   meanCoverage: number;
@@ -79,11 +80,20 @@ interface Region {
   islands: RegionIsland[];
 }
 
+interface ParamMeta {
+  type: "boolean" | "numeric" | "categorical";
+  binEdges?: number[];
+  categories?: string[];
+}
+
 interface RegionMapData {
   program: string;
   totalTrials: number;
   nParams: number;
   globalMeanCoverage: number;
+  allParams: string[];
+  paramMeta: Record<string, ParamMeta>;
+  importance: Record<string, number>;
   nodes: RegionNode[];
   regions_param: Region[];
   regions_param_cov: Region[];
@@ -107,11 +117,265 @@ const TUNER_LABELS: Record<string, string> = {
   SuccessiveHalving: "Succ. Halving",
 };
 
+const TUNER_NAMES = ["SymTuner", "CMA_ES", "Genetic", "SuccessiveHalving"];
+
+const TUNER_SHORT: Record<string, string> = {
+  SymTuner: "Sym", CMA_ES: "CMA", Genetic: "Gen", SuccessiveHalving: "SH",
+};
+
+const MAX_LABEL_PARTS = 2;
+
 const HEX_SIZE = 10;
 
 const HEX_DIRS: [number, number][] = [
   [1, 0], [0, 1], [-1, 1], [-1, 0], [0, -1], [1, -1],
 ];
+
+// ─────────────────────────────────────────────────────────────
+// Dynamic label & stats (tuner-filtered)
+// ─────────────────────────────────────────────────────────────
+
+function getFilteredTrialCount(node: RegionNode, enabled: Set<string>): number {
+  let sum = 0;
+  for (const t of enabled) sum += node.tunerCounts[t] ?? 0;
+  return sum;
+}
+
+function getDominantTunerFromCounts(counts: Record<string, number>): string | null {
+  let best: string | null = null;
+  let bestV = 0;
+  for (const [t, v] of Object.entries(counts)) {
+    if (v > bestV) { bestV = v; best = t; }
+  }
+  return best;
+}
+
+function shannonEntropy(counts: Record<string, number>): number {
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  if (total === 0) return 0;
+  let h = 0;
+  for (const v of Object.values(counts)) {
+    if (v > 0) { const p = v / total; h -= p * Math.log2(p); }
+  }
+  return h / Math.log2(TUNER_NAMES.length);
+}
+
+function computeSharedScore(tunerCounts: Record<string, number>, totalTrials: number): number {
+  const diversity = shannonEntropy(tunerCounts);
+  const dom = getDominantTunerFromCounts(tunerCounts);
+  const domRatio = dom ? (tunerCounts[dom] ?? 0) / Math.max(totalTrials, 1) : 1.0;
+  return 0.5 * diversity + 0.5 * (1.0 - domRatio);
+}
+
+function computeInterpretationTag(
+  tunerCounts: Record<string, number>,
+  totalTrials: number,
+  meanCov: number,
+  globalMeanCov: number,
+  sharedScore: number,
+): string {
+  const dom = getDominantTunerFromCounts(tunerCounts);
+  const domRatio = dom ? (tunerCounts[dom] ?? 0) / Math.max(totalTrials, 1) : 0;
+  const sorted = Object.entries(tunerCounts).filter(([, c]) => c > 0).sort(([, a], [, b]) => b - a);
+
+  if (sharedScore >= 0.55) {
+    const top2 = sorted.slice(0, 2).map(([t]) => TUNER_SHORT[t] ?? t.slice(0, 3));
+    return "Shared · " + top2.join("/");
+  }
+  if (meanCov >= globalMeanCov * 1.25) return "High cov";
+  if (meanCov <= globalMeanCov * 0.65) return "Low cov";
+  if (domRatio >= 0.85) return `${TUNER_SHORT[dom!] ?? dom!.slice(0, 3)}-only`;
+  const top2 = sorted.slice(0, 2).map(([t]) => TUNER_SHORT[t] ?? t.slice(0, 3));
+  return top2.join("/") + "-led";
+}
+
+function valueLabel(v: number, ptype: string, categories?: string[]): string {
+  if (ptype === "boolean") return v ? "T" : "F";
+  if (ptype === "categorical" && categories) {
+    const idx = typeof v === "number" ? v : 0;
+    return idx < categories.length ? String(categories[idx]) : String(idx);
+  }
+  return String(Math.round(v));
+}
+
+/** Compute global parameter distributions weighted by filtered trial counts */
+function computeGlobalDists(
+  nodes: RegionNode[],
+  allParams: string[],
+  paramMeta: Record<string, ParamMeta>,
+  enabled: Set<string>,
+): Map<string, Map<string, number>> {
+  const dists = new Map<string, Map<string, number>>();
+  for (let i = 0; i < allParams.length; i++) {
+    const p = allParams[i];
+    const m = paramMeta[p];
+    const ptype = m?.type ?? "numeric";
+    const wt = new Map<string, number>();
+    let total = 0;
+    for (const node of nodes) {
+      const tc = getFilteredTrialCount(node, enabled);
+      if (tc === 0) continue;
+      const v = node.discrete[i] ?? 0;
+      const lbl = valueLabel(v, ptype, m?.categories);
+      wt.set(lbl, (wt.get(lbl) ?? 0) + tc);
+      total += tc;
+    }
+    if (total > 0) {
+      const norm = new Map<string, number>();
+      for (const [k, v] of wt) norm.set(k, v / total);
+      dists.set(p, norm);
+    } else {
+      dists.set(p, new Map());
+    }
+  }
+  return dists;
+}
+
+/** Generate contrastive label for a set of region nodes, filtered by enabled tuners */
+function generateLabel(
+  regionNodes: RegionNode[],
+  allParams: string[],
+  paramMeta: Record<string, ParamMeta>,
+  globalDists: Map<string, Map<string, number>>,
+  importance: Record<string, number>,
+  enabled: Set<string>,
+): { label: string; signature: Record<string, string | boolean> } {
+  let totalTrials = 0;
+  for (const n of regionNodes) totalTrials += getFilteredTrialCount(n, enabled);
+  if (totalTrials === 0) return { label: "Typical region", signature: {} };
+
+  const scored: { contrastive: number; param: string; modeLbl: string; ptype: string }[] = [];
+
+  for (let i = 0; i < allParams.length; i++) {
+    const p = allParams[i];
+    const m = paramMeta[p];
+    const ptype = m?.type ?? "numeric";
+    const imp = importance[p] ?? 1e-4;
+    const wt = new Map<string, number>();
+
+    for (const node of regionNodes) {
+      const tc = getFilteredTrialCount(node, enabled);
+      if (tc === 0) continue;
+      const v = node.discrete[i] ?? 0;
+      const lbl = valueLabel(v, ptype, m?.categories);
+      wt.set(lbl, (wt.get(lbl) ?? 0) + tc);
+    }
+    if (wt.size === 0) continue;
+
+    let modeLbl = "";
+    let modeCount = 0;
+    for (const [k, v] of wt) {
+      if (v > modeCount) { modeCount = v; modeLbl = k; }
+    }
+    const modeFreq = modeCount / totalTrials;
+    const globalFreq = globalDists.get(p)?.get(modeLbl) ?? 0;
+    const contrastive = (modeFreq - globalFreq) * imp;
+    if (modeFreq > 0.5 && contrastive > 0) {
+      scored.push({ contrastive, param: p, modeLbl, ptype });
+    }
+  }
+
+  if (scored.length === 0) return { label: "Typical region", signature: {} };
+  scored.sort((a, b) => b.contrastive - a.contrastive);
+
+  const parts: string[] = [];
+  const signature: Record<string, string | boolean> = {};
+  for (const { param, modeLbl, ptype } of scored.slice(0, MAX_LABEL_PARTS)) {
+    const m = paramMeta[param];
+    if (ptype === "boolean") {
+      parts.push(`${param}=${modeLbl}`);
+      signature[param] = modeLbl === "T";
+    } else if (ptype === "numeric") {
+      const nBins = Math.max((m?.binEdges?.length ?? 2) - 1, 1);
+      const pos = parseInt(modeLbl) / nBins;
+      const level = pos < 0.33 ? "Low" : pos > 0.67 ? "High" : "Mid";
+      parts.push(`${level} ${param}`);
+      signature[param] = level.toLowerCase();
+    } else {
+      parts.push(`${param}=${modeLbl}`);
+      signature[param] = modeLbl;
+    }
+  }
+  return { label: parts.join(", "), signature };
+}
+
+/** Recompute region stats filtered by enabled tuners */
+interface FilteredRegion extends Region {
+  // same shape, but recomputed
+}
+
+function recomputeRegions(
+  originalRegions: Region[],
+  nodes: RegionNode[],
+  allParams: string[],
+  paramMeta: Record<string, ParamMeta>,
+  importance: Record<string, number>,
+  globalMeanCov: number,
+  enabled: Set<string>,
+  method: ClusterMethod,
+): FilteredRegion[] {
+  // Build node lookup by idx
+  const nodeByIdx = new Map<number, RegionNode>();
+  for (const n of nodes) nodeByIdx.set(n.idx, n);
+
+  // Global dists filtered by enabled tuners
+  const globalDists = computeGlobalDists(nodes, allParams, paramMeta, enabled);
+
+  return originalRegions.map((region) => {
+    const regionNodes: RegionNode[] = [];
+    for (const nid of region.nodeIds) {
+      const n = nodeByIdx.get(nid);
+      if (n) regionNodes.push(n);
+    }
+
+    // Aggregate tuner counts for enabled tuners only
+    const tc: Record<string, number> = {};
+    for (const t of enabled) tc[t] = 0;
+    let totalTrials = 0;
+    for (const node of regionNodes) {
+      for (const t of enabled) {
+        const c = node.tunerCounts[t] ?? 0;
+        tc[t] = (tc[t] ?? 0) + c;
+        totalTrials += c;
+      }
+    }
+
+    // Weighted coverage (using filtered trial counts)
+    let wtSum = 0;
+    let covSum = 0;
+    let maxCov = 0;
+    for (const node of regionNodes) {
+      const ftc = getFilteredTrialCount(node, enabled);
+      if (ftc > 0) {
+        wtSum += ftc;
+        covSum += node.meanCoverage * ftc;
+        if (node.maxCoverage > maxCov) maxCov = node.maxCoverage;
+      }
+    }
+    const meanCov = wtSum > 0 ? covSum / wtSum : 0;
+
+    const dom = getDominantTunerFromCounts(tc);
+    const domRatio = dom ? (tc[dom] ?? 0) / Math.max(totalTrials, 1) : 0;
+    const ss = computeSharedScore(tc, totalTrials);
+    const tag = computeInterpretationTag(tc, totalTrials, meanCov, globalMeanCov, ss);
+    const { label, signature } = generateLabel(regionNodes, allParams, paramMeta, globalDists, importance, enabled);
+
+    return {
+      ...region,
+      label,
+      signature,
+      trialCount: totalTrials,
+      tunerCounts: tc,
+      dominantTuner: dom,
+      dominanceRatio: domRatio,
+      tunerDiversity: shannonEntropy(tc),
+      sharedScore: ss,
+      interpretationTag: tag,
+      meanCoverage: meanCov,
+      maxCoverage: maxCov,
+    };
+  });
+}
 
 // ─────────────────────────────────────────────────────────────
 // Color helpers
@@ -312,11 +576,24 @@ export function RegionMap({ width = 1200, height = 780, program = "gawk" }: Regi
   const [method, setMethod] = useState<ClusterMethod>("param");
   const [colorMode, setColorMode] = useState<ColorMode>("tuner");
   const [sortKey, setSortKey] = useState<SortKey>("trials");
+  const [enabledTuners, setEnabledTuners] = useState<Set<string>>(new Set(TUNER_NAMES));
   const [hoveredRegionId, setHoveredRegionId] = useState<number | null>(null);
   const [tooltip, setTooltip] = useState<{
     x: number; y: number; node: RegionNode; region: Region; island: RegionIsland | undefined;
   } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  const toggleTuner = useCallback((tuner: string) => {
+    setEnabledTuners((prev) => {
+      const next = new Set(prev);
+      if (next.has(tuner)) {
+        if (next.size > 1) next.delete(tuner); // keep at least 1
+      } else {
+        next.add(tuner);
+      }
+      return next;
+    });
+  }, []);
 
   // Load data
   useEffect(() => {
@@ -331,10 +608,17 @@ export function RegionMap({ width = 1200, height = 780, program = "gawk" }: Regi
     return () => { cancelled = true; };
   }, [program]);
 
-  const regions = useMemo(
-    () => (data ? (method === "param" ? data.regions_param : data.regions_param_cov) : []),
-    [data, method]
-  );
+  const allEnabled = enabledTuners.size === TUNER_NAMES.length;
+
+  const regions = useMemo(() => {
+    if (!data) return [];
+    const raw = method === "param" ? data.regions_param : data.regions_param_cov;
+    if (allEnabled) return raw;
+    return recomputeRegions(
+      raw, data.nodes, data.allParams, data.paramMeta, data.importance,
+      data.globalMeanCoverage, enabledTuners, method,
+    );
+  }, [data, method, enabledTuners, allEnabled]);
 
   const regionById = useMemo(() => {
     const m = new Map<number, Region>();
@@ -398,19 +682,24 @@ export function RegionMap({ width = 1200, height = 780, program = "gawk" }: Regi
   const scaledSize = HEX_SIZE * viewScale;
   const hexPathStr = useMemo(() => buildHexPath(scaledSize * 0.93), [scaledSize]);
 
-  // Node fill color
+  // Node fill color (tuner-filtered)
   const getNodeColor = useCallback(
     (node: RegionNode, region: Region): string => {
       if (colorMode === "sharedness") {
         return sharedColor(region.sharedScore);
       }
-      // Tuner mode: dominant tuner color, desaturated by diversity
-      const base = node.dominantTuner
-        ? TUNER_COLORS[node.dominantTuner] ?? "#94a3b8"
-        : "#94a3b8";
+      // Determine dominant tuner among enabled tuners for this node
+      let dom: string | null = null;
+      let domV = 0;
+      for (const t of enabledTuners) {
+        const c = node.tunerCounts[t] ?? 0;
+        if (c > domV) { domV = c; dom = t; }
+      }
+      if (domV === 0) return "#d1d5db"; // no trials from enabled tuners
+      const base = dom ? TUNER_COLORS[dom] ?? "#94a3b8" : "#94a3b8";
       return tunerColor(base, region.tunerDiversity);
     },
-    [colorMode]
+    [colorMode, enabledTuners]
   );
 
   // Label positions: use island[0] centroid of each region (largest connected component)
@@ -531,6 +820,26 @@ export function RegionMap({ width = 1200, height = 780, program = "gawk" }: Regi
             ))}
           </div>
 
+          {/* Tuner toggles */}
+          <div className="flex items-center gap-1.5 bg-white/90 backdrop-blur rounded-lg shadow border border-gray-100 px-2.5 py-1.5">
+            <span className="text-[10px] font-medium text-gray-500">Tuners:</span>
+            {TUNER_NAMES.map((t) => {
+              const on = enabledTuners.has(t);
+              return (
+                <button
+                  key={t}
+                  className={`text-[10px] px-2 py-0.5 rounded-md transition-colors border ${
+                    on ? "text-white border-transparent" : "bg-gray-100 text-gray-400 border-gray-200 line-through"
+                  }`}
+                  style={on ? { background: TUNER_COLORS[t] } : undefined}
+                  onClick={() => toggleTuner(t)}
+                >
+                  {TUNER_LABELS[t]}
+                </button>
+              );
+            })}
+          </div>
+
           <span className="text-[10px] text-gray-400 bg-white/70 rounded px-2 py-1">
             {regions.length} regions · {data.nodes.length.toLocaleString()} nodes
           </span>
@@ -590,7 +899,8 @@ export function RegionMap({ width = 1200, height = 780, program = "gawk" }: Regi
               const [px, py] = hexToPixel(node.q, node.r, HEX_SIZE * viewScale);
               const x = offsetX + px;
               const y = offsetY + py;
-              const color = getNodeColor(node, region);
+              const ftc = getFilteredTrialCount(node, enabledTuners);
+              const color = ftc === 0 ? "#e5e7eb" : getNodeColor(node, region);
               const isHovered = hoveredRegionId === rid;
 
               return (
@@ -598,7 +908,7 @@ export function RegionMap({ width = 1200, height = 780, program = "gawk" }: Regi
                   key={node.idx}
                   d={hexPathStr}
                   fill={color}
-                  fillOpacity={isHovered ? 1.0 : 0.82}
+                  fillOpacity={ftc === 0 ? 0.3 : isHovered ? 1.0 : 0.82}
                   stroke="rgba(255,255,255,0.12)"
                   strokeWidth={0.2}
                   transform={`translate(${x.toFixed(1)},${y.toFixed(1)})`}
@@ -862,8 +1172,13 @@ export function RegionMap({ width = 1200, height = 780, program = "gawk" }: Regi
         {/* Footer */}
         <div className="px-3 py-2 border-t border-gray-100 bg-gray-50 flex-shrink-0 text-[10px] text-gray-500">
           <div className="flex justify-between mb-0.5">
-            <span>Total trials:</span>
-            <span className="font-medium text-gray-700">{data.totalTrials.toLocaleString()}</span>
+            <span>Total trials{!allEnabled ? " (filtered)" : ""}:</span>
+            <span className="font-medium text-gray-700">
+              {(allEnabled
+                ? data.totalTrials
+                : regions.reduce((s, r) => s + r.trialCount, 0)
+              ).toLocaleString()}
+            </span>
           </div>
           <div className="flex justify-between mb-0.5">
             <span>Global mean cov:</span>
