@@ -33,7 +33,7 @@ import {
 // Types
 // ============================================================
 
-type ColorMode = "dominant" | "territory" | "pixel" | "density" | "coverage";
+type ColorMode = "dominant" | "territory" | "pixel" | "density" | "coverage" | "compare";
 export interface DrillState {
   detailLevel: number;
   focusedTerritoryId: number | null;
@@ -247,6 +247,9 @@ export function HexMap({
     null,
   );
   const [coverageMetric, setCoverageMetric] = useState<"mean" | "min" | "max">("mean");
+  // Compare mode: tuner A vs tuner B coverage difference
+  const [compareTunerA, setCompareTunerA] = useState<TunerType>("SymTuner");
+  const [compareTunerB, setCompareTunerB] = useState<TunerType>("TPE");
   // hover: drives territory highlight + tooltip
   const [hoveredClusterId, setHoveredClusterId] = useState<number | null>(null);
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(
@@ -289,12 +292,14 @@ export function HexMap({
   // Qualitative label toggles
   const [selectedQualLabels, setSelectedQualLabels] = useState<
     Set<QualitativeLabel>
-  >(new Set());
+  >(new Set(QUAL_LABEL_NAMES));
   const [selectedParam, setSelectedParam] = useState<string | null>(null);
 
   const [selectedTuners, setSelectedTuners] = useState<Set<TunerType>>(
     new Set(TUNER_NAMES),
   );
+  // Solo tuner: highlight only cells where this tuner has trials
+  const [soloTuner, setSoloTuner] = useState<TunerType | null>(null);
   // 4 = finest (current clusters), 3/2/1/0 = progressively coarser merged levels
   const [detailLevel, setDetailLevel] = useState<number>(4);
 
@@ -836,6 +841,48 @@ export function HexMap({
     [globalCovRange],
   );
 
+  // Compare mode: per-cluster mean coverage difference (A − B)
+  const compareCovDiff = useMemo(() => {
+    if (!data) return new Map<number, number>();
+    const map = new Map<number, number>();
+    for (const c of data.clusters) {
+      const trialsA = c.trials.filter((t) => t.tuner === compareTunerA);
+      const trialsB = c.trials.filter((t) => t.tuner === compareTunerB);
+      const meanA = trialsA.length > 0 ? trialsA.reduce((s, t) => s + t.coverage, 0) / trialsA.length : null;
+      const meanB = trialsB.length > 0 ? trialsB.reduce((s, t) => s + t.coverage, 0) / trialsB.length : null;
+      if (meanA !== null && meanB !== null) {
+        map.set(c.id, meanA - meanB);
+      } else if (meanA !== null) {
+        map.set(c.id, meanA);   // only A present → full A advantage
+      } else if (meanB !== null) {
+        map.set(c.id, -meanB);  // only B present → full B advantage
+      }
+      // neither present → not in map (will be gray)
+    }
+    return map;
+  }, [data, compareTunerA, compareTunerB]);
+
+  const compareDiffMax = useMemo(() => {
+    const vals = [...compareCovDiff.values()];
+    if (vals.length === 0) return 0.01;
+    return Math.max(Math.abs(d3.min(vals) ?? 0), Math.abs(d3.max(vals) ?? 0)) || 0.01;
+  }, [compareCovDiff]);
+
+  const getCompareColor = useCallback(
+    (diff: number): string => {
+      const t = Math.max(-1, Math.min(1, diff / compareDiffMax));
+      if (t > 0) {
+        // A wins → blue
+        return d3.interpolateRgb("#FFFFFF", "#2563EB")(t);
+      } else if (t < 0) {
+        // B wins → red
+        return d3.interpolateRgb("#FFFFFF", "#DC2626")(-t);
+      }
+      return "#FFFFFF";
+    },
+    [compareDiffMax],
+  );
+
   const positiveMarginalCoverages = useMemo(() => {
     if (!data) return [];
     return data.clusters
@@ -1087,6 +1134,11 @@ export function HexMap({
 
       const { tunerCounts } = tile.cluster;
 
+      // Solo tuner: dim cells where the solo'd tuner has no trials
+      if (soloTuner && tunerCounts[soloTuner] === 0) {
+        return "#F1F5F9";
+      }
+
       switch (effectiveColorMode) {
         case "dominant": {
           const filteredCounts = Object.fromEntries(
@@ -1108,6 +1160,12 @@ export function HexMap({
 
         case "coverage":
           return getCoverageColor(getClusterCov(tile.cluster));
+
+        case "compare": {
+          const diff = compareCovDiff.get(tile.cluster.id);
+          if (diff === undefined) return "#F1F5F9";
+          return getCompareColor(diff);
+        }
 
         case "territory":
           return "#F8FAFC";
@@ -1145,6 +1203,9 @@ export function HexMap({
       getMarginalCoverageColor,
       selectedTuners,
       paramCellBins,
+      compareCovDiff,
+      getCompareColor,
+      soloTuner,
     ],
   );
 
@@ -1245,6 +1306,48 @@ export function HexMap({
   }, [qualRegions]);
 
   // ============================================================
+  // Compare mode: boundary paths for tuner A and tuner B regions
+  const compareBoundaries = useMemo(() => {
+    if (!data || effectiveColorMode !== "compare")
+      return { a: "", b: "" };
+
+    const verts = Array.from({ length: 6 }, (_, i) => ({
+      x: HEX_SIZE * Math.cos((i * Math.PI) / 3),
+      y: HEX_SIZE * Math.sin((i * Math.PI) / 3),
+    }));
+
+    // Build sets of hex keys where each tuner has trials
+    const hexHasA = new Set<string>();
+    const hexHasB = new Set<string>();
+    for (const tile of data.hexTiles) {
+      if (!tile.cluster) continue;
+      const k = `${tile.q},${tile.r}`;
+      if (tile.cluster.tunerCounts[compareTunerA] > 0) hexHasA.add(k);
+      if (tile.cluster.tunerCounts[compareTunerB] > 0) hexHasB.add(k);
+    }
+
+    // Build boundary path: edges where a cell in the set neighbors one NOT in the set
+    const buildPath = (hexSet: Set<string>) => {
+      let d = "";
+      for (const tile of data.hexTiles) {
+        const k = `${tile.q},${tile.r}`;
+        if (!hexSet.has(k)) continue;
+        for (let ei = 0; ei < 6; ei++) {
+          const dir = HEX_DIRECTIONS[ei];
+          const nk = `${tile.q + dir.dq},${tile.r + dir.dr}`;
+          if (!hexSet.has(nk)) {
+            const va = verts[ei];
+            const vb = verts[(ei + 1) % 6];
+            d += `M${tile.x + va.x},${tile.y + va.y}L${tile.x + vb.x},${tile.y + vb.y}`;
+          }
+        }
+      }
+      return d;
+    };
+
+    return { a: buildPath(hexHasA), b: buildPath(hexHasB) };
+  }, [data, effectiveColorMode, compareTunerA, compareTunerB, HEX_SIZE, HEX_DIRECTIONS]);
+
   // 2-level boundary data: macro (territory outer edge) + sub (sub-region inner edge)
   // Computed in one pass over the hex grid.
   // ============================================================
@@ -2844,7 +2947,63 @@ export function HexMap({
                 );
               })}
 
-            {/* ── Sub-region boundaries (disabled) ──────── */}
+            {/* ── Compare mode: tuner A / B territory borders ── */}
+            {effectiveColorMode === "compare" && (
+              <>
+                {/* Tuner A border — blue */}
+                {compareBoundaries.a && (
+                  <>
+                    <path
+                      d={compareBoundaries.a}
+                      fill="none"
+                      stroke="white"
+                      strokeWidth={5}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      opacity={0.7}
+                      pointerEvents="none"
+                    />
+                    <path
+                      d={compareBoundaries.a}
+                      fill="none"
+                      stroke="#2563EB"
+                      strokeWidth={2.5}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      opacity={0.8}
+                      pointerEvents="none"
+                    />
+                  </>
+                )}
+                {/* Tuner B border — red */}
+                {compareBoundaries.b && (
+                  <>
+                    <path
+                      d={compareBoundaries.b}
+                      fill="none"
+                      stroke="white"
+                      strokeWidth={5}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      opacity={0.7}
+                      pointerEvents="none"
+                    />
+                    <path
+                      d={compareBoundaries.b}
+                      fill="none"
+                      stroke="#DC2626"
+                      strokeWidth={2.5}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      opacity={0.8}
+                      pointerEvents="none"
+                    />
+                  </>
+                )}
+              </>
+            )}
+
+            {/* ���─ Sub-region boundaries (disabled) ─────��── */}
             {false && focusedSubRegionId === null && (
               <>
                 {/* white halo (thin) */}
@@ -4092,6 +4251,7 @@ export function HexMap({
                 { mode: "coverage", label: "Coverage" },
                 { mode: "dominant", label: "Dominant" },
                 { mode: "density", label: "Density" },
+                { mode: "compare", label: "Compare" },
               ] as { mode: ColorMode; label: string }[]
             ).map(({ mode, label }) => {
               const isActive = colorMode === mode;
@@ -4248,6 +4408,102 @@ export function HexMap({
               </>
             )}
 
+            {/* Compare mode: tuner A vs B selector + diverging legend */}
+            {effectiveColorMode === "compare" && (
+              <>
+                <div
+                  style={{
+                    width: 1,
+                    height: 14,
+                    background: "#E5E7EB",
+                    margin: "0 2px",
+                  }}
+                />
+                {/* Tuner A selector */}
+                <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
+                  <select
+                    value={compareTunerA}
+                    onChange={(e) => setCompareTunerA(e.target.value as TunerType)}
+                    style={{
+                      fontSize: 9,
+                      padding: "2px 4px",
+                      borderRadius: 3,
+                      border: "1px solid #2563EB",
+                      background: "#EFF6FF",
+                      color: "#1D4ED8",
+                      fontWeight: 600,
+                      cursor: "pointer",
+                    }}
+                  >
+                    {TUNER_NAMES.filter((t) => t !== compareTunerB).map((t) => (
+                      <option key={t} value={t}>{t}</option>
+                    ))}
+                  </select>
+                  <span style={{ fontSize: 9, color: "#6B7280", fontWeight: 600 }}>vs</span>
+                  {/* Tuner B selector */}
+                  <select
+                    value={compareTunerB}
+                    onChange={(e) => setCompareTunerB(e.target.value as TunerType)}
+                    style={{
+                      fontSize: 9,
+                      padding: "2px 4px",
+                      borderRadius: 3,
+                      border: "1px solid #DC2626",
+                      background: "#FEF2F2",
+                      color: "#DC2626",
+                      fontWeight: 600,
+                      cursor: "pointer",
+                    }}
+                  >
+                    {TUNER_NAMES.filter((t) => t !== compareTunerA).map((t) => (
+                      <option key={t} value={t}>{t}</option>
+                    ))}
+                  </select>
+                </div>
+                {/* Diverging legend bar */}
+                {(() => {
+                  const barW = 140;
+                  return (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                      <div
+                        style={{
+                          width: barW,
+                          height: 8,
+                          borderRadius: 4,
+                          background: "linear-gradient(to right, #DC2626, #FFFFFF 50%, #2563EB)",
+                          border: "1px solid #E5E7EB",
+                        }}
+                      />
+                      <div
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          width: barW,
+                          fontSize: 7,
+                          color: "#6B7280",
+                          fontWeight: 600,
+                        }}
+                      >
+                        <span style={{ color: "#DC2626" }}>{compareTunerB}</span>
+                        <span>0</span>
+                        <span style={{ color: "#2563EB" }}>{compareTunerA}</span>
+                      </div>
+                      <div
+                        style={{
+                          fontSize: 7,
+                          color: "#9CA3AF",
+                          textAlign: "center",
+                          width: barW,
+                        }}
+                      >
+                        Δ ±{compareDiffMax.toFixed(3)}
+                      </div>
+                    </div>
+                  );
+                })()}
+              </>
+            )}
+
             {/* Parameter selector (only in territory/pixel mode) */}
             {(effectiveColorMode === "pixel" || effectiveColorMode === "territory") && (
               <>
@@ -4314,10 +4570,19 @@ export function HexMap({
               {TUNER_NAMES.map((tuner) => {
                 const isOn = selectedTuners.has(tuner);
                 const isPreviewing = previewTuner === tuner;
+                const isSolo = soloTuner === tuner;
                 return (
                   <button
                     key={tuner}
-                    onClick={() => toggleTuner(tuner)}
+                    onClick={(e) => {
+                      if (e.shiftKey) {
+                        // Shift+click: toggle include/exclude
+                        toggleTuner(tuner);
+                      } else {
+                        // Click: toggle solo highlight
+                        setSoloTuner((prev) => (prev === tuner ? null : tuner));
+                      }
+                    }}
                     onMouseEnter={() => setPreviewTuner(tuner)}
                     onMouseLeave={() => setPreviewTuner(null)}
                     style={{
@@ -4326,23 +4591,29 @@ export function HexMap({
                       gap: compact ? 3 : 5,
                       padding: compact ? "2px 5px" : "3px 8px",
                       fontSize: compact ? 9 : 10,
-                      border: "1px solid",
-                      borderColor: isPreviewing
+                      border: isSolo ? "2px solid" : "1px solid",
+                      borderColor: isSolo
                         ? TUNER_COLORS[tuner]
-                        : isOn
-                          ? TUNER_COLORS[tuner] + "88"
-                          : "#F1F5F9",
+                        : isPreviewing
+                          ? TUNER_COLORS[tuner]
+                          : isOn
+                            ? TUNER_COLORS[tuner] + "88"
+                            : "#F1F5F9",
                       borderRadius: 5,
-                      background: isPreviewing
-                        ? TUNER_COLORS[tuner] + "15"
-                        : isOn
-                          ? "white"
-                          : "#FAFAFA",
+                      background: isSolo
+                        ? TUNER_COLORS[tuner] + "20"
+                        : isPreviewing
+                          ? TUNER_COLORS[tuner] + "15"
+                          : isOn
+                            ? "white"
+                            : "#FAFAFA",
                       cursor: "pointer",
                       opacity: isOn ? 1 : isPreviewing ? 0.8 : 0.4,
-                      boxShadow: isPreviewing
-                        ? `0 0 0 2px ${TUNER_COLORS[tuner]}40`
-                        : "none",
+                      boxShadow: isSolo
+                        ? `0 0 0 2px ${TUNER_COLORS[tuner]}50`
+                        : isPreviewing
+                          ? `0 0 0 2px ${TUNER_COLORS[tuner]}40`
+                          : "none",
                       transition: "all 0.12s ease",
                     }}
                   >
@@ -4355,7 +4626,7 @@ export function HexMap({
                         flexShrink: 0,
                       }}
                     />
-                    <span style={{ color: "#374151", fontWeight: 500 }}>
+                    <span style={{ color: "#374151", fontWeight: isSolo ? 700 : 500 }}>
                       {TUNER_DISPLAY_NAMES[tuner]}
                     </span>
                   </button>
