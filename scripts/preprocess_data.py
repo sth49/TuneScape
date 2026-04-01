@@ -204,12 +204,13 @@ def process_tuner(program: str, tuner: str) -> dict | None:
 
     # Build output structure
     trials = []
-    for i, (params, m, c, t) in enumerate(zip(trials_params, marginal, cumulative, total)):
+    for i, (params, m, c, t, cs) in enumerate(zip(trials_params, marginal, cumulative, total, coverage_sets)):
         trials.append({
             "trialId": i + 1,
             "marginalCoverage": m,
             "cumulativeCoverage": c,
             "totalCovered": t,
+            "coveredBranches": sorted(cs),
             "parameters": params
         })
 
@@ -244,15 +245,29 @@ def main():
 
         all_data[program] = {}
 
+        # First pass: process all tuners and collect all branches for this program
+        program_all_branches: set[int] = set()
+
         for tuner in TUNERS:
             result = process_tuner(program, tuner)
             if result:
                 all_data[program][tuner] = result
+                # Collect all branches across all tuners for this program
+                for trial in result["trials"]:
+                    program_all_branches.update(trial["coveredBranches"])
 
-                # Save individual file
+        # Compute program-level totalUniqueBranches (union across all tuners)
+        program_total_unique = len(program_all_branches)
+        print(f"  Program-level unique branches: {program_total_unique}")
+
+        # Second pass: overwrite per-tuner totalUniqueBranches with program-level value and save
+        for tuner in TUNERS:
+            if tuner in all_data[program]:
+                all_data[program][tuner]["totalUniqueBranches"] = program_total_unique
+
                 output_path = OUTPUT_DIR / f"{program}_{tuner}_processed.json"
                 with open(output_path, 'w') as f:
-                    json.dump(result, f, indent=2)
+                    json.dump(all_data[program][tuner], f, indent=2)
                 print(f"    Saved: {output_path}")
 
     # Save combined file for all programs and tuners
@@ -267,10 +282,14 @@ def main():
     print("="*50)
     for program in PROGRAMS:
         print(f"\n{program}:")
+        program_unique = None
         for tuner in TUNERS:
             if tuner in all_data[program]:
                 data = all_data[program][tuner]
-                print(f"  {tuner}: {data['totalTrials']} trials, {data['totalUniqueBranches']} branches")
+                program_unique = data['totalUniqueBranches']
+                print(f"  {tuner}: {data['totalTrials']} trials")
+        if program_unique is not None:
+            print(f"  Total unique branches (all tuners): {program_unique}")
 
 
 if __name__ == "__main__":

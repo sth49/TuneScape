@@ -48,6 +48,9 @@ interface SerializedLevel {
     avgCoverage: number;
     meanBranchCoverage: number;
     maxBranchCoverage: number;
+    meanMarginalCoverage: number;
+    coveredBranches: number[];
+    tunerCoveredBranches: Partial<Record<TunerType, number[]>>;
     x: number;
     y: number;
     hexQ: number;
@@ -76,6 +79,7 @@ interface SerializedLevel {
   }[];
   gridRadius: number;
   hexSize: number;
+  totalUniqueBranches: number;
   paramImportance: { name: string; importance: number }[];
   paramStats: Record<string, ParamStats>;
   labelParams: string[];
@@ -133,6 +137,9 @@ function serializeLevel(
     avgCoverage: c.avgCoverage,
     meanBranchCoverage: c.meanBranchCoverage,
     maxBranchCoverage: c.maxBranchCoverage,
+    meanMarginalCoverage: c.meanMarginalCoverage,
+    coveredBranches: c.coveredBranches,
+    tunerCoveredBranches: c.tunerCoveredBranches,
     x: c.x,
     y: c.y,
     hexQ: c.hexQ,
@@ -189,6 +196,7 @@ function serializeLevel(
     territories,
     gridRadius: data.gridRadius,
     hexSize: data.hexSize,
+    totalUniqueBranches: data.totalUniqueBranches,
     paramImportance: data.paramImportance,
     paramStats: paramStatsObj,
     labelParams: data.labelParams,
@@ -201,8 +209,13 @@ const PROGRAMS = ["gawk", "gcal", "grep"] as const;
 
 async function main() {
   const dtPath = path.join(DATA_DIR, "decision_tree_data.json");
-  console.log("Loading decision_tree_data.json ...");
-  const decisionTreeData = JSON.parse(fs.readFileSync(dtPath, "utf-8"));
+  let decisionTreeData: Record<string, any> = {};
+  if (fs.existsSync(dtPath)) {
+    console.log("Loading decision_tree_data.json ...");
+    decisionTreeData = JSON.parse(fs.readFileSync(dtPath, "utf-8"));
+  } else {
+    console.log("decision_tree_data.json not found, proceeding without SHAP importance.");
+  }
 
   for (const program of PROGRAMS) {
     console.log(`\n=== Processing ${program} ===`);
@@ -249,8 +262,12 @@ async function main() {
       finalLevels.push(serializeLevel(levelDataArr[li], trialIdx));
     }
 
-    const output: PrecomputedMultiLevelJSON = {
-      trials: allTrials!,
+    // Strip per-trial coveredBranches to keep file size manageable;
+    // coverage vectors are stored at the cluster level instead.
+    const trialsForOutput = allTrials.map(({ coveredBranches, ...rest }) => rest);
+
+    const output = {
+      trials: trialsForOutput,
       levels: finalLevels,
     };
 

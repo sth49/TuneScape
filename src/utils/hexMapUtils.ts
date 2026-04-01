@@ -34,6 +34,7 @@ export interface Trial {
   parameters: Record<string, string | boolean | number>;
   coverage: number;
   marginalCoverage: number;
+  coveredBranches: number[];
 }
 
 export interface Cluster {
@@ -45,6 +46,9 @@ export interface Cluster {
   avgCoverage: number;
   meanBranchCoverage: number;
   maxBranchCoverage: number;
+  meanMarginalCoverage: number;
+  coveredBranches: number[]; // sorted union of all trial coverage vectors
+  tunerCoveredBranches: Partial<Record<TunerType, number[]>>; // per-tuner branch unions
   // Position after MDS
   x: number;
   y: number;
@@ -104,6 +108,7 @@ export interface HexMapData {
   territories: Territory[];
   gridRadius: number;
   hexSize: number;
+  totalUniqueBranches: number;
   paramImportance: { name: string; importance: number }[];
   paramStats: Map<string, ParamStats>;
   labelParams: string[];
@@ -113,13 +118,14 @@ export interface HexMapData {
 // Constants
 // ============================================================
 
+// schemeCategory10 excluding orange (#ff7f0e) and red (#d62728)
 export const TUNER_COLORS: Record<TunerType, string> = {
-  SymTuner: "#3B82F6",
-  CMA_ES: "#10B981",
-  Genetic: "#F59E0B",
-  SuccessiveHalving: "#EF4444",
-  TPE: "#8B5CF6",
-  BayesianOptimization: "#EC4899",
+  SymTuner: "#1f77b4",           // blue
+  CMA_ES: "#2ca02c",             // green
+  Genetic: "#9467bd",            // purple
+  SuccessiveHalving: "#8c564b",  // brown
+  TPE: "#e377c2",                // pink
+  BayesianOptimization: "#17becf", // cyan
 };
 
 export const TUNER_NAMES: TunerType[] = [
@@ -432,15 +438,31 @@ function kMeansClustering(
     // Centroid: per-param proportions computed from actual trials
     const centroidObj = computeClusterCentroid(clusterTrials, paramStats, topParams);
 
+    // Compute union of covered branches across all trials in this cluster
+    const branchUnion = new Set<number>();
+    const tunerBranchSets: Partial<Record<TunerType, Set<number>>> = {};
+    for (const t of clusterTrials) {
+      for (const b of t.coveredBranches) branchUnion.add(b);
+      if (!tunerBranchSets[t.tuner]) tunerBranchSets[t.tuner] = new Set();
+      for (const b of t.coveredBranches) tunerBranchSets[t.tuner]!.add(b);
+    }
+    const tunerCoveredBranches: Partial<Record<TunerType, number[]>> = {};
+    for (const [tuner, brSet] of Object.entries(tunerBranchSets)) {
+      tunerCoveredBranches[tuner as TunerType] = Array.from(brSet).sort((a, b) => a - b);
+    }
+
     clusters.push({
       id: clusters.length,
       trials: clusterTrials,
       centroid: centroidObj,
       tunerCounts,
       totalTrials: clusterTrials.length,
-      avgCoverage: totalMarginal / clusterTrials.length, // Now using marginal coverage
+      avgCoverage: totalMarginal / clusterTrials.length,
       meanBranchCoverage: totalBranchCoverage / clusterTrials.length,
       maxBranchCoverage,
+      meanMarginalCoverage: totalMarginal / clusterTrials.length,
+      coveredBranches: Array.from(branchUnion).sort((a, b) => a - b),
+      tunerCoveredBranches,
       x: 0,
       y: 0,
       hexQ: 0,
@@ -1794,12 +1816,13 @@ export function buildMergedLevel(
       SymTuner: 0, CMA_ES: 0, Genetic: 0,
       SuccessiveHalving: 0, TPE: 0, BayesianOptimization: 0,
     };
-    let sumCov = 0, sumBranch = 0, maxBranch = 0;
+    let sumCov = 0, sumBranch = 0, maxBranch = 0, sumMarginal = 0;
     for (const mc of memberClusters) {
       for (const t of TUNER_NAMES) tunerCounts[t] += mc.tunerCounts[t];
       sumCov += mc.avgCoverage * mc.totalTrials;
       sumBranch += mc.meanBranchCoverage * mc.totalTrials;
       maxBranch = Math.max(maxBranch, mc.maxBranchCoverage);
+      sumMarginal += mc.meanMarginalCoverage * mc.totalTrials;
     }
     const totalTrials = allTrials.length;
 
@@ -1815,6 +1838,23 @@ export function buildMergedLevel(
 
     const centroid = computeClusterCentroid(allTrials, paramStats, topParams);
 
+    // Merge covered branches from member clusters
+    const branchUnion = new Set<number>();
+    const tunerBranchSets: Partial<Record<TunerType, Set<number>>> = {};
+    for (const mc of memberClusters) {
+      for (const b of mc.coveredBranches) branchUnion.add(b);
+      if (mc.tunerCoveredBranches) {
+        for (const [tuner, branches] of Object.entries(mc.tunerCoveredBranches)) {
+          if (!tunerBranchSets[tuner as TunerType]) tunerBranchSets[tuner as TunerType] = new Set();
+          for (const b of branches!) tunerBranchSets[tuner as TunerType]!.add(b);
+        }
+      }
+    }
+    const tunerCoveredBranches: Partial<Record<TunerType, number[]>> = {};
+    for (const [tuner, brSet] of Object.entries(tunerBranchSets)) {
+      tunerCoveredBranches[tuner as TunerType] = Array.from(brSet).sort((a, b) => a - b);
+    }
+
     mergedClusters.push({
       id: groupId,
       trials: allTrials,
@@ -1824,6 +1864,9 @@ export function buildMergedLevel(
       avgCoverage: totalTrials > 0 ? sumCov / totalTrials : 0,
       meanBranchCoverage: totalTrials > 0 ? sumBranch / totalTrials : 0,
       maxBranchCoverage: maxBranch,
+      meanMarginalCoverage: totalTrials > 0 ? sumMarginal / totalTrials : 0,
+      coveredBranches: Array.from(branchUnion).sort((a, b) => a - b),
+      tunerCoveredBranches,
       x: cx,
       y: cy,
       hexQ: 0, // will be set by assignClustersToHex
@@ -1870,6 +1913,7 @@ export function buildMergedLevel(
     territories,
     gridRadius,
     hexSize,
+    totalUniqueBranches: parent.totalUniqueBranches,
     paramImportance: shapImportance.slice(0, 10),
     paramStats,
     labelParams,
@@ -1884,6 +1928,7 @@ export function processHexMapData(
   refTrialPositions?: Map<string, { x: number; y: number }>,
 ): HexMapData {
   // 1. Combine all trials
+  const totalUniqueBranches = tunerData.length > 0 ? tunerData[0].totalUniqueBranches : 0;
   const allTrials: Trial[] = [];
 
   for (const data of tunerData) {
@@ -1897,7 +1942,11 @@ export function processHexMapData(
           data.totalUniqueBranches > 0
             ? trial.cumulativeCoverage / data.totalUniqueBranches
             : 0,
-        marginalCoverage: trial.marginalCoverage,
+        marginalCoverage:
+          data.totalUniqueBranches > 0
+            ? trial.marginalCoverage / data.totalUniqueBranches
+            : 0,
+        coveredBranches: trial.coveredBranches ?? [],
       });
     }
   }
@@ -1997,6 +2046,7 @@ export function processHexMapData(
     territories,
     gridRadius,
     hexSize,
+    totalUniqueBranches,
     paramImportance: shapImportance.slice(0, 10),
     paramStats,
     labelParams,
@@ -2029,6 +2079,9 @@ export function deserializePrecomputed(json: any): HexMapData[] {
         avgCoverage: sc.avgCoverage,
         meanBranchCoverage: sc.meanBranchCoverage,
         maxBranchCoverage: sc.maxBranchCoverage,
+        meanMarginalCoverage: sc.meanMarginalCoverage ?? 0,
+        coveredBranches: sc.coveredBranches ?? [],
+        tunerCoveredBranches: sc.tunerCoveredBranches ?? {},
         x: sc.x,
         y: sc.y,
         hexQ: sc.hexQ,
@@ -2110,6 +2163,7 @@ export function deserializePrecomputed(json: any): HexMapData[] {
       territories,
       gridRadius: levelJson.gridRadius,
       hexSize: levelJson.hexSize ?? 32,
+      totalUniqueBranches: levelJson.totalUniqueBranches ?? 0,
       paramImportance: levelJson.paramImportance,
       paramStats,
       labelParams: levelJson.labelParams,

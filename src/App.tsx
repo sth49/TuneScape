@@ -1,26 +1,59 @@
 import { useState, useCallback } from "react";
 import { GiHoneycomb } from "react-icons/gi";
-import { VscSplitHorizontal } from "react-icons/vsc";
-import { HexMap, type DrillState } from "./components/HexMap";
+import { HexMap, type SelectedClusterInfo } from "./components/hexmap";
+import { ClusterDetail } from "./components/hexmap/ClusterDetail";
+import { ParameterPanel } from "./components/ParameterPanel";
+import { TunerSummary } from "./components/TunerSummary";
+import { TUNER_NAMES, type TunerType } from "./utils/hexMapUtils";
+import { LabelsPanel } from "./components/LabelsPanel";
+import { QUAL_LABEL_NAMES, type QualitativeLabel } from "./components/hexmap/types";
 import "./App.css";
 
 type Program = "gawk" | "gcal" | "grep";
 
 function App() {
   const [mapProgram, setMapProgram] = useState<Program>("gawk");
-  const [splitView, setSplitView] = useState(false);
+  const [selectedCluster, setSelectedCluster] =
+    useState<SelectedClusterInfo | null>(null);
+  const [selectedParam, setSelectedParam] = useState<string | null>(null);
+  const [selectedTuners, setSelectedTuners] = useState<Set<TunerType>>(
+    () => new Set(TUNER_NAMES),
+  );
 
-  // Drill state from the left (primary) view
-  const [leftDrillState, setLeftDrillState] = useState<DrillState | null>(null);
-  // Whether the right view is synced to the left
-  const [syncEnabled, setSyncEnabled] = useState(false);
+  const handleClusterSelect = useCallback(
+    (info: SelectedClusterInfo | null) => {
+      setSelectedCluster(info);
+    },
+    [],
+  );
 
-  const handleLeftDrillChange = useCallback((state: DrillState) => {
-    setLeftDrillState(state);
+  const handleParamSelect = useCallback((param: string | null) => {
+    setSelectedParam(param);
   }, []);
 
-  const handleSyncToggle = useCallback(() => {
-    setSyncEnabled((v) => !v);
+  const [selectedQualLabels, setSelectedQualLabels] = useState<Set<QualitativeLabel>>(
+    () => new Set(QUAL_LABEL_NAMES),
+  );
+
+  const handleToggleQualLabel = useCallback((label: QualitativeLabel) => {
+    setSelectedQualLabels((prev) => {
+      const next = new Set(prev);
+      if (next.has(label)) next.delete(label);
+      else next.add(label);
+      return next;
+    });
+  }, []);
+
+  const handleToggleTuner = useCallback((tuner: TunerType) => {
+    setSelectedTuners((prev) => {
+      const next = new Set(prev);
+      if (next.has(tuner)) {
+        if (next.size > 1) next.delete(tuner);
+      } else {
+        next.add(tuner);
+      }
+      return next;
+    });
   }, []);
 
   return (
@@ -54,77 +87,58 @@ function App() {
               ))}
             </div>
           </div>
-
-          {/* Split view toggle */}
-          <button
-            onClick={() => setSplitView((v) => !v)}
-            className={`flex items-center gap-1.5 px-3 py-1 text-sm rounded ${
-              splitView
-                ? "bg-indigo-600 text-white"
-                : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-            }`}
-            title="Split view"
-          >
-            <VscSplitHorizontal className="text-base" />
-            Split
-          </button>
-
-          {/* Sync toggle (only visible in split view) */}
-          {splitView && (
-            <button
-              onClick={handleSyncToggle}
-              className={`flex items-center gap-1.5 px-3 py-1 text-sm rounded font-semibold transition-colors ${
-                syncEnabled
-                  ? "bg-indigo-100 text-indigo-600 border border-indigo-300"
-                  : "bg-gray-100 text-gray-500 border border-gray-200 hover:bg-gray-200"
-              }`}
-              title="Sync drill level between views"
-            >
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <polyline points="17 1 21 5 17 9" />
-                <path d="M3 11V9a4 4 0 0 1 4-4h14" />
-                <polyline points="7 23 3 19 7 15" />
-                <path d="M21 13v2a4 4 0 0 1-4 4H3" />
-              </svg>
-              Sync {syncEnabled ? "ON" : "OFF"}
-            </button>
-          )}
         </div>
       </header>
 
       {/* Main content */}
       <main className="flex-1 overflow-hidden">
-        {splitView ? (
-          <div className="flex h-full">
-            <div className="flex-1 h-full border-r border-gray-200 min-w-0">
-              <HexMap
+        <div className="flex flex-row h-full w-full">
+          <div className="w-[20%] min-w-[240px] flex flex-col h-full overflow-hidden">
+            <div className="flex-shrink-0 py-2">
+              <TunerSummary
                 program={mapProgram}
-                compact
-                onDrillStateChange={handleLeftDrillChange}
+                selectedTuners={selectedTuners}
+                onToggleTuner={handleToggleTuner}
+                onSetAllTuners={setSelectedTuners}
               />
             </div>
-            <div className="flex-1 h-full min-w-0">
-              <HexMap
+            {/* <div className="mx-1 border-t border-gray-200" /> */}
+            <div className="flex-1 min-h-0">
+              <ParameterPanel
                 program={mapProgram}
-                compact
-                syncDrillState={syncEnabled ? leftDrillState : null}
+                selectedParam={selectedParam}
+                onParamSelect={handleParamSelect}
+                interactive={selectedParam !== null}
+              />
+            </div>
+            <div className="mx-3 my-2 border-t border-gray-200" />
+            <div className="flex-shrink-0 pb-2">
+              <LabelsPanel
+                selectedLabels={selectedQualLabels}
+                onToggle={handleToggleQualLabel}
               />
             </div>
           </div>
-        ) : (
-          <div className="flex flex-col h-full p-4">
-            <HexMap program={mapProgram} />
+
+          <div className="mx-1 my-2 border-l border-gray-200" />
+          <div className="flex-1 min-w-0 h-full">
+            <HexMap
+              program={mapProgram}
+              onClusterSelect={handleClusterSelect}
+              selectedParam={selectedParam}
+              onParamSelect={handleParamSelect}
+              selectedTuners={selectedTuners}
+              onToggleTuner={handleToggleTuner}
+              selectedQualLabels={selectedQualLabels}
+              onToggleQualLabel={handleToggleQualLabel}
+            />
           </div>
-        )}
+          <div className="mx-1 my-2 border-l border-gray-200" />
+
+          <div className="w-[20%] min-w-[260px]">
+            <ClusterDetail info={selectedCluster} />
+          </div>
+        </div>
       </main>
     </div>
   );
