@@ -33,7 +33,7 @@ export interface HexTooltipProps {
   selectedParam?: string | null;
   paramBin?: string | null;
   t3Scores?: T3ScoresData | null;
-  t3AnchorId?: number | null;
+  isCartMember?: boolean;
 }
 
 export function HexTooltip({
@@ -48,7 +48,7 @@ export function HexTooltip({
   selectedParam,
   paramBin,
   t3Scores,
-  t3AnchorId,
+  isCartMember,
 }: HexTooltipProps) {
   if (!tooltipPos || hoveredClusterId === null || !data) return null;
 
@@ -60,10 +60,10 @@ export function HexTooltip({
   ).reduce((s, t) => s + cluster.tunerCounts[t], 0);
 
   const covValue = getClusterCov(cluster);
-  const covLabel = effectiveColorMode === "coverage" || effectiveColorMode === "tuner-perf"
+  const covLabel = effectiveColorMode === "tuner-perf"
     ? METRIC_LABELS[coverageMetric]
     : "avg cov";
-  const covDisplay = effectiveColorMode === "coverage" || effectiveColorMode === "tuner-perf"
+  const covDisplay = effectiveColorMode === "tuner-perf"
     ? covValue
     : cluster.meanBranchCoverage;
 
@@ -114,8 +114,8 @@ export function HexTooltip({
       {/* T3: Complementarity info */}
       {effectiveColorMode === "complementary" && t3Scores && (
         <div style={{ marginBottom: 3, color: "#6EE7B7", fontSize: 10 }}>
-          {hoveredClusterId === t3AnchorId ? (
-            <span>Anchor · {t3Scores.anchorBranchCount} branches</span>
+          {isCartMember ? (
+            <span>In working set</span>
           ) : (
             <>
               <span style={{ fontWeight: 600 }}>+{t3Scores.scores.get(hoveredClusterId!) ?? 0}</span> new branches

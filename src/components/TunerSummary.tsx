@@ -26,8 +26,6 @@ interface TunerStats {
   maxBranches: number;
   cumulativeBranches: number;
   failCount: number;
-  bestPartner: TunerType | null;
-  bestPartnerGainBranches: number;
 }
 
 const SHORT_NAMES: Record<TunerType, string> = {
@@ -130,8 +128,6 @@ export function TunerSummary({
         maxBranches: toBranches(allMax),
         cumulativeBranches: allBranchSet.size,
         failCount: allFail,
-        bestPartner: null,
-        bestPartnerGainBranches: 0,
       },
     ];
 
@@ -146,21 +142,6 @@ export function TunerSummary({
       const myBranches = branchSets.get(tuner)!;
       const failCount = coverages.filter((c) => c === 0).length;
 
-      let bestPartner: TunerType | null = null;
-      let bestPartnerGainBranches = 0;
-      for (const other of TUNER_NAMES) {
-        if (other === tuner) continue;
-        const otherBranches = branchSets.get(other)!;
-        let newCount = 0;
-        for (const b of otherBranches) {
-          if (!myBranches.has(b)) newCount++;
-        }
-        if (newCount > bestPartnerGainBranches) {
-          bestPartnerGainBranches = newCount;
-          bestPartner = other;
-        }
-      }
-
       result.push({
         tuner,
         label: SHORT_NAMES[tuner],
@@ -171,8 +152,6 @@ export function TunerSummary({
         maxBranches: toBranches(maxCov),
         cumulativeBranches: myBranches.size,
         failCount,
-        bestPartner,
-        bestPartnerGainBranches,
       });
     }
 
@@ -249,9 +228,6 @@ export function TunerSummary({
               <th style={{ textAlign: "center", padding: "5px 6px" }}>Max</th>
               <th style={{ textAlign: "center", padding: "5px 6px" }}>Cum.</th>
               <th style={{ textAlign: "center", padding: "5px 6px" }}>Fail</th>
-              <th style={{ textAlign: "center", padding: "5px 6px" }}>
-                Partner
-              </th>
             </tr>
           </thead>
           <tbody>
@@ -337,42 +313,6 @@ export function TunerSummary({
                     }}
                   >
                     {s.failCount.toLocaleString()}
-                  </td>
-
-                  <td style={{ padding: "5px 6px" }}>
-                    {s.bestPartner && (
-                      <div
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 3,
-                        }}
-                      >
-                        <span
-                          style={{
-                            padding: "1px 5px",
-                            borderRadius: 4,
-                            fontSize: 10,
-                            background: TUNER_COLORS[s.bestPartner],
-                            color: "#fff",
-                            fontWeight: 700,
-                            lineHeight: 1.4,
-                          }}
-                        >
-                          {SHORT_NAMES[s.bestPartner]}
-                        </span>
-                        <span
-                          style={{
-                            color: "#10B981",
-                            fontSize: 11,
-                            fontFamily: "monospace",
-                            fontWeight: 600,
-                          }}
-                        >
-                          +{s.bestPartnerGainBranches.toLocaleString()}
-                        </span>
-                      </div>
-                    )}
                   </td>
                 </tr>
               );

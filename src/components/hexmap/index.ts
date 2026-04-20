@@ -1,2 +1,3 @@
 export { HexMap } from "./HexMap";
-export type { SelectedClusterInfo } from "./types";
+export { CartPanel } from "./CartPanel";
+export type { SelectedClusterInfo, CartData } from "./types";

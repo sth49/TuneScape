@@ -1937,7 +1937,7 @@ export function processHexMapData(
       allTrials.push({
         id: trial.trialId,
         tuner,
-        parameters: trial.parameters,
+        parameters: trial.parameters as Record<string, string | boolean | number>,
         coverage:
           data.totalUniqueBranches > 0
             ? trial.cumulativeCoverage / data.totalUniqueBranches

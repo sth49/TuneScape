@@ -1,5 +1,5 @@
 import React from "react";
-import { TUNER_COLORS, TUNER_NAMES } from "../../utils/hexMapUtils";
+import { TUNER_COLORS, TUNER_NAMES, type TunerType } from "../../utils/hexMapUtils";
 import { TUNER_DISPLAY_NAMES, type SelectedClusterInfo } from "./types";
 
 export interface ClusterDetailProps {
@@ -134,44 +134,36 @@ export function ClusterDetail({ info }: ClusterDetailProps) {
         {TUNER_NAMES.filter((t) => selectedTuners.has(t) && (tunerCounts[t] ?? 0) > 0)
           .map((t) => ({ tuner: t, count: tunerCounts[t] ?? 0 }))
           .sort((a, b) => b.count - a.count)
-          .map(({ tuner, count }) => {
-            const ratio = trialCount > 0 ? count / trialCount : 0;
-            return (
-              <div key={tuner} style={{ marginBottom: 5 }}>
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    fontSize: 10,
-                    marginBottom: 2,
-                  }}
-                >
-                  <span style={{ fontWeight: 600, color: TUNER_COLORS[tuner] }}>
-                    {TUNER_DISPLAY_NAMES[tuner]}
-                  </span>
-                  <span style={{ color: "#6B7280" }}>
-                    {count} ({(ratio * 100).toFixed(0)}%)
-                  </span>
-                </div>
-                <div
-                  style={{
-                    height: 5,
-                    background: "#E5E7EB",
-                    borderRadius: 3,
-                  }}
-                >
-                  <div
-                    style={{
-                      height: "100%",
-                      width: `${ratio * 100}%`,
-                      background: TUNER_COLORS[tuner],
-                      borderRadius: 3,
-                    }}
-                  />
-                </div>
-              </div>
-            );
-          })}
+          .slice(0, 5)
+          .map(({ tuner, count }) => (
+            <div
+              key={tuner}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                fontSize: 11,
+                padding: "3px 0",
+              }}
+            >
+              <span
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: "50%",
+                  background: TUNER_COLORS[tuner],
+                  flexShrink: 0,
+                }}
+              />
+              <span style={{ fontWeight: 600, color: "#374151" }}>
+                {TUNER_DISPLAY_NAMES[tuner]}
+              </span>
+              <span style={{ flex: 1 }} />
+              <span style={{ color: "#6B7280", fontFamily: "monospace" }}>
+                {count} trials
+              </span>
+            </div>
+          ))}
       </div>
     </div>
   );

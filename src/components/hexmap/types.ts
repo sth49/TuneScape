@@ -7,7 +7,7 @@ export type { HexMapData, HexTile, Territory, Trial, TunerType, Cluster } from "
 // Types
 // ============================================================
 
-export type ColorMode = "dominant" | "density" | "coverage" | "compare" | "tuner-perf" | "tuner-param" | "complementary";
+export type ColorMode = "tuner-perf" | "tuner-param" | "complementary";
 
 export interface SelectedClusterInfo {
   cluster: import("../../utils/hexMapUtils").Cluster;
@@ -22,8 +22,16 @@ export interface HexMapProps {
   onParamSelect?: (param: string | null) => void;
   selectedTuners?: Set<import("../../utils/hexMapUtils").TunerType>;
   onToggleTuner?: (tuner: import("../../utils/hexMapUtils").TunerType) => void;
-  selectedQualLabels?: Set<QualitativeLabel>;
-  onToggleQualLabel?: (label: QualitativeLabel) => void;
+  cartIds?: Set<number>;
+  onCartToggle?: (clusterId: number) => void;
+  onCartDataUpdate?: (data: CartData | null) => void;
+}
+
+export interface CartData {
+  clusters: import("../../utils/hexMapUtils").Cluster[];
+  unionBranches: Set<number>;
+  unionCoverage: number;
+  totalUniqueBranches: number;
 }
 
 export type QualitativeLabel =

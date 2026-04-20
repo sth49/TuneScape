@@ -1,12 +1,12 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { GiHoneycomb } from "react-icons/gi";
 import { HexMap, type SelectedClusterInfo } from "./components/hexmap";
 import { ClusterDetail } from "./components/hexmap/ClusterDetail";
+import { CartPanel } from "./components/hexmap/CartPanel";
+import type { CartData } from "./components/hexmap/types";
 import { ParameterPanel } from "./components/ParameterPanel";
 import { TunerSummary } from "./components/TunerSummary";
 import { TUNER_NAMES, type TunerType } from "./utils/hexMapUtils";
-import { LabelsPanel } from "./components/LabelsPanel";
-import { QUAL_LABEL_NAMES, type QualitativeLabel } from "./components/hexmap/types";
 import "./App.css";
 
 type Program = "gawk" | "gcal" | "grep";
@@ -19,6 +19,8 @@ function App() {
   const [selectedTuners, setSelectedTuners] = useState<Set<TunerType>>(
     () => new Set(TUNER_NAMES),
   );
+  const [cartIds, setCartIds] = useState<Set<number>>(() => new Set());
+  const [cartData, setCartData] = useState<CartData | null>(null);
 
   const handleClusterSelect = useCallback(
     (info: SelectedClusterInfo | null) => {
@@ -29,19 +31,6 @@ function App() {
 
   const handleParamSelect = useCallback((param: string | null) => {
     setSelectedParam(param);
-  }, []);
-
-  const [selectedQualLabels, setSelectedQualLabels] = useState<Set<QualitativeLabel>>(
-    () => new Set(QUAL_LABEL_NAMES),
-  );
-
-  const handleToggleQualLabel = useCallback((label: QualitativeLabel) => {
-    setSelectedQualLabels((prev) => {
-      const next = new Set(prev);
-      if (next.has(label)) next.delete(label);
-      else next.add(label);
-      return next;
-    });
   }, []);
 
   const handleToggleTuner = useCallback((tuner: TunerType) => {
@@ -55,6 +44,26 @@ function App() {
       return next;
     });
   }, []);
+
+  const handleCartToggle = useCallback((clusterId: number) => {
+    setCartIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(clusterId)) next.delete(clusterId);
+      else next.add(clusterId);
+      return next;
+    });
+  }, []);
+
+  const handleClearCart = useCallback(() => {
+    setCartIds(new Set());
+    setCartData(null);
+  }, []);
+
+  // Clear cart when program changes
+  useEffect(() => {
+    setCartIds(new Set());
+    setCartData(null);
+  }, [mapProgram]);
 
   return (
     <div className="w-[100vw] h-[100vh] flex flex-col bg-base-100">
@@ -102,20 +111,12 @@ function App() {
                 onSetAllTuners={setSelectedTuners}
               />
             </div>
-            {/* <div className="mx-1 border-t border-gray-200" /> */}
             <div className="flex-1 min-h-0">
               <ParameterPanel
                 program={mapProgram}
                 selectedParam={selectedParam}
                 onParamSelect={handleParamSelect}
                 interactive={selectedParam !== null}
-              />
-            </div>
-            <div className="mx-3 my-2 border-t border-gray-200" />
-            <div className="flex-shrink-0 pb-2">
-              <LabelsPanel
-                selectedLabels={selectedQualLabels}
-                onToggle={handleToggleQualLabel}
               />
             </div>
           </div>
@@ -129,13 +130,21 @@ function App() {
               onParamSelect={handleParamSelect}
               selectedTuners={selectedTuners}
               onToggleTuner={handleToggleTuner}
-              selectedQualLabels={selectedQualLabels}
-              onToggleQualLabel={handleToggleQualLabel}
+              cartIds={cartIds}
+              onCartToggle={handleCartToggle}
+              onCartDataUpdate={setCartData}
             />
           </div>
           <div className="mx-1 my-2 border-l border-gray-200" />
 
-          <div className="w-[20%] min-w-[260px]">
+          <div className="w-[20%] min-w-[260px] flex flex-col h-full overflow-y-auto p-2 gap-2">
+            <CartPanel
+              cartIds={cartIds}
+              cartData={cartData}
+              selectedTuners={selectedTuners}
+              onRemove={handleCartToggle}
+              onClear={handleClearCart}
+            />
             <ClusterDetail info={selectedCluster} />
           </div>
         </div>
