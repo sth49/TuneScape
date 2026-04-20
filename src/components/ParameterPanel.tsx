@@ -53,6 +53,7 @@ export interface ParameterPanelProps {
   selectedParam: string | null;
   onParamSelect: (param: string | null) => void;
   interactive?: boolean;
+  separability?: Record<string, number>;
 }
 
 export function ParameterPanel({
@@ -60,6 +61,7 @@ export function ParameterPanel({
   selectedParam,
   onParamSelect,
   interactive = true,
+  separability = {},
 }: ParameterPanelProps) {
   const [data, setData] = useState<ImportanceData | null>(null);
   const [selectedTuner, setSelectedTuner] = useState<string>("_combined");
@@ -226,16 +228,41 @@ export function ParameterPanel({
                 >
                   {p.name}
                 </span>
-                {/* SHAP value */}
+                {/* SHAP value + separability dot */}
                 <span
                   style={{
-                    color: "#94A3B8",
-                    fontSize: 11,
-                    fontFamily: "monospace",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 4,
                     flexShrink: 0,
                   }}
                 >
-                  {p.importance.toFixed(1)}
+                  <span
+                    style={{
+                      color: "#94A3B8",
+                      fontSize: 11,
+                      fontFamily: "monospace",
+                    }}
+                  >
+                    {p.importance.toFixed(1)}
+                  </span>
+                  {separability[p.name] !== undefined && (
+                    <span
+                      title={`${Math.round(separability[p.name] * 100)}% non-mixed`}
+                      style={{
+                        width: 6,
+                        height: 6,
+                        borderRadius: "50%",
+                        background: separability[p.name] >= 0.5
+                          ? "#10B981"
+                          : separability[p.name] >= 0.3
+                            ? "#F59E0B"
+                            : "#E2E8F0",
+                        display: "inline-block",
+                        flexShrink: 0,
+                      }}
+                    />
+                  )}
                 </span>
               </div>
               <div

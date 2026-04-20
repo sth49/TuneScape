@@ -25,6 +25,7 @@ export interface HexMapProps {
   cartIds?: Set<number>;
   onCartToggle?: (clusterId: number) => void;
   onCartDataUpdate?: (data: CartData | null) => void;
+  onParamSeparability?: (map: Record<string, number>) => void;
 }
 
 export interface CartData {

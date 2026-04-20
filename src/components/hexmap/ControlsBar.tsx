@@ -6,9 +6,9 @@ import type { ColorMode } from "./types";
 // ============================================================
 
 const MODE_TABS: { mode: ColorMode; label: string }[] = [
-  { mode: "tuner-perf", label: "Tuner × Coverage" },
-  { mode: "tuner-param", label: "Tuner × Parameter" },
-  { mode: "complementary", label: "Complement" },
+  { mode: "tuner-perf", label: "Coverage" },
+  { mode: "tuner-param", label: "Parameter" },
+  { mode: "complementary", label: "Complementary" },
 ];
 
 // ============================================================

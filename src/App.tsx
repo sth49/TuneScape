@@ -1,7 +1,6 @@
 import { useState, useCallback, useEffect } from "react";
 import { GiHoneycomb } from "react-icons/gi";
-import { HexMap, type SelectedClusterInfo } from "./components/hexmap";
-import { ClusterDetail } from "./components/hexmap/ClusterDetail";
+import { HexMap } from "./components/hexmap";
 import { CartPanel } from "./components/hexmap/CartPanel";
 import type { CartData } from "./components/hexmap/types";
 import { ParameterPanel } from "./components/ParameterPanel";
@@ -13,21 +12,13 @@ type Program = "gawk" | "gcal" | "grep";
 
 function App() {
   const [mapProgram, setMapProgram] = useState<Program>("gawk");
-  const [selectedCluster, setSelectedCluster] =
-    useState<SelectedClusterInfo | null>(null);
   const [selectedParam, setSelectedParam] = useState<string | null>(null);
   const [selectedTuners, setSelectedTuners] = useState<Set<TunerType>>(
     () => new Set(TUNER_NAMES),
   );
   const [cartIds, setCartIds] = useState<Set<number>>(() => new Set());
   const [cartData, setCartData] = useState<CartData | null>(null);
-
-  const handleClusterSelect = useCallback(
-    (info: SelectedClusterInfo | null) => {
-      setSelectedCluster(info);
-    },
-    [],
-  );
+  const [paramSeparability, setParamSeparability] = useState<Record<string, number>>({});
 
   const handleParamSelect = useCallback((param: string | null) => {
     setSelectedParam(param);
@@ -117,6 +108,7 @@ function App() {
                 selectedParam={selectedParam}
                 onParamSelect={handleParamSelect}
                 interactive={selectedParam !== null}
+                separability={paramSeparability}
               />
             </div>
           </div>
@@ -125,7 +117,6 @@ function App() {
           <div className="flex-1 min-w-0 h-full">
             <HexMap
               program={mapProgram}
-              onClusterSelect={handleClusterSelect}
               selectedParam={selectedParam}
               onParamSelect={handleParamSelect}
               selectedTuners={selectedTuners}
@@ -133,11 +124,12 @@ function App() {
               cartIds={cartIds}
               onCartToggle={handleCartToggle}
               onCartDataUpdate={setCartData}
+              onParamSeparability={setParamSeparability}
             />
           </div>
           <div className="mx-1 my-2 border-l border-gray-200" />
 
-          <div className="w-[20%] min-w-[260px] flex flex-col h-full overflow-y-auto p-2 gap-2">
+          <div className="w-[20%] min-w-[260px] flex flex-col h-full overflow-y-auto">
             <CartPanel
               cartIds={cartIds}
               cartData={cartData}
@@ -145,7 +137,6 @@ function App() {
               onRemove={handleCartToggle}
               onClear={handleClearCart}
             />
-            <ClusterDetail info={selectedCluster} />
           </div>
         </div>
       </main>

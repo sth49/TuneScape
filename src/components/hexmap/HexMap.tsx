@@ -45,13 +45,13 @@ import { HexTooltip } from "./HexTooltip";
 
 export function HexMap({
   program = "gawk",
-  onClusterSelect,
   selectedParam: selectedParamProp = null,
   onParamSelect,
   selectedTuners: selectedTunersProp,
   cartIds: cartIdsProp,
   onCartToggle,
   onCartDataUpdate,
+  onParamSeparability,
 }: HexMapProps) {
   // Responsive sizing: measure the container
   const containerRef = useRef<HTMLDivElement>(null);
@@ -369,6 +369,79 @@ export function HexMap({
 
   // getParamType imported from colorUtils
 
+  // ── Compute non-Mixed ratio for all params (for ParameterPanel indicator) ──
+  const onParamSeparabilityRef = useRef(onParamSeparability);
+  onParamSeparabilityRef.current = onParamSeparability;
+
+  useEffect(() => {
+    if (!data || paramImportanceList.length === 0) {
+      onParamSeparabilityRef.current?.({});
+      return;
+    }
+    const clusters = data.clusters;
+    const nC = clusters.length;
+    if (nC === 0) return;
+
+    const result: Record<string, number> = {};
+    const centroidKeys = Object.keys(clusters[0].centroid);
+
+    for (const { name } of paramImportanceList) {
+      const ptype = getParamType(name);
+
+      if (ptype === "boolean") {
+        let nonMixed = 0;
+        for (const c of clusters) {
+          const v = c.centroid[name] ?? 0;
+          if (v > 0.7 || v < 0.3) nonMixed++;
+        }
+        result[name] = nonMixed / nC;
+      } else if (ptype === "categorical") {
+        const prefix = name + "__";
+        const catKeys = centroidKeys.filter((k) => k.startsWith(prefix));
+        if (catKeys.length === 0) { result[name] = 0; continue; }
+        let nonMixed = 0;
+        for (const c of clusters) {
+          let maxVal = -1, secondMax = -1;
+          for (const k of catKeys) {
+            const v = c.centroid[k] ?? 0;
+            if (v > maxVal) { secondMax = maxVal; maxVal = v; }
+            else if (v > secondMax) secondMax = v;
+          }
+          if (maxVal >= 0.45 && maxVal - secondMax >= 0.15) nonMixed++;
+        }
+        result[name] = nonMixed / nC;
+      } else {
+        // numeric: check IQR spread
+        let nonMixed = 0;
+        const allVals: number[] = [];
+        const clusterVals = new Map<number, number[]>();
+        for (const c of clusters) {
+          const vals: number[] = [];
+          for (const t of c.trials) {
+            const v = t.parameters[name];
+            const n = typeof v === "number" ? v : Number(v) || 0;
+            vals.push(n);
+            allVals.push(n);
+          }
+          vals.sort((a, b) => a - b);
+          clusterVals.set(c.id, vals);
+        }
+        allVals.sort((a, b) => a - b);
+        const globalRange = (allVals[allVals.length - 1] ?? 1) - (allVals[0] ?? 0) || 1;
+        for (const c of clusters) {
+          const vals = clusterVals.get(c.id) ?? [];
+          if (vals.length >= 4) {
+            const q1 = vals[Math.floor(vals.length * 0.25)];
+            const q3 = vals[Math.floor(vals.length * 0.75)];
+            if ((q3 - q1) / globalRange > 0.5) continue;
+          }
+          nonMixed++;
+        }
+        result[name] = nonMixed / nC;
+      }
+    }
+    onParamSeparabilityRef.current?.(result);
+  }, [data, paramImportanceList, getParamType]);
 
   // Detect selected parameter type
   const selectedParamType = useMemo(():
@@ -562,12 +635,11 @@ export function HexMap({
             ]),
           ) as Record<TunerType, number>;
           const dominant = getDominantTuner(filteredCounts);
-          return d3.interpolateRgb(TUNER_COLORS[dominant], "#FFFFFF")(0.55);
+          return d3.interpolateRgb(TUNER_COLORS[dominant], "#FFFFFF")(0.45);
         }
 
         case "complementary": {
           if (!t3Scores) return "#F1F5F9"; // empty working set
-          if (cartIds.has(tile.cluster.id)) return "#6366F1";
           const score = t3Scores.scores.get(tile.cluster.id) ?? 0;
           const maxS = t3Scores.maxScore || 1;
           const t = Math.max(0, Math.min(1, score / maxS));
@@ -583,7 +655,6 @@ export function HexMap({
       selectedTuners,
       paramCellBins,
       t3Scores,
-      cartIds,
     ],
   );
 
@@ -775,14 +846,7 @@ export function HexMap({
                     // Shift+click: toggle cart
                     if (e.shiftKey) {
                       onCartToggle?.(tile.cluster!.id);
-                      return;
                     }
-                    // Normal click: notify parent of selected cluster
-                    onClusterSelect?.({
-                      cluster: tile.cluster!,
-                      totalUniqueBranches,
-                      selectedTuners,
-                    });
                   }}
                   style={{ cursor: "pointer" }}
                 >
@@ -793,13 +857,17 @@ export function HexMap({
                       isHovered ? "#1E293B"
                         : (effectiveColorMode === "complementary" && tile.cluster && t3TopIds.has(tile.cluster.id))
                           ? "#059669"
-                          : "#E2E8F0"
+                          : (tile.cluster && cartIds.has(tile.cluster.id))
+                            ? "#1E293B"
+                            : "#E2E8F0"
                     }
                     strokeWidth={
                       isHovered ? 2.5
                         : (effectiveColorMode === "complementary" && tile.cluster && t3TopIds.has(tile.cluster.id))
                           ? 2
-                          : 0.5
+                          : (tile.cluster && cartIds.has(tile.cluster.id))
+                            ? 2
+                            : 0.5
                     }
                     filter={isHovered ? "brightness(1.15)" : undefined}
                   />

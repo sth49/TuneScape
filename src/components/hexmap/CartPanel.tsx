@@ -22,7 +22,7 @@ export function CartPanel({
   onRemove,
   onClear,
 }: CartPanelProps) {
-  if (cartIds.size === 0) return null;
+  const empty = cartIds.size === 0;
 
   const unionCovPct = cartData
     ? (cartData.unionCoverage * 100).toFixed(1)
@@ -34,159 +34,242 @@ export function CartPanel({
       style={{
         background: "white",
         borderRadius: 10,
-        boxShadow: "0 2px 12px rgba(0,0,0,0.08)",
-        border: "1px solid #F59E0B",
-        padding: "10px 14px",
-        fontSize: 12,
-        marginBottom: 8,
+        overflow: "hidden",
+        display: "flex",
+        flexDirection: "column",
       }}
     >
-      {/* Header */}
+      {/* Header — matches TunerSummary / ParameterPanel style */}
       <div
         style={{
+          padding: "10px 14px 8px",
+          borderBottom: empty ? "none" : "1px solid #F1F5F9",
           display: "flex",
           justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: 8,
-          borderBottom: "1px solid #FEF3C7",
-          paddingBottom: 6,
+          alignItems: "baseline",
         }}
       >
-        <span style={{ fontWeight: 700, fontSize: 13, color: "#92400E" }}>
-          Working Set ({cartIds.size})
+        <span style={{ fontWeight: 700, fontSize: 15, color: "#1E293B" }}>
+          Working Set{!empty && ` (${cartIds.size})`}
         </span>
-        <button
-          onClick={onClear}
-          style={{
-            fontSize: 10,
-            color: "#DC2626",
-            background: "#FEF2F2",
-            border: "1px solid #FECACA",
-            borderRadius: 4,
-            padding: "2px 8px",
-            cursor: "pointer",
-            fontWeight: 600,
-          }}
-        >
-          Clear
-        </button>
+        {!empty && (
+          <button
+            onClick={onClear}
+            style={{
+              fontSize: 10,
+              color: "#94A3B8",
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              fontWeight: 500,
+            }}
+          >
+            Clear
+          </button>
+        )}
       </div>
 
-      {/* Union stats */}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr",
-          gap: 4,
-          marginBottom: 8,
-        }}
-      >
+      {/* Empty state */}
+      {empty && (
         <div
           style={{
-            background: "#FFFBEB",
-            borderRadius: 6,
-            padding: "5px 8px",
+            color: "#9CA3AF",
+            fontSize: 11,
             textAlign: "center",
+            padding: "16px 14px 12px",
           }}
         >
-          <div style={{ fontSize: 8, color: "#92400E", marginBottom: 1 }}>
-            Union Coverage
+          Shift+click cells to add.
+        </div>
+      )}
+
+      {/* Non-empty content */}
+      {!empty && (
+        <div style={{ padding: "6px 14px 8px" }}>
+          {/* Union stats */}
+          <div
+            style={{
+              display: "flex",
+              gap: 12,
+              marginBottom: 10,
+              fontSize: 11,
+              color: "#64748B",
+            }}
+          >
+            <span>
+              Union <span style={{ fontWeight: 600, color: "#1E293B" }}>{unionCovPct}%</span>
+            </span>
+            <span>
+              Branches <span style={{ fontWeight: 600, color: "#1E293B" }}>{unionBranchCount.toLocaleString()}</span>
+            </span>
           </div>
-          <div style={{ fontSize: 13, fontWeight: 700, color: "#B45309" }}>
-            {unionCovPct}%
+
+          {/* Cell detail list */}
+          <div
+            style={{
+              maxHeight: 300,
+              overflowY: "auto",
+              display: "flex",
+              flexDirection: "column",
+              gap: 6,
+            }}
+          >
+            {cartData?.clusters.map((c) => {
+              const filteredCounts = Object.fromEntries(
+                TUNER_NAMES.filter((t) => selectedTuners.has(t)).map((t) => [
+                  t,
+                  c.tunerCounts[t],
+                ]),
+              ) as Record<TunerType, number>;
+              const dominant = getDominantTuner(filteredCounts);
+              const trialCount = TUNER_NAMES.filter((t) =>
+                selectedTuners.has(t),
+              ).reduce((s, t) => s + c.tunerCounts[t], 0);
+
+              // Mean coverage
+              const filteredTrials = c.trials.filter((t) =>
+                selectedTuners.has(t.tuner),
+              );
+              const meanCov =
+                filteredTrials.length > 0
+                  ? filteredTrials.reduce((s, t) => s + t.coverage, 0) /
+                    filteredTrials.length
+                  : 0;
+              const meanPct = (meanCov * 100).toFixed(1);
+
+              // Cumulative coverage
+              const tub = cartData.totalUniqueBranches || 1;
+              const cumPct = (
+                (c.coveredBranches.length / tub) *
+                100
+              ).toFixed(1);
+
+              // Top 3 tuners
+              const tunerList = TUNER_NAMES.filter(
+                (t) => selectedTuners.has(t) && c.tunerCounts[t] > 0,
+              )
+                .map((t) => ({ tuner: t, count: c.tunerCounts[t] }))
+                .sort((a, b) => b.count - a.count)
+                .slice(0, 3);
+
+              return (
+                <div
+                  key={c.id}
+                  style={{
+                    background: "#F8FAFC",
+                    borderRadius: 6,
+                    padding: "6px 8px",
+                  }}
+                >
+                  {/* Line 1: badge + ID + trials + remove */}
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 5,
+                      marginBottom: 3,
+                    }}
+                  >
+                    <span
+                      style={{
+                        background: TUNER_COLORS[dominant],
+                        color: "#fff",
+                        fontSize: 9,
+                        fontWeight: 700,
+                        borderRadius: 3,
+                        padding: "1px 5px",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {TUNER_DISPLAY_NAMES[dominant]}
+                    </span>
+                    <span
+                      style={{
+                        fontSize: 11,
+                        color: "#374151",
+                        fontWeight: 600,
+                      }}
+                    >
+                      #{c.id + 1}
+                    </span>
+                    <span style={{ fontSize: 10, color: "#94A3B8" }}>
+                      · {trialCount} trials
+                    </span>
+                    <span style={{ flex: 1 }} />
+                    <button
+                      onClick={() => onRemove(c.id)}
+                      style={{
+                        fontSize: 11,
+                        color: "#94A3B8",
+                        background: "none",
+                        border: "none",
+                        cursor: "pointer",
+                        padding: "0 4px",
+                        lineHeight: 1,
+                      }}
+                      title="Remove from working set"
+                    >
+                      ×
+                    </button>
+                  </div>
+
+                  {/* Line 2: Coverage */}
+                  <div
+                    style={{ fontSize: 10, color: "#64748B", marginBottom: 2 }}
+                  >
+                    Coverage: mean {meanPct}%, cum {cumPct}%
+                  </div>
+
+                  {/* Line 3: Top 3 tuners */}
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                      fontSize: 10,
+                      color: "#64748B",
+                    }}
+                  >
+                    {tunerList.map(({ tuner, count }) => (
+                      <span
+                        key={tuner}
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 2,
+                        }}
+                      >
+                        <span
+                          style={{
+                            width: 6,
+                            height: 6,
+                            borderRadius: "50%",
+                            background: TUNER_COLORS[tuner],
+                            display: "inline-block",
+                            flexShrink: 0,
+                          }}
+                        />
+                        {TUNER_DISPLAY_NAMES[tuner]} {count}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div
+            style={{
+              fontSize: 9,
+              color: "#CBD5E1",
+              marginTop: 8,
+              textAlign: "center",
+            }}
+          >
+            Shift+click cells to add/remove
           </div>
         </div>
-        <div
-          style={{
-            background: "#FFFBEB",
-            borderRadius: 6,
-            padding: "5px 8px",
-            textAlign: "center",
-          }}
-        >
-          <div style={{ fontSize: 8, color: "#92400E", marginBottom: 1 }}>
-            Branches
-          </div>
-          <div style={{ fontSize: 13, fontWeight: 700, color: "#B45309" }}>
-            {unionBranchCount.toLocaleString()}
-          </div>
-        </div>
-      </div>
-
-      {/* Cell list */}
-      <div style={{ maxHeight: 180, overflowY: "auto" }}>
-        {cartData?.clusters.map((c) => {
-          const filteredCounts = Object.fromEntries(
-            TUNER_NAMES.filter((t) => selectedTuners.has(t)).map((t) => [
-              t,
-              c.tunerCounts[t],
-            ]),
-          ) as Record<TunerType, number>;
-          const dominant = getDominantTuner(filteredCounts);
-          const trialCount = TUNER_NAMES.filter((t) => selectedTuners.has(t))
-            .reduce((s, t) => s + c.tunerCounts[t], 0);
-
-          return (
-            <div
-              key={c.id}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                padding: "3px 0",
-                borderBottom: "1px solid #F5F5F4",
-              }}
-            >
-              <span
-                style={{
-                  background: TUNER_COLORS[dominant],
-                  color: "#fff",
-                  fontSize: 9,
-                  fontWeight: 700,
-                  borderRadius: 3,
-                  padding: "1px 5px",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {TUNER_DISPLAY_NAMES[dominant]}
-              </span>
-              <span style={{ fontSize: 10, color: "#374151", fontWeight: 500 }}>
-                #{c.id + 1}
-              </span>
-              <span style={{ fontSize: 9, color: "#9CA3AF" }}>
-                {trialCount}t
-              </span>
-              <span style={{ flex: 1 }} />
-              <button
-                onClick={() => onRemove(c.id)}
-                style={{
-                  fontSize: 10,
-                  color: "#9CA3AF",
-                  background: "none",
-                  border: "none",
-                  cursor: "pointer",
-                  padding: "0 2px",
-                  lineHeight: 1,
-                }}
-                title="Remove from cart"
-              >
-                x
-              </button>
-            </div>
-          );
-        })}
-      </div>
-
-      <div
-        style={{
-          fontSize: 9,
-          color: "#9CA3AF",
-          marginTop: 6,
-          textAlign: "center",
-        }}
-      >
-        Shift+click cells to add/remove
-      </div>
+      )}
     </div>
   );
 }
