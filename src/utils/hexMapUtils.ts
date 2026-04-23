@@ -124,7 +124,7 @@ export const TUNER_COLORS: Record<TunerType, string> = {
   CMA_ES: "#2ca02c",             // green
   Genetic: "#9467bd",            // purple
   SuccessiveHalving: "#8c564b",  // brown
-  TPE: "#e377c2",                // pink
+  TPE: "#b85e93",                // muted pink
   BayesianOptimization: "#17becf", // cyan
 };
 

@@ -1,6 +1,6 @@
 import React from "react";
 import { createPortal } from "react-dom";
-import { TUNER_NAMES, type TunerType } from "../../utils/hexMapUtils";
+import { TUNER_COLORS, TUNER_NAMES, type TunerType } from "../../utils/hexMapUtils";
 import { TUNER_DISPLAY_NAMES } from "./types";
 import type { HexMapData, ColorMode } from "./types";
 import type { Cluster } from "../../utils/hexMapUtils";
@@ -17,7 +17,7 @@ export interface HexTooltipProps {
   data: HexMapData | null;
   selectedTuners: Set<TunerType>;
   effectiveColorMode: ColorMode;
-  coverageMetric: "mean" | "min" | "max" | "marginal" | "cumulative";
+  coverageMetric: "mean" | "cumulative";
   getClusterCov: (c: Cluster) => number;
   containerRef: React.RefObject<HTMLDivElement | null>;
   selectedParam?: string | null;
@@ -84,7 +84,7 @@ export function HexTooltip({
         color: "white",
         padding: "6px 10px",
         borderRadius: 6,
-        fontSize: 11,
+        fontSize: 13,
         lineHeight: "16px",
         pointerEvents: "none",
         zIndex: 9999,
@@ -94,15 +94,38 @@ export function HexTooltip({
     >
       {/* Line 1: Cluster ID + trial count */}
       <div style={{ fontWeight: 600, marginBottom: 2 }}>
-        Cluster #{cluster.id + 1} · {totalSelected} trials
+        Cluster #{cluster.id + 1} · {totalSelected.toLocaleString()} trials
       </div>
       {/* Line 2: Coverage */}
       <div style={{ color: "#CBD5E1", marginBottom: 2 }}>
         Coverage: mean {meanPct}%, cum {cumPct}%
       </div>
       {/* Line 3: Top tuner */}
-      <div style={{ color: "#CBD5E1", marginBottom: 0 }}>
-        Top tuner: {TUNER_DISPLAY_NAMES[topTuner]} ({topCount} trials)
+      <div
+        style={{
+          color: "#CBD5E1",
+          marginBottom: 0,
+          display: "flex",
+          alignItems: "center",
+          gap: 5,
+        }}
+      >
+        Top tuner:
+        <span
+          style={{
+            background: TUNER_COLORS[topTuner],
+            color: "#fff",
+            fontSize: 11,
+            fontWeight: 700,
+            borderRadius: 3,
+            padding: "1px 5px",
+            lineHeight: 1.4,
+            whiteSpace: "nowrap",
+          }}
+        >
+          {TUNER_DISPLAY_NAMES[topTuner]}
+        </span>
+        <span>({topCount.toLocaleString()} trials)</span>
       </div>
       {/* Mode-specific line: Parameter */}
       {effectiveColorMode === "tuner-param" && selectedParam && paramBin && (
@@ -113,7 +136,7 @@ export function HexTooltip({
       {/* Mode-specific line: Complementary */}
       {effectiveColorMode === "complementary" && t3Scores && (
         <div style={{ color: "#6EE7B7", marginTop: 3, fontWeight: 600 }}>
-          +{t3Scores.scores.get(hoveredClusterId!) ?? 0} new branches
+          +{(t3Scores.scores.get(hoveredClusterId!) ?? 0).toLocaleString()} new branches
           {t3Scores.anchorBranchCount > 0 && (
             <span style={{ fontWeight: 400, color: "#94A3B8", marginLeft: 4 }}>
               (gain {((t3Scores.scores.get(hoveredClusterId!) ?? 0) / t3Scores.anchorBranchCount * 100).toFixed(1)}%)

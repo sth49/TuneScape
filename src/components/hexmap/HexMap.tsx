@@ -39,6 +39,14 @@ import { ControlsBar } from "./ControlsBar";
 import { HexTooltip } from "./HexTooltip";
 
 
+// Tableau20 — up to 20 visually distinct colors for categorical params
+const CAT_PALETTE = [
+  "#4E79A7", "#F28E2B", "#E15759", "#76B7B2", "#59A14F",
+  "#EDC948", "#B07AA1", "#FF9DA7", "#9C755F", "#BAB0AC",
+  "#AF7AA1", "#86BCB6", "#D37295", "#FABFD2", "#B6992D",
+  "#499894", "#E17C05", "#D4A6C8", "#8CD17D", "#F1CE63",
+];
+
 // ============================================================
 // Component
 // ============================================================
@@ -48,10 +56,13 @@ export function HexMap({
   selectedParam: selectedParamProp = null,
   onParamSelect,
   selectedTuners: selectedTunersProp,
+  onToggleTuner,
   cartIds: cartIdsProp,
   onCartToggle,
   onCartDataUpdate,
   onParamSeparability,
+  externalHoveredClusterId = null,
+  onHoverChange,
 }: HexMapProps) {
   // Responsive sizing: measure the container
   const containerRef = useRef<HTMLDivElement>(null);
@@ -80,7 +91,7 @@ export function HexMap({
 
   const [colorMode, setColorMode] = useState<ColorMode>("tuner-perf");
   const [previewColorMode] = useState<ColorMode | null>(null);
-  const [coverageMetric, setCoverageMetric] = useState<"mean" | "min" | "max" | "marginal" | "cumulative">("mean");
+  const [coverageMetric, setCoverageMetric] = useState<"mean" | "cumulative">("cumulative");
   // hover: drives tooltip
   const [hoveredClusterId, setHoveredClusterId] = useState<number | null>(null);
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(
@@ -242,10 +253,7 @@ export function HexMap({
       const trials = c.trials.filter((t) => selectedTuners.has(t.tuner));
       if (trials.length === 0) return 0;
 
-      if (coverageMetric === "max") return Math.max(...trials.map((t) => t.coverage));
-      if (coverageMetric === "min") return Math.min(...trials.map((t) => t.coverage));
       if (coverageMetric === "mean") return trials.reduce((s, t) => s + t.coverage, 0) / trials.length;
-      if (coverageMetric === "marginal") return trials.reduce((s, t) => s + t.marginalCoverage, 0) / trials.length;
       if (coverageMetric === "cumulative") {
         // Union of branches from selected tuners' trials
         // Per-trial coveredBranches may be stripped in precomputed data; fall back to cluster-level
@@ -441,7 +449,7 @@ export function HexMap({
       }
     }
     onParamSeparabilityRef.current?.(result);
-  }, [data, paramImportanceList, getParamType]);
+  }, [data, paramImportanceList]);
 
   // Detect selected parameter type
   const selectedParamType = useMemo(():
@@ -451,35 +459,9 @@ export function HexMap({
     | null => {
     if (!selectedParam) return null;
     return getParamType(selectedParam);
-  }, [selectedParam, getParamType]);
+  }, [selectedParam]);
 
   // ── Per-cluster param bin (boolean / categorical) ──
-  // Generic string bin + dynamic color palette
-  // MIXED_COLOR imported from types
-  // Tableau20 — up to 20 visually distinct colors for categorical params
-  const CAT_PALETTE = [
-    "#4E79A7",
-    "#F28E2B",
-    "#E15759",
-    "#76B7B2",
-    "#59A14F",
-    "#EDC948",
-    "#B07AA1",
-    "#FF9DA7",
-    "#9C755F",
-    "#BAB0AC",
-    "#AF7AA1",
-    "#86BCB6",
-    "#D37295",
-    "#FABFD2",
-    "#B6992D",
-    "#499894",
-    "#E17C05",
-    "#D4A6C8",
-    "#8CD17D",
-    "#F1CE63",
-  ];
-
   const paramCellBins = useMemo((): {
     bins: Map<number, string>;
     binNames: string[];
@@ -490,13 +472,23 @@ export function HexMap({
 
     const bins = new Map<number, string>();
 
+    // Per-cluster trials restricted to the currently-selected tuners.
+    const filteredTrialsByCluster = new Map<number, typeof data.clusters[0]["trials"]>();
+    for (const c of data.clusters) {
+      filteredTrialsByCluster.set(
+        c.id,
+        c.trials.filter((t) => selectedTuners.has(t.tuner)),
+      );
+    }
+
     if (ptype === "numeric") {
-      // Collect all trial-level raw values to get true global range
+      // Collect all trial-level raw values (across selected tuners) for global range
       const allTrialVals: number[] = [];
       const clusterTrialVals = new Map<number, number[]>();
       for (const c of data.clusters) {
         const vals: number[] = [];
-        for (const t of c.trials) {
+        const trials = filteredTrialsByCluster.get(c.id) ?? [];
+        for (const t of trials) {
           const v = t.parameters[selectedParam];
           const n = typeof v === "number" ? v : Number(v) || 0;
           vals.push(n);
@@ -510,8 +502,8 @@ export function HexMap({
       const globalMin = allTrialVals[0] ?? 0;
       const globalMax = allTrialVals[allTrialVals.length - 1] ?? 1;
       const globalRange = globalMax - globalMin || 1;
-      const gP33 = allTrialVals[Math.floor(allTrialVals.length / 3)];
-      const gP66 = allTrialVals[Math.floor((allTrialVals.length * 2) / 3)];
+      const gP33 = allTrialVals[Math.floor(allTrialVals.length / 3)] ?? globalMin;
+      const gP66 = allTrialVals[Math.floor((allTrialVals.length * 2) / 3)] ?? globalMax;
 
       const fmt = (v: number) =>
         Math.abs(v) >= 1000 ? v.toFixed(0) : v < 0.01 ? v.toFixed(3) : v < 1 ? v.toFixed(2) : v.toFixed(1);
@@ -521,8 +513,11 @@ export function HexMap({
 
       for (const c of data.clusters) {
         const vals = clusterTrialVals.get(c.id) ?? [];
+        if (vals.length === 0) {
+          bins.set(c.id, "Mixed");
+          continue;
+        }
 
-        // Compute IQR from actual trial values
         if (vals.length >= 4) {
           const q1 = vals[Math.floor(vals.length * 0.25)];
           const q3 = vals[Math.floor(vals.length * 0.75)];
@@ -533,7 +528,6 @@ export function HexMap({
           }
         }
 
-        // Use median of trial values for binning (more robust than centroid)
         const median = vals[Math.floor(vals.length / 2)] ?? 0;
         if (median <= gP33) bins.set(c.id, lowLabel);
         else if (median <= gP66) bins.set(c.id, midLabel);
@@ -543,9 +537,9 @@ export function HexMap({
         bins,
         binNames: [lowLabel, midLabel, highLabel, "Mixed"],
         binColors: {
-          [lowLabel]: "#BFDBFE", // light blue
-          [midLabel]: "#3B82F6", // medium blue
-          [highLabel]: "#1E3A8A", // dark blue
+          [lowLabel]: "#BFDBFE",
+          [midLabel]: "#3B82F6",
+          [highLabel]: "#1E3A8A",
           Mixed: MIXED_COLOR,
         },
       };
@@ -553,9 +547,12 @@ export function HexMap({
 
     if (ptype === "boolean") {
       for (const c of data.clusters) {
-        const v = c.centroid[selectedParam] ?? 0;
-        if (v > 0.7) bins.set(c.id, "Mostly True");
-        else if (v < 0.3) bins.set(c.id, "Mostly False");
+        const trials = filteredTrialsByCluster.get(c.id) ?? [];
+        if (trials.length === 0) { bins.set(c.id, "Mixed"); continue; }
+        const trueCount = trials.filter((t) => t.parameters[selectedParam] === true).length;
+        const ratio = trueCount / trials.length;
+        if (ratio > 0.7) bins.set(c.id, "Mostly True");
+        else if (ratio < 0.3) bins.set(c.id, "Mostly False");
         else bins.set(c.id, "Mixed");
       }
       return {
@@ -569,7 +566,8 @@ export function HexMap({
       };
     }
 
-    // Categorical: find all one-hot keys for this param
+    // Categorical: take the category inventory from centroid keys, but compute
+    // the dominant/second ratios from the filtered trials themselves.
     const prefix = selectedParam + "__";
     const catKeys = Object.keys(data.clusters[0].centroid)
       .filter((k) => k.startsWith(prefix))
@@ -579,25 +577,22 @@ export function HexMap({
     const catValues = catKeys.map((k) => k.slice(prefix.length));
 
     for (const c of data.clusters) {
-      let maxVal = -1;
-      let dominant = "";
-      let secondMax = -1;
-      for (const k of catKeys) {
-        const v = c.centroid[k] ?? 0;
-        if (v > maxVal) {
-          secondMax = maxVal;
-          maxVal = v;
-          dominant = k.slice(prefix.length);
-        } else if (v > secondMax) {
-          secondMax = v;
-        }
+      const trials = filteredTrialsByCluster.get(c.id) ?? [];
+      if (trials.length === 0) { bins.set(c.id, "Mixed"); continue; }
+
+      const counts = new Map<string, number>();
+      for (const t of trials) {
+        const v = String(t.parameters[selectedParam]);
+        counts.set(v, (counts.get(v) ?? 0) + 1);
       }
-      // "Mixed" if no clear dominant (top < 0.5 or gap < 0.15)
-      if (maxVal < 0.45 || maxVal - secondMax < 0.15) {
-        bins.set(c.id, "Mixed");
-      } else {
-        bins.set(c.id, dominant);
+      let maxVal = -1, secondMax = -1, dominant = "";
+      for (const cat of catValues) {
+        const frac = (counts.get(cat) ?? 0) / trials.length;
+        if (frac > maxVal) { secondMax = maxVal; maxVal = frac; dominant = cat; }
+        else if (frac > secondMax) { secondMax = frac; }
       }
+      if (maxVal < 0.45 || maxVal - secondMax < 0.15) bins.set(c.id, "Mixed");
+      else bins.set(c.id, dominant);
     }
 
     const binColors: Record<string, string> = { Mixed: MIXED_COLOR };
@@ -607,7 +602,7 @@ export function HexMap({
     const binNames = [...catValues, "Mixed"];
 
     return { bins, binNames, binColors };
-  }, [selectedParam, selectedParamType, data]);
+  }, [selectedParam, selectedParamType, data, selectedTuners]);
 
   // Get hex fill
   const getHexFill = useCallback(
@@ -707,10 +702,14 @@ export function HexMap({
   }, [paramCellBins, data, HEX_SIZE, HEX_DIRECTIONS]);
 
   // Mouse handlers
+  const onHoverChangeRef = useRef(onHoverChange);
+  onHoverChangeRef.current = onHoverChange;
+
   const handleMouseEnter = useCallback(
     (tile: HexTile, e: React.MouseEvent) => {
       if (!tile.cluster) return;
       setHoveredClusterId(tile.cluster.id);
+      onHoverChangeRef.current?.(tile.cluster.id);
       const rect = containerRef.current?.getBoundingClientRect();
       if (rect)
         setTooltipPos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
@@ -726,6 +725,7 @@ export function HexMap({
 
   const handleMouseLeave = useCallback(() => {
     setHoveredClusterId(null);
+    onHoverChangeRef.current?.(null);
     setTooltipPos(null);
   }, []);
 
@@ -784,6 +784,8 @@ export function HexMap({
         paramList={paramImportanceList}
         t3Scores={t3Scores}
         cartSize={cartIds.size}
+        selectedTuners={selectedTuners}
+        onToggleTuner={onToggleTuner ?? (() => {})}
       />
       <div
         ref={containerRef}
@@ -792,8 +794,6 @@ export function HexMap({
       <div
         style={{
           position: "relative",
-          display: "flex",
-          justifyContent: "space-between",
           width: "100%",
           height: "100%",
           minHeight: 0,
@@ -812,8 +812,14 @@ export function HexMap({
               transform: `translate(${centerX}px, ${centerY}px) scale(${scale}) translate(${-dataCenter.x}px, ${-dataCenter.y}px)`,
             }}
           >
-            {/* ── Hex tiles: no hover-sensitive props so hover doesn't re-render all tiles ── */}
-            {data.hexTiles.map((tile) => {
+            {/* ── Hex tiles: hovered one rendered last so its + button isn't occluded by neighbors ── */}
+            {[...data.hexTiles]
+              .sort((a, b) => {
+                const aHover = a.cluster?.id === hoveredClusterId ? 1 : 0;
+                const bHover = b.cluster?.id === hoveredClusterId ? 1 : 0;
+                return aHover - bHover;
+              })
+              .map((tile) => {
               if (!tile.cluster) return null;
 
               const hasSelectedTuner = TUNER_NAMES.some(
@@ -824,6 +830,10 @@ export function HexMap({
 
               const fill = getHexFill(tile);
               const isHovered = hoveredClusterId === tile.cluster.id;
+              const isExternallyHovered =
+                externalHoveredClusterId !== null &&
+                externalHoveredClusterId === tile.cluster.id;
+              const isHighlighted = isHovered || isExternallyHovered;
 
               // T1/T2 modes: inner hex
               let innerTunerColor: string | null = null;
@@ -854,7 +864,7 @@ export function HexMap({
                     d={hexPath}
                     fill={fill || "#F8FAFC"}
                     stroke={
-                      isHovered ? "#1E293B"
+                      isHighlighted ? "#1E293B"
                         : (effectiveColorMode === "complementary" && tile.cluster && t3TopIds.has(tile.cluster.id))
                           ? "#059669"
                           : (tile.cluster && cartIds.has(tile.cluster.id))
@@ -862,14 +872,14 @@ export function HexMap({
                             : "#E2E8F0"
                     }
                     strokeWidth={
-                      isHovered ? 2.5
+                      isHighlighted ? 2.5
                         : (effectiveColorMode === "complementary" && tile.cluster && t3TopIds.has(tile.cluster.id))
                           ? 2
                           : (tile.cluster && cartIds.has(tile.cluster.id))
                             ? 2
                             : 0.5
                     }
-                    filter={isHovered ? "brightness(1.15)" : undefined}
+                    filter={isHighlighted ? "brightness(1.15)" : undefined}
                   />
                   {innerTunerColor && (
                     <path
@@ -891,7 +901,7 @@ export function HexMap({
                       pointerEvents="none"
                     />
                   )}
-                  {/* Hover cart button: + or − */}
+                  {/* Hover cart button: + or − (inside tile group so mouse doesn't leave) */}
                   {isHovered && (
                     <g
                       onClick={(e) => {
@@ -976,7 +986,7 @@ export function HexMap({
                 border: "1px solid #E5E7EB",
                 boxShadow: "0 4px 16px rgba(0,0,0,0.08)",
                 padding: "12px 20px",
-                fontSize: 13,
+                fontSize: 15,
                 fontWeight: 500,
                 color: "#475569",
                 textAlign: "center",
@@ -984,24 +994,27 @@ export function HexMap({
               }}
             >
               Add at least one cell to the working set to see complementary candidates.
-              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>
+              <div style={{ fontSize: 13, color: "#94A3B8", marginTop: 4 }}>
                 Shift+click a cell to add it.
               </div>
             </div>
           </div>
         )}
 
-        {/* In-map legend (top-left) */}
+        {/* In-map legend (top-right) */}
         {(effectiveColorMode === "tuner-perf" ||
           (selectedParam && paramCellBins)) && (
           <div
             style={{
               position: "absolute",
               top: 10,
-              left: 10,
+              right: 10,
+              left: "auto",
+              bottom: "auto",
               zIndex: 10,
               display: "flex",
               flexDirection: "column",
+              alignItems: "flex-end",
               gap: 6,
               pointerEvents: "none",
             }}
@@ -1025,16 +1038,16 @@ export function HexMap({
                     padding: "6px 10px",
                   }}
                 >
-                  <div style={{ fontSize: 9, fontWeight: 700, color: "#374151", marginBottom: 4 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#374151", marginBottom: 4 }}>
                     Coverage ({coverageMetric})
                   </div>
-                  <div style={{ position: "relative", width: barW, height: 10, marginBottom: 2 }}>
+                  <div style={{ position: "relative", width: barW, height: 12, marginBottom: 2 }}>
                     <span
                       style={{
                         position: "absolute",
                         left: `${meanPct}%`,
                         transform: "translateX(-50%)",
-                        fontSize: 7,
+                        fontSize: 11,
                         fontWeight: 600,
                         color: "#374151",
                         whiteSpace: "nowrap",
@@ -1073,7 +1086,7 @@ export function HexMap({
                       display: "flex",
                       justifyContent: "space-between",
                       width: barW,
-                      fontSize: 7,
+                      fontSize: 11,
                       color: "#6B7280",
                       fontWeight: 600,
                       marginTop: 2,
@@ -1087,62 +1100,84 @@ export function HexMap({
             })()}
 
             {/* Parameter bin legend */}
-            {selectedParam && paramCellBins && (
-              <div
-                style={{
-                  background: "rgba(255,255,255,0.92)",
-                  backdropFilter: "blur(4px)",
-                  borderRadius: 8,
-                  border: "1px solid #E5E7EB",
-                  boxShadow: "0 2px 8px rgba(0,0,0,0.10)",
-                  padding: "6px 10px",
-                }}
-              >
-                <div style={{ fontSize: 9, fontWeight: 700, color: "#374151", marginBottom: 3 }}>
-                  {selectedParam} ({selectedParamType})
-                </div>
+            {selectedParam && paramCellBins && (() => {
+              const isNumeric = selectedParamType === "numeric";
+              const manyBins = paramCellBins.binNames.length > 3;
+              // Numeric labels carry the range string and must stay readable.
+              const layoutStyle: React.CSSProperties = isNumeric
+                ? {
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 2,
+                  }
+                : manyBins
+                  ? {
+                      display: "grid",
+                      gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+                      columnGap: 10,
+                      rowGap: 2,
+                    }
+                  : {
+                      display: "flex",
+                      flexWrap: "wrap",
+                      gap: "2px 8px",
+                      alignItems: "center",
+                    };
+              return (
                 <div
                   style={{
-                    display: "flex",
-                    flexWrap: "wrap",
-                    gap: "2px 8px",
-                    alignItems: "center",
+                    background: "rgba(255,255,255,0.92)",
+                    backdropFilter: "blur(4px)",
+                    borderRadius: 8,
+                    border: "1px solid #E5E7EB",
+                    boxShadow: "0 2px 8px rgba(0,0,0,0.10)",
+                    padding: "6px 10px",
+                    maxWidth: isNumeric ? 260 : 240,
                   }}
                 >
-                  {paramCellBins.binNames.map((bin) => (
-                    <div
-                      key={bin}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 4,
-                      }}
-                    >
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#374151", marginBottom: 4 }}>
+                    {selectedParam} ({selectedParamType})
+                  </div>
+                  <div style={layoutStyle}>
+                    {paramCellBins.binNames.map((bin) => (
                       <div
+                        key={bin}
                         style={{
-                          width: 10,
-                          height: 10,
-                          borderRadius: 2,
-                          backgroundColor: paramCellBins.binColors[bin] ?? MIXED_COLOR,
-                          opacity: 0.7,
-                          flexShrink: 0,
-                        }}
-                      />
-                      <span
-                        style={{
-                          fontSize: 9,
-                          fontWeight: 600,
-                          color: paramCellBins.binColors[bin] ?? MIXED_COLOR,
-                          whiteSpace: "nowrap",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 5,
+                          minWidth: 0,
                         }}
                       >
-                        {bin}
-                      </span>
-                    </div>
-                  ))}
+                        <div
+                          style={{
+                            width: 12,
+                            height: 12,
+                            borderRadius: 2,
+                            backgroundColor: paramCellBins.binColors[bin] ?? MIXED_COLOR,
+                            opacity: 0.7,
+                            flexShrink: 0,
+                          }}
+                        />
+                        <span
+                          style={{
+                            fontSize: 13,
+                            fontWeight: 600,
+                            color: paramCellBins.binColors[bin] ?? MIXED_COLOR,
+                            whiteSpace: "nowrap",
+                            overflow: isNumeric ? "visible" : "hidden",
+                            textOverflow: isNumeric ? "clip" : "ellipsis",
+                          }}
+                          title={bin}
+                        >
+                          {bin}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
           </div>
         )}
 

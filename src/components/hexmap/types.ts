@@ -26,6 +26,10 @@ export interface HexMapProps {
   onCartToggle?: (clusterId: number) => void;
   onCartDataUpdate?: (data: CartData | null) => void;
   onParamSeparability?: (map: Record<string, number>) => void;
+  /** Externally-driven hover (e.g., from CartPanel) — highlights matching hex stroke. */
+  externalHoveredClusterId?: number | null;
+  /** Fires when a hex is hovered/unhovered so external panels can highlight in sync. */
+  onHoverChange?: (clusterId: number | null) => void;
 }
 
 export interface CartData {

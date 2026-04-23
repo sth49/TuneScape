@@ -4,7 +4,6 @@ import { HexMap } from "./components/hexmap";
 import { CartPanel } from "./components/hexmap/CartPanel";
 import type { CartData } from "./components/hexmap/types";
 import { ParameterPanel } from "./components/ParameterPanel";
-import { TunerSummary } from "./components/TunerSummary";
 import { TUNER_NAMES, type TunerType } from "./utils/hexMapUtils";
 import "./App.css";
 
@@ -19,6 +18,7 @@ function App() {
   const [cartIds, setCartIds] = useState<Set<number>>(() => new Set());
   const [cartData, setCartData] = useState<CartData | null>(null);
   const [paramSeparability, setParamSeparability] = useState<Record<string, number>>({});
+  const [hoveredClusterId, setHoveredClusterId] = useState<number | null>(null);
 
   const handleParamSelect = useCallback((param: string | null) => {
     setSelectedParam(param);
@@ -94,14 +94,6 @@ function App() {
       <main className="flex-1 overflow-hidden">
         <div className="flex flex-row h-full w-full">
           <div className="w-[20%] min-w-[240px] flex flex-col h-full overflow-hidden">
-            <div className="flex-shrink-0 py-2">
-              <TunerSummary
-                program={mapProgram}
-                selectedTuners={selectedTuners}
-                onToggleTuner={handleToggleTuner}
-                onSetAllTuners={setSelectedTuners}
-              />
-            </div>
             <div className="flex-1 min-h-0">
               <ParameterPanel
                 program={mapProgram}
@@ -125,17 +117,21 @@ function App() {
               onCartToggle={handleCartToggle}
               onCartDataUpdate={setCartData}
               onParamSeparability={setParamSeparability}
+              externalHoveredClusterId={hoveredClusterId}
+              onHoverChange={setHoveredClusterId}
             />
           </div>
           <div className="mx-1 my-2 border-l border-gray-200" />
 
-          <div className="w-[20%] min-w-[260px] flex flex-col h-full overflow-y-auto">
+          <div className="w-[20%] min-w-[260px] flex flex-col h-full overflow-hidden">
             <CartPanel
               cartIds={cartIds}
               cartData={cartData}
               selectedTuners={selectedTuners}
               onRemove={handleCartToggle}
               onClear={handleClearCart}
+              hoveredClusterId={hoveredClusterId}
+              onHoverChange={setHoveredClusterId}
             />
           </div>
         </div>

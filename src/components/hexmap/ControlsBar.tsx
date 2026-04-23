@@ -1,5 +1,11 @@
 import React from "react";
 import type { ColorMode } from "./types";
+import { TUNER_DISPLAY_NAMES } from "./types";
+import {
+  TUNER_COLORS,
+  TUNER_NAMES,
+  type TunerType,
+} from "../../utils/hexMapUtils";
 
 // ============================================================
 // Mode tabs — paper-aligned: T1 + T2 + T3
@@ -20,10 +26,8 @@ export interface ControlsBarProps {
   setColorMode: (v: ColorMode) => void;
   effectiveColorMode: ColorMode;
 
-  coverageMetric: "mean" | "min" | "max" | "marginal" | "cumulative";
-  setCoverageMetric: (
-    v: "mean" | "min" | "max" | "marginal" | "cumulative",
-  ) => void;
+  coverageMetric: "mean" | "cumulative";
+  setCoverageMetric: (v: "mean" | "cumulative") => void;
 
   selectedParam: string | null;
   onParamSelect: (param: string | null) => void;
@@ -35,6 +39,9 @@ export interface ControlsBarProps {
     anchorBranchCount: number;
   } | null;
   cartSize: number;
+
+  selectedTuners: Set<TunerType>;
+  onToggleTuner: (tuner: TunerType) => void;
 }
 
 // ============================================================
@@ -52,13 +59,15 @@ export function ControlsBar({
   paramList,
   t3Scores,
   cartSize,
+  selectedTuners,
+  onToggleTuner,
 }: ControlsBarProps) {
   return (
     <div
       style={{
         borderBottom: "1px solid #E5E7EB",
         background: "#FAFBFC",
-        fontSize: 11,
+        fontSize: 13,
       }}
     >
       <div
@@ -71,6 +80,42 @@ export function ControlsBar({
           paddingLeft: 8,
         }}
       >
+        {/* Tuner toggles */}
+        <div style={{ display: "flex", gap: 3 }}>
+          {TUNER_NAMES.map((t) => {
+            const isOn = selectedTuners.has(t);
+            const isLast = isOn && selectedTuners.size === 1;
+            const color = TUNER_COLORS[t];
+            return (
+              <button
+                key={t}
+                onClick={() => {
+                  if (isLast) return;
+                  onToggleTuner(t);
+                }}
+                title={isLast ? `${t} (at least one must stay on)` : t}
+                style={{
+                  padding: "3px 7px",
+                  fontSize: 13,
+                  fontWeight: 700,
+                  lineHeight: 1.4,
+                  color: isOn ? "#fff" : "#9CA3AF",
+                  background: isOn ? color : "#F1F5F9",
+                  border: `1px solid ${isOn ? color : "#E5E7EB"}`,
+                  borderRadius: 4,
+                  cursor: isLast ? "not-allowed" : "pointer",
+                  opacity: isLast ? 0.85 : 1,
+                  transition: "all 0.12s ease",
+                }}
+              >
+                {TUNER_DISPLAY_NAMES[t]}
+              </button>
+            );
+          })}
+        </div>
+
+        <Divider />
+
         {/* Mode tabs */}
         {MODE_TABS.map(({ mode, label }) => {
           const isActive = colorMode === mode;
@@ -80,7 +125,7 @@ export function ControlsBar({
               onClick={() => setColorMode(mode)}
               style={{
                 padding: "6px 8px",
-                fontSize: 11,
+                fontSize: 13,
                 fontWeight: isActive ? 700 : 500,
                 color: isActive ? "#4F46E5" : "#6B7280",
                 background: "transparent",
@@ -105,7 +150,7 @@ export function ControlsBar({
         {/* Tuner×Coverage: coverage metric selector */}
         {effectiveColorMode === "tuner-perf" && (
           <div style={{ display: "flex", gap: 2 }}>
-            {(["mean", "min", "max", "marginal", "cumulative"] as const).map(
+            {(["mean", "cumulative"] as const).map(
               (m) => {
                 const isActive = coverageMetric === m;
                 return (
@@ -114,7 +159,7 @@ export function ControlsBar({
                     onClick={() => setCoverageMetric(m)}
                     style={{
                       padding: "3px 6px",
-                      fontSize: 11,
+                      fontSize: 13,
                       border: "1px solid",
                       borderColor: isActive ? "#4F46E5" : "#E5E7EB",
                       borderRadius: 3,
@@ -140,7 +185,7 @@ export function ControlsBar({
                 value={selectedParam ?? ""}
                 onChange={(e) => onParamSelect(e.target.value || null)}
                 style={{
-                  fontSize: 11,
+                  fontSize: 13,
                   padding: "3px 6px",
                   borderRadius: 4,
                   border: "1px solid #4F46E5",
@@ -158,7 +203,7 @@ export function ControlsBar({
                 ))}
               </select>
             ) : (
-              <span style={{ fontSize: 8, color: "#F59E0B", fontWeight: 600 }}>
+              <span style={{ fontSize: 10, color: "#F59E0B", fontWeight: 600 }}>
                 ← Select a parameter
               </span>
             )}
@@ -169,7 +214,7 @@ export function ControlsBar({
         {effectiveColorMode === "complementary" && (
           <>
             {cartSize === 0 ? (
-              <span style={{ fontSize: 11, color: "#64748B", fontWeight: 500 }}>
+              <span style={{ fontSize: 13, color: "#64748B", fontWeight: 500 }}>
                 Shift+click cells to build the working set
               </span>
             ) : t3Scores ? (
@@ -178,15 +223,15 @@ export function ControlsBar({
                   display: "flex",
                   alignItems: "center",
                   gap: 6,
-                  fontSize: 11,
+                  fontSize: 13,
                 }}
               >
                 <span style={{ color: "#4F46E5", fontWeight: 600 }}>
-                  Working set: {t3Scores.anchorBranchCount} branches
+                  Working set: {t3Scores.anchorBranchCount.toLocaleString()} branches
                 </span>
                 <span style={{ color: "#64748B" }}>·</span>
                 <span style={{ color: "#10B981", fontWeight: 500 }}>
-                  Best +{t3Scores.maxScore} new
+                  Best +{t3Scores.maxScore.toLocaleString()} new
                 </span>
               </div>
             ) : null}
