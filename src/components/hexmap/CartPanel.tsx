@@ -341,6 +341,7 @@ export function CartPanel({
             }}
           >
             {cartData?.clusters.map((c) => {
+              const info = cartData.addInfo.get(c.id);
               const filteredCounts = Object.fromEntries(
                 TUNER_NAMES.filter((t) => selectedTuners.has(t)).map((t) => [
                   t,
@@ -352,7 +353,7 @@ export function CartPanel({
                 selectedTuners.has(t),
               ).reduce((s, t) => s + c.tunerCounts[t], 0);
 
-              // Mean branches per trial (ratio → count)
+              // Mean branches per trial (absolute count)
               const filteredTrials = c.trials.filter((t) =>
                 selectedTuners.has(t.tuner),
               );
@@ -361,7 +362,7 @@ export function CartPanel({
                   ? filteredTrials.reduce((s, t) => s + t.coverage, 0) /
                     filteredTrials.length
                   : 0;
-              const meanBranches = Math.round(meanCov * totalUniqueBranches);
+              const meanBranches = Math.round(meanCov);
 
               // Cumulative branch count (union across trials in this cell)
               const cumBranches = c.coveredBranches.length;
@@ -393,7 +394,7 @@ export function CartPanel({
                     transition: "background 0.1s, border-color 0.1s, box-shadow 0.1s",
                   }}
                 >
-                  {/* Header: dominant badge + ID + trials + remove */}
+                  {/* Header: order + dominant badge + ID + trials + remove */}
                   <div
                     style={{
                       display: "flex",
@@ -402,6 +403,26 @@ export function CartPanel({
                       marginBottom: 3,
                     }}
                   >
+                    {info && (
+                      <span
+                        title={`Added ${info.order === 1 ? "1st" : info.order === 2 ? "2nd" : info.order === 3 ? "3rd" : `${info.order}th`}`}
+                        style={{
+                          width: 18,
+                          height: 18,
+                          borderRadius: "50%",
+                          background: "#EEF2FF",
+                          color: "#4F46E5",
+                          fontSize: 11,
+                          fontWeight: 700,
+                          display: "inline-flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          flexShrink: 0,
+                        }}
+                      >
+                        {info.order}
+                      </span>
+                    )}
                     <span
                       style={{
                         background: TUNER_COLORS[dominant],
@@ -445,12 +466,18 @@ export function CartPanel({
                     </button>
                   </div>
 
-                  {/* Coverage (branches) */}
+                  {/* Coverage (branches) + new contribution at add-time */}
                   <div
                     style={{ fontSize: 12, color: "#64748B", marginBottom: 4 }}
                   >
                     mean {meanBranches.toLocaleString()} · cum{" "}
                     {cumBranches.toLocaleString()} branches
+                    {info && (
+                      <span style={{ color: "#10B981", fontWeight: 600 }}>
+                        {" · +"}
+                        {info.added.toLocaleString()} new
+                      </span>
+                    )}
                   </div>
 
                   {/* Stacked tuner bar */}

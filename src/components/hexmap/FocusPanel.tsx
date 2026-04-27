@@ -8,7 +8,6 @@ export interface FocusPanelProps {
   globalCovRange: { min: number; max: number; mean: number };
   selectedTuners: Set<TunerType>;
   inspectedCluster: Cluster | null;
-  totalUniqueBranches: number;
   setInspectedClusterId: (v: number | null) => void;
   setFocusedTerritoryId: (v: number | null) => void;
   clusterToQualRegion: Map<number, QualRegion>;
@@ -19,7 +18,6 @@ export function FocusPanel({
   globalCovRange,
   selectedTuners,
   inspectedCluster,
-  totalUniqueBranches,
   setInspectedClusterId,
   setFocusedTerritoryId,
   clusterToQualRegion,
@@ -27,9 +25,7 @@ export function FocusPanel({
   if (!inspectedCluster) return null;
 
   const c = inspectedCluster;
-  const cumCov = totalUniqueBranches > 0
-    ? c.coveredBranches.length / totalUniqueBranches
-    : 0;
+  const cumCov = c.coveredBranches.length;
   const minCov = c.trials.length > 0
     ? Math.min(...c.trials.map((t) => t.coverage))
     : 0;
@@ -94,11 +90,11 @@ export function FocusPanel({
       >
         {[
           { label: "Trials", value: c.totalTrials.toLocaleString() },
-          { label: "Avg Cov", value: c.meanBranchCoverage.toFixed(3), color: "#10B981" },
-          { label: "Cum Cov", value: cumCov.toFixed(3), color: "#059669" },
-          { label: "Min Cov", value: minCov.toFixed(3) },
-          { label: "Max Cov", value: maxCov.toFixed(3) },
-          { label: "Marginal", value: c.meanMarginalCoverage.toFixed(4) },
+          { label: "Avg Cov", value: Math.round(c.meanBranchCoverage).toLocaleString(), color: "#10B981" },
+          { label: "Cum Cov", value: Math.round(cumCov).toLocaleString(), color: "#059669" },
+          { label: "Min Cov", value: Math.round(minCov).toLocaleString() },
+          { label: "Max Cov", value: Math.round(maxCov).toLocaleString() },
+          { label: "Marginal", value: c.meanMarginalCoverage.toFixed(2) },
         ].map(({ label, value, color }) => (
           <div
             key={label}
@@ -140,11 +136,11 @@ export function FocusPanel({
                 marginBottom: 2,
               }}
             >
-              <span>{gMin.toFixed(3)}</span>
+              <span>{Math.round(gMin).toLocaleString()}</span>
               <span style={{ fontSize: 8, color: "#64748B" }}>
                 Coverage Range
               </span>
-              <span>{gMax.toFixed(3)}</span>
+              <span>{Math.round(gMax).toLocaleString()}</span>
             </div>
             <div
               style={{

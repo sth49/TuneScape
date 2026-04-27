@@ -47,16 +47,15 @@ export function HexTooltip({
     selectedTuners.has(t),
   ).reduce((s, t) => s + cluster.tunerCounts[t], 0);
 
-  // Mean coverage %
+  // Mean branches per trial (absolute count)
   const filteredTrials = cluster.trials.filter((t) => selectedTuners.has(t.tuner));
   const meanCov = filteredTrials.length > 0
     ? filteredTrials.reduce((s, t) => s + t.coverage, 0) / filteredTrials.length
     : 0;
-  const meanPct = (meanCov * 100).toFixed(1);
+  const meanLabel = Math.round(meanCov).toLocaleString();
 
-  // Cumulative coverage %
-  const tub = data.totalUniqueBranches || 1;
-  const cumPct = ((cluster.coveredBranches.length / tub) * 100).toFixed(1);
+  // Cumulative branches (union)
+  const cumLabel = cluster.coveredBranches.length.toLocaleString();
 
   // Top tuner (by trial count among selected)
   let topTuner: TunerType = TUNER_NAMES[0];
@@ -98,7 +97,7 @@ export function HexTooltip({
       </div>
       {/* Line 2: Coverage */}
       <div style={{ color: "#CBD5E1", marginBottom: 2 }}>
-        Coverage: mean {meanPct}%, cum {cumPct}%
+        Coverage: mean {meanLabel}, cum {cumLabel}
       </div>
       {/* Line 3: Top tuner */}
       <div

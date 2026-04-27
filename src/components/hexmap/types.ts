@@ -25,7 +25,6 @@ export interface HexMapProps {
   cartIds?: Set<number>;
   onCartToggle?: (clusterId: number) => void;
   onCartDataUpdate?: (data: CartData | null) => void;
-  onParamSeparability?: (map: Record<string, number>) => void;
   /** Externally-driven hover (e.g., from CartPanel) — highlights matching hex stroke. */
   externalHoveredClusterId?: number | null;
   /** Fires when a hex is hovered/unhovered so external panels can highlight in sync. */
@@ -33,7 +32,10 @@ export interface HexMapProps {
 }
 
 export interface CartData {
+  /** Cart members in the order they were added. */
   clusters: import("../../utils/hexMapUtils").Cluster[];
+  /** Per-cluster: 1-based add order and branches newly contributed at that step. */
+  addInfo: Map<number, { order: number; added: number }>;
   unionBranches: Set<number>;
   unionCoverage: number;
   totalUniqueBranches: number;

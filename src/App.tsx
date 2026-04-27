@@ -3,7 +3,6 @@ import { GiHoneycomb } from "react-icons/gi";
 import { HexMap } from "./components/hexmap";
 import { CartPanel } from "./components/hexmap/CartPanel";
 import type { CartData } from "./components/hexmap/types";
-import { ParameterPanel } from "./components/ParameterPanel";
 import { TUNER_NAMES, type TunerType } from "./utils/hexMapUtils";
 import "./App.css";
 
@@ -17,7 +16,6 @@ function App() {
   );
   const [cartIds, setCartIds] = useState<Set<number>>(() => new Set());
   const [cartData, setCartData] = useState<CartData | null>(null);
-  const [paramSeparability, setParamSeparability] = useState<Record<string, number>>({});
   const [hoveredClusterId, setHoveredClusterId] = useState<number | null>(null);
 
   const handleParamSelect = useCallback((param: string | null) => {
@@ -93,19 +91,6 @@ function App() {
       {/* Main content */}
       <main className="flex-1 overflow-hidden">
         <div className="flex flex-row h-full w-full">
-          <div className="w-[20%] min-w-[240px] flex flex-col h-full overflow-hidden">
-            <div className="flex-1 min-h-0">
-              <ParameterPanel
-                program={mapProgram}
-                selectedParam={selectedParam}
-                onParamSelect={handleParamSelect}
-                interactive={selectedParam !== null}
-                separability={paramSeparability}
-              />
-            </div>
-          </div>
-
-          <div className="mx-1 my-2 border-l border-gray-200" />
           <div className="flex-1 min-w-0 h-full">
             <HexMap
               program={mapProgram}
@@ -116,7 +101,6 @@ function App() {
               cartIds={cartIds}
               onCartToggle={handleCartToggle}
               onCartDataUpdate={setCartData}
-              onParamSeparability={setParamSeparability}
               externalHoveredClusterId={hoveredClusterId}
               onHoverChange={setHoveredClusterId}
             />

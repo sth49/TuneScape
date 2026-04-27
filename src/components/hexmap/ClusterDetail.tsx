@@ -15,7 +15,7 @@ export function ClusterDetail({ info }: ClusterDetailProps) {
     );
   }
 
-  const { cluster: c, totalUniqueBranches, selectedTuners } = info;
+  const { cluster: c, selectedTuners } = info;
 
   // Filter trials by selected tuners
   const trials = c.trials.filter((t) => selectedTuners.has(t.tuner));
@@ -34,20 +34,18 @@ export function ClusterDetail({ info }: ClusterDetailProps) {
   const maxCov = Math.max(...trials.map((t) => t.coverage));
   const avgMarginal = trials.reduce((s, t) => s + t.marginalCoverage, 0) / trialCount;
 
-  // Cumulative: union of branches from selected tuners' trials
+  // Cumulative: union of branches from selected tuners' trials (absolute count)
   const hasTrialBranches = trials.some((t) => t.coveredBranches && t.coveredBranches.length > 0);
   let cumCov = 0;
-  if (totalUniqueBranches > 0) {
-    if (hasTrialBranches) {
-      const branchSet = new Set<number>();
-      for (const t of trials) {
-        for (const b of (t.coveredBranches ?? [])) branchSet.add(b);
-      }
-      cumCov = branchSet.size / totalUniqueBranches;
-    } else {
-      // Fallback: cluster-level coveredBranches (not filtered by tuner)
-      cumCov = c.coveredBranches.length / totalUniqueBranches;
+  if (hasTrialBranches) {
+    const branchSet = new Set<number>();
+    for (const t of trials) {
+      for (const b of (t.coveredBranches ?? [])) branchSet.add(b);
     }
+    cumCov = branchSet.size;
+  } else {
+    // Fallback: cluster-level coveredBranches (not filtered by tuner)
+    cumCov = c.coveredBranches.length;
   }
 
   // Tuner counts from filtered trials
@@ -92,11 +90,11 @@ export function ClusterDetail({ info }: ClusterDetailProps) {
       >
         {[
           { label: "Trials", value: trialCount.toLocaleString() },
-          { label: "Avg Cov", value: avgCov.toFixed(3), color: "#10B981" },
-          { label: "Cum Cov", value: cumCov.toFixed(3), color: "#059669" },
-          { label: "Min Cov", value: minCov.toFixed(3) },
-          { label: "Max Cov", value: maxCov.toFixed(3) },
-          { label: "Marginal", value: avgMarginal.toFixed(4) },
+          { label: "Avg Cov", value: Math.round(avgCov).toLocaleString(), color: "#10B981" },
+          { label: "Cum Cov", value: Math.round(cumCov).toLocaleString(), color: "#059669" },
+          { label: "Min Cov", value: Math.round(minCov).toLocaleString() },
+          { label: "Max Cov", value: Math.round(maxCov).toLocaleString() },
+          { label: "Marginal", value: avgMarginal.toFixed(2) },
         ].map(({ label, value, color }) => (
           <div
             key={label}

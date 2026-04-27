@@ -1938,14 +1938,10 @@ export function processHexMapData(
         id: trial.trialId,
         tuner,
         parameters: trial.parameters as Record<string, string | boolean | number>,
-        coverage:
-          data.totalUniqueBranches > 0
-            ? trial.cumulativeCoverage / data.totalUniqueBranches
-            : 0,
-        marginalCoverage:
-          data.totalUniqueBranches > 0
-            ? trial.marginalCoverage / data.totalUniqueBranches
-            : 0,
+        // Per-trial branch count (size of this trial's coveredBranches set).
+        // NOT cumulativeCoverage — that's the running optimization-run total.
+        coverage: trial.coveredBranches?.length ?? 0,
+        marginalCoverage: trial.marginalCoverage,
         coveredBranches: trial.coveredBranches ?? [],
       });
     }
@@ -2063,6 +2059,7 @@ export function processHexMapData(
  * Trials are shared across all levels to save memory.
  */
 export function deserializePrecomputed(json: any): HexMapData[] {
+  // Precomputed JSON stores coverage as absolute branch counts (per-trial / cluster aggregates).
   const allTrials: Trial[] = json.trials;
 
   function deserializeLevel(levelJson: any): HexMapData {
