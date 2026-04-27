@@ -12,7 +12,7 @@ import {
 // ============================================================
 
 const MODE_TABS: { mode: ColorMode; label: string }[] = [
-  { mode: "tuner-perf", label: "Overview" },
+  { mode: "tuner-perf", label: "Tuner" },
   { mode: "tuner-param", label: "Parameter" },
   { mode: "complementary", label: "Complementary" },
 ];
@@ -50,7 +50,7 @@ export interface ControlsBarProps {
 
   selectedTuners: Set<TunerType>;
   onToggleTuner: (tuner: TunerType) => void;
-  /** Hovered tuner — used in Overview mode to highlight that tuner's cells. */
+  /** Hovered tuner — used in Tuner mode to highlight that tuner's cells. */
   onHoverTuner?: (tuner: TunerType | null) => void;
   /** Pinned tuners (up to 2). Second pin renders cells as hatch pattern. */
   pinnedTuners?: TunerType[];

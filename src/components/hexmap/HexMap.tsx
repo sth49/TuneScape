@@ -22,26 +22,34 @@ import {
   TUNER_NAMES,
 } from "../../utils/hexMapUtils";
 import type { HexMapData, HexTile, TunerType, Cluster } from "./types";
-import type {
-  ColorMode,
-  HexMapProps,
-} from "./types";
-import {
-  HEX_SIZE_DEFAULT,
-  MIXED_COLOR,
-  TUNER_DISPLAY_NAMES,
-} from "./types";
+import type { ColorMode, HexMapProps } from "./types";
+import { HEX_SIZE_DEFAULT, MIXED_COLOR, TUNER_DISPLAY_NAMES } from "./types";
 import { getParamType } from "./colorUtils";
 import { ControlsBar } from "./ControlsBar";
 import { HexTooltip } from "./HexTooltip";
 
-
 // Tableau20 — up to 20 visually distinct colors for categorical params
 const CAT_PALETTE = [
-  "#4E79A7", "#F28E2B", "#E15759", "#76B7B2", "#59A14F",
-  "#EDC948", "#B07AA1", "#FF9DA7", "#9C755F", "#BAB0AC",
-  "#AF7AA1", "#86BCB6", "#D37295", "#FABFD2", "#B6992D",
-  "#499894", "#E17C05", "#D4A6C8", "#8CD17D", "#F1CE63",
+  "#4E79A7",
+  "#F28E2B",
+  "#E15759",
+  "#76B7B2",
+  "#59A14F",
+  "#EDC948",
+  "#B07AA1",
+  "#FF9DA7",
+  "#9C755F",
+  "#BAB0AC",
+  "#AF7AA1",
+  "#86BCB6",
+  "#D37295",
+  "#FABFD2",
+  "#B6992D",
+  "#499894",
+  "#E17C05",
+  "#D4A6C8",
+  "#8CD17D",
+  "#F1CE63",
 ];
 
 // ============================================================
@@ -87,13 +95,21 @@ export function HexMap({
 
   const [colorMode, setColorMode] = useState<ColorMode>("tuner-perf");
   const [previewColorMode] = useState<ColorMode | null>(null);
-  const [coverageMetric, setCoverageMetric] = useState<"mean" | "cumulative">("cumulative");
+  // Figure-capture legend toggle (Tuner mode only). Default hidden so the
+  // map stays uncluttered until the user clicks the corner button.
+  const [figureLegendVisible, setFigureLegendVisible] = useState(false);
+  // Master toggle for ALL legend cards — used when capturing teaser figures
+  // where the legends would clutter the screenshot.
+  const [legendsVisible, setLegendsVisible] = useState(true);
+  const [coverageMetric, setCoverageMetric] = useState<"mean" | "cumulative">(
+    "cumulative",
+  );
   // hover: drives tooltip
   const [hoveredClusterId, setHoveredClusterId] = useState<number | null>(null);
   // Hovering a label highlights its region without picking a specific cell —
   // separate from cell-hover so the cart button / black stroke don't appear.
   const [hoveredLabelIdx, setHoveredLabelIdx] = useState<number | null>(null);
-  // Hovered tuner from ControlsBar — in Overview mode this highlights cells
+  // Hovered tuner from ControlsBar — in Tuner mode this highlights cells
   // dominated by that tuner with its color and washes the rest with MIXED.
   const [hoveredTuner, setHoveredTuner] = useState<TunerType | null>(null);
   // Pinned tuners (up to 2). First pin = solid color, second = hatch pattern.
@@ -106,7 +122,8 @@ export function HexMap({
     });
   }, []);
   // Hover preview takes precedence over pins.
-  const activeTuner = hoveredTuner ?? (pinnedTuners.length === 1 ? pinnedTuners[0] : null);
+  const activeTuner =
+    hoveredTuner ?? (pinnedTuners.length === 1 ? pinnedTuners[0] : null);
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(
     null,
   );
@@ -172,24 +189,23 @@ export function HexMap({
         setParamImportanceList(list);
       })
       .catch(() => {});
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [program]);
 
   // Auto-select top param when switching to tuner-param with no param selected
   const onParamSelectRef = useRef(setSelectedParam);
   onParamSelectRef.current = setSelectedParam;
 
-  const wrappedSetColorMode = useCallback(
-    (mode: ColorMode) => {
-      // Clear param selection when leaving tuner-param so default top-5
-      // contrastive regions show again on next entry.
-      if (mode !== "tuner-param") {
-        onParamSelectRef.current(null);
-      }
-      setColorMode(mode);
-    },
-    [],
-  );
+  const wrappedSetColorMode = useCallback((mode: ColorMode) => {
+    // Clear param selection when leaving tuner-param so default top-5
+    // contrastive regions show again on next entry.
+    if (mode !== "tuner-param") {
+      onParamSelectRef.current(null);
+    }
+    setColorMode(mode);
+  }, []);
 
   // Effective values (preview overrides actual for hover preview)
   const effectiveDetailLevel = detailLevel;
@@ -255,10 +271,6 @@ export function HexMap({
     setHoveredClusterId(null);
   }, [effectiveDetailLevel]);
 
-
-
-
-
   // Extract coverage value from cluster based on selected metric
   const getClusterCov = useCallback(
     (c: Cluster): number => {
@@ -266,15 +278,18 @@ export function HexMap({
       const trials = c.trials.filter((t) => selectedTuners.has(t.tuner));
       if (trials.length === 0) return 0;
 
-      if (coverageMetric === "mean") return trials.reduce((s, t) => s + t.coverage, 0) / trials.length;
+      if (coverageMetric === "mean")
+        return trials.reduce((s, t) => s + t.coverage, 0) / trials.length;
       if (coverageMetric === "cumulative") {
         // Union of branches from selected tuners' trials
         // Per-trial coveredBranches may be stripped in precomputed data; fall back to cluster-level
-        const hasTrialBranches = trials.some((t) => t.coveredBranches && t.coveredBranches.length > 0);
+        const hasTrialBranches = trials.some(
+          (t) => t.coveredBranches && t.coveredBranches.length > 0,
+        );
         if (hasTrialBranches) {
           const branchSet = new Set<number>();
           for (const t of trials) {
-            for (const b of (t.coveredBranches ?? [])) branchSet.add(b);
+            for (const b of t.coveredBranches ?? []) branchSet.add(b);
           }
           return branchSet.size;
         }
@@ -288,7 +303,8 @@ export function HexMap({
 
   // Global coverage range from clusters (used for all coverage displays)
   const globalCovRange = useMemo(() => {
-    if (!data || data.clusters.length === 0) return { min: 0, max: 1, mean: 0.5 };
+    if (!data || data.clusters.length === 0)
+      return { min: 0, max: 1, mean: 0.5 };
     const vals = data.clusters.map(getClusterCov);
     const mean = vals.reduce((s, v) => s + v, 0) / vals.length;
     return { min: Math.min(...vals), max: Math.max(...vals), mean };
@@ -305,22 +321,24 @@ export function HexMap({
     [globalCovRange],
   );
 
-
   // Helper: get the union of branches for selected tuners in a cluster
-  const getFilteredBranches = useCallback((cluster: import("../../utils/hexMapUtils").Cluster): Set<number> => {
-    const result = new Set<number>();
-    if (cluster.tunerCoveredBranches) {
-      for (const t of TUNER_NAMES) {
-        if (!selectedTuners.has(t)) continue;
-        const branches = cluster.tunerCoveredBranches[t];
-        if (branches) for (const b of branches) result.add(b);
+  const getFilteredBranches = useCallback(
+    (cluster: import("../../utils/hexMapUtils").Cluster): Set<number> => {
+      const result = new Set<number>();
+      if (cluster.tunerCoveredBranches) {
+        for (const t of TUNER_NAMES) {
+          if (!selectedTuners.has(t)) continue;
+          const branches = cluster.tunerCoveredBranches[t];
+          if (branches) for (const b of branches) result.add(b);
+        }
+      } else {
+        // Fallback: use full coveredBranches if tunerCoveredBranches not available
+        for (const b of cluster.coveredBranches) result.add(b);
       }
-    } else {
-      // Fallback: use full coveredBranches if tunerCoveredBranches not available
-      for (const b of cluster.coveredBranches) result.add(b);
-    }
-    return result;
-  }, [selectedTuners]);
+      return result;
+    },
+    [selectedTuners],
+  );
 
   // T3: complementarity scores — cart union if non-empty, else single anchor
   const t3Scores = useMemo(() => {
@@ -341,7 +359,10 @@ export function HexMap({
     const scores = new Map<number, number>();
     let maxScore = 0;
     for (const c of data.clusters) {
-      if (refIds.has(c.id)) { scores.set(c.id, 0); continue; }
+      if (refIds.has(c.id)) {
+        scores.set(c.id, 0);
+        continue;
+      }
       const cBranches = getFilteredBranches(c);
       let newCount = 0;
       for (const b of cBranches) {
@@ -432,138 +453,164 @@ export function HexMap({
       // to the requested param name in this scope.
       const selectedParam = pname;
 
-    const bins = new Map<number, string>();
+      const bins = new Map<number, string>();
 
-    // Per-cluster trials restricted to the currently-selected tuners.
-    const filteredTrialsByCluster = new Map<number, typeof data.clusters[0]["trials"]>();
-    for (const c of data.clusters) {
-      filteredTrialsByCluster.set(
-        c.id,
-        c.trials.filter((t) => selectedTuners.has(t.tuner)),
-      );
-    }
-
-    if (ptype === "numeric") {
-      // Collect all trial-level raw values (across selected tuners) for global range
-      const allTrialVals: number[] = [];
-      const clusterTrialVals = new Map<number, number[]>();
+      // Per-cluster trials restricted to the currently-selected tuners.
+      const filteredTrialsByCluster = new Map<
+        number,
+        (typeof data.clusters)[0]["trials"]
+      >();
       for (const c of data.clusters) {
-        const vals: number[] = [];
-        const trials = filteredTrialsByCluster.get(c.id) ?? [];
-        for (const t of trials) {
-          const v = t.parameters[selectedParam];
-          const n = typeof v === "number" ? v : Number(v) || 0;
-          vals.push(n);
-          allTrialVals.push(n);
-        }
-        vals.sort((a, b) => a - b);
-        clusterTrialVals.set(c.id, vals);
+        filteredTrialsByCluster.set(
+          c.id,
+          c.trials.filter((t) => selectedTuners.has(t.tuner)),
+        );
       }
-      allTrialVals.sort((a, b) => a - b);
 
-      const globalMin = allTrialVals[0] ?? 0;
-      const globalMax = allTrialVals[allTrialVals.length - 1] ?? 1;
-      const globalRange = globalMax - globalMin || 1;
-      const gP33 = allTrialVals[Math.floor(allTrialVals.length / 3)] ?? globalMin;
-      const gP66 = allTrialVals[Math.floor((allTrialVals.length * 2) / 3)] ?? globalMax;
+      if (ptype === "numeric") {
+        // Collect all trial-level raw values (across selected tuners) for global range
+        const allTrialVals: number[] = [];
+        const clusterTrialVals = new Map<number, number[]>();
+        for (const c of data.clusters) {
+          const vals: number[] = [];
+          const trials = filteredTrialsByCluster.get(c.id) ?? [];
+          for (const t of trials) {
+            const v = t.parameters[selectedParam];
+            const n = typeof v === "number" ? v : Number(v) || 0;
+            vals.push(n);
+            allTrialVals.push(n);
+          }
+          vals.sort((a, b) => a - b);
+          clusterTrialVals.set(c.id, vals);
+        }
+        allTrialVals.sort((a, b) => a - b);
 
-      const fmt = (v: number) =>
-        Math.abs(v) >= 1000 ? v.toFixed(0) : v < 0.01 ? v.toFixed(3) : v < 1 ? v.toFixed(2) : v.toFixed(1);
-      const lowLabel = `Low [${fmt(globalMin)}–${fmt(gP33)}]`;
-      const midLabel = `Mid (${fmt(gP33)}–${fmt(gP66)}]`;
-      const highLabel = `High (${fmt(gP66)}–${fmt(globalMax)}]`;
+        const globalMin = allTrialVals[0] ?? 0;
+        const globalMax = allTrialVals[allTrialVals.length - 1] ?? 1;
+        const globalRange = globalMax - globalMin || 1;
+        const gP33 =
+          allTrialVals[Math.floor(allTrialVals.length / 3)] ?? globalMin;
+        const gP66 =
+          allTrialVals[Math.floor((allTrialVals.length * 2) / 3)] ?? globalMax;
+
+        const fmt = (v: number) =>
+          Math.abs(v) >= 1000
+            ? v.toFixed(0)
+            : v < 0.01
+              ? v.toFixed(3)
+              : v < 1
+                ? v.toFixed(2)
+                : v.toFixed(1);
+        const lowLabel = `Low [${fmt(globalMin)}–${fmt(gP33)}]`;
+        const midLabel = `Mid (${fmt(gP33)}–${fmt(gP66)}]`;
+        const highLabel = `High (${fmt(gP66)}–${fmt(globalMax)}]`;
+
+        for (const c of data.clusters) {
+          const vals = clusterTrialVals.get(c.id) ?? [];
+          if (vals.length === 0) {
+            bins.set(c.id, "Mixed");
+            continue;
+          }
+
+          if (vals.length >= 4) {
+            const q1 = vals[Math.floor(vals.length * 0.25)];
+            const q3 = vals[Math.floor(vals.length * 0.75)];
+            const iqr = q3 - q1;
+            if (iqr / globalRange > 0.5) {
+              bins.set(c.id, "Mixed");
+              continue;
+            }
+          }
+
+          const median = vals[Math.floor(vals.length / 2)] ?? 0;
+          if (median <= gP33) bins.set(c.id, lowLabel);
+          else if (median <= gP66) bins.set(c.id, midLabel);
+          else bins.set(c.id, highLabel);
+        }
+        return {
+          bins,
+          binNames: [lowLabel, midLabel, highLabel, "Mixed"],
+          binColors: {
+            [lowLabel]: "#BFDBFE",
+            [midLabel]: "#3B82F6",
+            [highLabel]: "#1E3A8A",
+            Mixed: MIXED_COLOR,
+          },
+        };
+      }
+
+      if (ptype === "boolean") {
+        for (const c of data.clusters) {
+          const trials = filteredTrialsByCluster.get(c.id) ?? [];
+          if (trials.length === 0) {
+            bins.set(c.id, "Mixed");
+            continue;
+          }
+          const trueCount = trials.filter(
+            (t) => t.parameters[selectedParam] === true,
+          ).length;
+          const ratio = trueCount / trials.length;
+          if (ratio > 0.7) bins.set(c.id, "Mostly True");
+          else if (ratio < 0.3) bins.set(c.id, "Mostly False");
+          else bins.set(c.id, "Mixed");
+        }
+        return {
+          bins,
+          binNames: ["Mostly True", "Mixed", "Mostly False"],
+          binColors: {
+            "Mostly True": "#10B981",
+            Mixed: MIXED_COLOR,
+            "Mostly False": "#F59E0B",
+          },
+        };
+      }
+
+      // Categorical: take the category inventory from centroid keys, but compute
+      // the dominant/second ratios from the filtered trials themselves.
+      const prefix = selectedParam + "__";
+      const catKeys = Object.keys(data.clusters[0].centroid)
+        .filter((k) => k.startsWith(prefix))
+        .sort();
+      if (catKeys.length === 0) return null;
+
+      const catValues = catKeys.map((k) => k.slice(prefix.length));
 
       for (const c of data.clusters) {
-        const vals = clusterTrialVals.get(c.id) ?? [];
-        if (vals.length === 0) {
+        const trials = filteredTrialsByCluster.get(c.id) ?? [];
+        if (trials.length === 0) {
           bins.set(c.id, "Mixed");
           continue;
         }
 
-        if (vals.length >= 4) {
-          const q1 = vals[Math.floor(vals.length * 0.25)];
-          const q3 = vals[Math.floor(vals.length * 0.75)];
-          const iqr = q3 - q1;
-          if (iqr / globalRange > 0.5) {
-            bins.set(c.id, "Mixed");
-            continue;
+        const counts = new Map<string, number>();
+        for (const t of trials) {
+          const v = String(t.parameters[selectedParam]);
+          counts.set(v, (counts.get(v) ?? 0) + 1);
+        }
+        let maxVal = -1,
+          secondMax = -1,
+          dominant = "";
+        for (const cat of catValues) {
+          const frac = (counts.get(cat) ?? 0) / trials.length;
+          if (frac > maxVal) {
+            secondMax = maxVal;
+            maxVal = frac;
+            dominant = cat;
+          } else if (frac > secondMax) {
+            secondMax = frac;
           }
         }
-
-        const median = vals[Math.floor(vals.length / 2)] ?? 0;
-        if (median <= gP33) bins.set(c.id, lowLabel);
-        else if (median <= gP66) bins.set(c.id, midLabel);
-        else bins.set(c.id, highLabel);
+        if (maxVal < 0.45 || maxVal - secondMax < 0.15) bins.set(c.id, "Mixed");
+        else bins.set(c.id, dominant);
       }
-      return {
-        bins,
-        binNames: [lowLabel, midLabel, highLabel, "Mixed"],
-        binColors: {
-          [lowLabel]: "#BFDBFE",
-          [midLabel]: "#3B82F6",
-          [highLabel]: "#1E3A8A",
-          Mixed: MIXED_COLOR,
-        },
-      };
-    }
 
-    if (ptype === "boolean") {
-      for (const c of data.clusters) {
-        const trials = filteredTrialsByCluster.get(c.id) ?? [];
-        if (trials.length === 0) { bins.set(c.id, "Mixed"); continue; }
-        const trueCount = trials.filter((t) => t.parameters[selectedParam] === true).length;
-        const ratio = trueCount / trials.length;
-        if (ratio > 0.7) bins.set(c.id, "Mostly True");
-        else if (ratio < 0.3) bins.set(c.id, "Mostly False");
-        else bins.set(c.id, "Mixed");
-      }
-      return {
-        bins,
-        binNames: ["Mostly True", "Mixed", "Mostly False"],
-        binColors: {
-          "Mostly True": "#10B981",
-          Mixed: MIXED_COLOR,
-          "Mostly False": "#F59E0B",
-        },
-      };
-    }
+      const binColors: Record<string, string> = { Mixed: MIXED_COLOR };
+      catValues.forEach((v, i) => {
+        binColors[v] = CAT_PALETTE[i % CAT_PALETTE.length];
+      });
+      const binNames = [...catValues, "Mixed"];
 
-    // Categorical: take the category inventory from centroid keys, but compute
-    // the dominant/second ratios from the filtered trials themselves.
-    const prefix = selectedParam + "__";
-    const catKeys = Object.keys(data.clusters[0].centroid)
-      .filter((k) => k.startsWith(prefix))
-      .sort();
-    if (catKeys.length === 0) return null;
-
-    const catValues = catKeys.map((k) => k.slice(prefix.length));
-
-    for (const c of data.clusters) {
-      const trials = filteredTrialsByCluster.get(c.id) ?? [];
-      if (trials.length === 0) { bins.set(c.id, "Mixed"); continue; }
-
-      const counts = new Map<string, number>();
-      for (const t of trials) {
-        const v = String(t.parameters[selectedParam]);
-        counts.set(v, (counts.get(v) ?? 0) + 1);
-      }
-      let maxVal = -1, secondMax = -1, dominant = "";
-      for (const cat of catValues) {
-        const frac = (counts.get(cat) ?? 0) / trials.length;
-        if (frac > maxVal) { secondMax = maxVal; maxVal = frac; dominant = cat; }
-        else if (frac > secondMax) { secondMax = frac; }
-      }
-      if (maxVal < 0.45 || maxVal - secondMax < 0.15) bins.set(c.id, "Mixed");
-      else bins.set(c.id, dominant);
-    }
-
-    const binColors: Record<string, string> = { Mixed: MIXED_COLOR };
-    catValues.forEach((v, i) => {
-      binColors[v] = CAT_PALETTE[i % CAT_PALETTE.length];
-    });
-    const binNames = [...catValues, "Mixed"];
-
-    return { bins, binNames, binColors };
+      return { bins, binNames, binColors };
     },
     [data, selectedTuners],
   );
@@ -581,7 +628,7 @@ export function HexMap({
 
       switch (effectiveColorMode) {
         case "tuner-perf": {
-          // Overview: color by dominant tuner among selected. Cell colored by
+          // Tuner mode: color by dominant tuner among selected. Cell colored by
           // a tuner's color when that tuner has ≥50% of the cell's selected
           // trials; otherwise MIXED_COLOR.
           // When a tuner is hovered in the toolbar, ONLY cells dominated by
@@ -621,15 +668,36 @@ export function HexMap({
               ? TUNER_COLORS[activeTuner]
               : MIXED_COLOR;
           }
-          return domCount / total >= 0.5
-            ? TUNER_COLORS[domTuner]
-            : MIXED_COLOR;
+          return domCount / total >= 0.5 ? TUNER_COLORS[domTuner] : MIXED_COLOR;
         }
 
         case "tuner-param": {
+          // When a tuner is pinned/hovered, mirror the tuner-perf comparison
+          // fill so the comparison context carries over into param mode.
+          // Region overlays drop their inner wash + use grey shadows below.
+          if (hoveredTuner) {
+            return tile.cluster.tunerCounts[hoveredTuner] > 0
+              ? TUNER_COLORS[hoveredTuner]
+              : MIXED_COLOR;
+          }
+          if (pinnedTuners.length === 2) {
+            const has0 = tile.cluster.tunerCounts[pinnedTuners[0]] > 0;
+            const has1 = tile.cluster.tunerCounts[pinnedTuners[1]] > 0;
+            if (has0 && has1) return "url(#hatch-overlap)";
+            if (has0) return TUNER_COLORS[pinnedTuners[0]];
+            if (has1) return `url(#hatch-${pinnedTuners[1]})`;
+            return MIXED_COLOR;
+          }
+          if (activeTuner) {
+            return tile.cluster.tunerCounts[activeTuner] > 0
+              ? TUNER_COLORS[activeTuner]
+              : MIXED_COLOR;
+          }
           if (!paramCellBins) return "#E2E8F0";
           const bin = paramCellBins.bins.get(tile.cluster.id);
-          return bin ? (paramCellBins.binColors[bin] ?? MIXED_COLOR) : "#E2E8F0";
+          return bin
+            ? (paramCellBins.binColors[bin] ?? MIXED_COLOR)
+            : "#E2E8F0";
         }
 
         case "complementary": {
@@ -667,7 +735,6 @@ export function HexMap({
     ],
     [],
   );
-
 
   const renderScale = scale;
 
@@ -754,25 +821,37 @@ export function HexMap({
           pushText(e, `#${e.cluster.id + 1}`);
         }
       }
-      // Rank non-cart cells by how many new branches they'd add. Use a glyph
-      // distinct from "#N" for ranks 2 and 3 to avoid confusion with ids.
+      // Rank non-cart cells by how many new branches they'd add. All three
+      // ranks share the "No. N" prefix (matching the tooltip / cart panel
+      // ordinal style) and put the gain value in the unit slot so layout
+      // is consistent across positions.
       if (t3Scores && t3Scores.maxScore > 0) {
         const ranked = eligible
           .map((e) => ({ e, s: t3Scores.scores.get(e.cluster.id) ?? 0 }))
           .filter((x) => x.s > 0 && !cartIds.has(x.e.cluster.id))
           .sort((a, b) => b.s - a.s);
-        if (ranked[0]) pushText(ranked[0].e, `+${fmt(ranked[0].s)}`);
-        if (ranked[1]) pushText(ranked[1].e, "No. 2");
-        if (ranked[2]) pushText(ranked[2].e, "No. 3");
+        if (ranked[0])
+          pushText(ranked[0].e, "No. 1", `+${fmt(ranked[0].s)} new`);
+        if (ranked[1])
+          pushText(ranked[1].e, "No. 2", `+${fmt(ranked[1].s)} new`);
+        if (ranked[2])
+          pushText(ranked[2].e, "No. 3", `+${fmt(ranked[2].s)} new`);
       }
     } else {
-      pushText(maxCov, fmt(maxCov.cov));
-      pushText(minCov, fmt(minCov.cov));
+      pushText(maxCov, fmt(maxCov.cov), "branches");
+      pushText(minCov, fmt(minCov.cov), "branches");
       pushText(dense, fmt(dense.tcount), "trials");
       pushText(sparse, fmt(sparse.tcount), "trials");
     }
     return Array.from(byCluster.values());
-  }, [data, selectedTuners, getClusterCov, effectiveColorMode, t3Scores, cartIds]);
+  }, [
+    data,
+    selectedTuners,
+    getClusterCov,
+    effectiveColorMode,
+    t3Scores,
+    cartIds,
+  ]);
 
   // Map clusterId → density tier (low/mid/high) by fixed trial-count buckets:
   //   low  : ≤ 100
@@ -845,7 +924,6 @@ export function HexMap({
     const covP75 = pct(covs, 0.75);
     const tcP25 = pct(tcs, 0.25);
     const tcP75 = pct(tcs, 0.75);
-
 
     const claimed = new Set<string>();
     type RawRegion = {
@@ -953,7 +1031,8 @@ export function HexMap({
       let bestY = cy;
       for (const k of compKeys) {
         const c = cellByKey.get(k)!;
-        const proj = (c.tile.x - dataCenter.x) * dx + (c.tile.y - dataCenter.y) * dy;
+        const proj =
+          (c.tile.x - dataCenter.x) * dx + (c.tile.y - dataCenter.y) * dy;
         if (proj > bestProj) {
           bestProj = proj;
           bestX = c.tile.x;
@@ -1039,8 +1118,10 @@ export function HexMap({
       rawRegions.push(buildRegion(keys, label, color));
     };
 
-    const meanCov = (cs: Cell[]) => cs.reduce((s, c) => s + c.cov, 0) / cs.length;
-    const meanTc = (cs: Cell[]) => cs.reduce((s, c) => s + c.tcount, 0) / cs.length;
+    const meanCov = (cs: Cell[]) =>
+      cs.reduce((s, c) => s + c.cov, 0) / cs.length;
+    const meanTc = (cs: Cell[]) =>
+      cs.reduce((s, c) => s + c.tcount, 0) / cs.length;
 
     if (effectiveColorMode === "tuner-perf") {
       // All coverage-category labels share one neutral color so they read as a
@@ -1138,12 +1219,10 @@ export function HexMap({
             for (const k of bestKeys) claimed.add(k);
             const impStr = importance.toFixed(1);
             rawRegions.push(
-              buildRegion(
-                bestKeys,
-                `${pname} (${impStr}): ${bestBin}`,
-                color,
-                [`${pname} (${impStr})`, bestBin],
-              ),
+              buildRegion(bestKeys, `${pname} (${impStr}): ${bestBin}`, color, [
+                `${pname} (${impStr})`,
+                bestBin,
+              ]),
             );
           }
         }
@@ -1247,9 +1326,12 @@ export function HexMap({
       return v;
     };
     const distSP = (
-      ax: number, ay: number,
-      bx: number, by: number,
-      px: number, py: number,
+      ax: number,
+      ay: number,
+      bx: number,
+      by: number,
+      px: number,
+      py: number,
     ) => {
       const dx = bx - ax;
       const dy = by - ay;
@@ -1259,6 +1341,122 @@ export function HexMap({
       t = Math.max(0, Math.min(1, t));
       return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
     };
+    // Segment-segment intersection (proper crossings, no shared-endpoint hits).
+    const segSegInter = (
+      ax: number,
+      ay: number,
+      bx: number,
+      by: number,
+      cx: number,
+      cy: number,
+      dx: number,
+      dy: number,
+    ) => {
+      const ccw = (
+        px: number,
+        py: number,
+        qx: number,
+        qy: number,
+        rx: number,
+        ry: number,
+      ) => (qx - px) * (ry - py) - (qy - py) * (rx - px);
+      const d1 = ccw(cx, cy, dx, dy, ax, ay);
+      const d2 = ccw(cx, cy, dx, dy, bx, by);
+      const d3 = ccw(ax, ay, bx, by, cx, cy);
+      const d4 = ccw(ax, ay, bx, by, dx, dy);
+      return (
+        ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+        ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))
+      );
+    };
+    // Segment vs axis-aligned rect: intersects if either endpoint is inside,
+    // or the segment crosses any of the 4 rect sides.
+    const segRectInter = (
+      ax: number,
+      ay: number,
+      bx: number,
+      by: number,
+      rx1: number,
+      ry1: number,
+      rx2: number,
+      ry2: number,
+    ) => {
+      const inA = ax >= rx1 && ax <= rx2 && ay >= ry1 && ay <= ry2;
+      const inB = bx >= rx1 && bx <= rx2 && by >= ry1 && by <= ry2;
+      if (inA || inB) return true;
+      return (
+        segSegInter(ax, ay, bx, by, rx1, ry1, rx2, ry1) ||
+        segSegInter(ax, ay, bx, by, rx2, ry1, rx2, ry2) ||
+        segSegInter(ax, ay, bx, by, rx2, ry2, rx1, ry2) ||
+        segSegInter(ax, ay, bx, by, rx1, ry2, rx1, ry1)
+      );
+    };
+    // Build cubic Bezier controls for a single V→label leader curve. Used by
+    // both the Step 3 renderer and the spiralSearch crossing check so they
+    // see the same shape.
+    //   c1: 40% along V→label with a small INWARD perpendicular bow (toward
+    //       region centroid). Reverses the previous outward bow so the
+    //       overall shape is funnel-like, not balloon-like.
+    //   c2: shared with the sibling curve — sits on the midV→label axis, ~18%
+    //       back from label. Both top and bot curves end with the same
+    //       tangent direction so they visually merge into a single thin line
+    //       at the badge connection.
+    const bezCtrls = (
+      vx: number,
+      vy: number, // V (topV or botV)
+      lx: number,
+      ly: number, // label endpoint
+      midX: number,
+      midY: number, // midpoint of topV-botV (== V for sameV)
+      rcx: number,
+      rcy: number, // region centroid (defines INWARD)
+    ) => {
+      const dxV = lx - vx;
+      const dyV = ly - vy;
+      const segLen = Math.hypot(dxV, dyV) || 1;
+      // Perpendicular to V→label, then flip to point TOWARD region centroid.
+      let pdx = -dyV / segLen;
+      let pdy = dxV / segLen;
+      const mx = (vx + lx) / 2;
+      const my = (vy + ly) / 2;
+      if (pdx * (mx - rcx) + pdy * (my - rcy) > 0) {
+        pdx = -pdx;
+        pdy = -pdy;
+      }
+      const c1x = vx + dxV * 0.4 + pdx * segLen * 0.04;
+      const c1y = vy + dyV * 0.4 + pdy * segLen * 0.04;
+      const c2x = lx + (midX - lx) * 0.18;
+      const c2y = ly + (midY - ly) * 0.18;
+      return { c1x, c1y, c2x, c2y };
+    };
+    // Sample a cubic Bezier into N+1 points (polyline approximation).
+    const bezSampleCubic = (
+      p0x: number,
+      p0y: number,
+      p1x: number,
+      p1y: number,
+      p2x: number,
+      p2y: number,
+      p3x: number,
+      p3y: number,
+      N: number,
+    ) => {
+      const pts: { x: number; y: number }[] = [];
+      for (let i = 0; i <= N; i++) {
+        const t = i / N;
+        const u = 1 - t;
+        const u2 = u * u,
+          u3 = u2 * u;
+        const t2 = t * t,
+          t3 = t2 * t;
+        pts.push({
+          x: u3 * p0x + 3 * u2 * t * p1x + 3 * u * t2 * p2x + t3 * p3x,
+          y: u3 * p0y + 3 * u2 * t * p1y + 3 * u * t2 * p2y + t3 * p3y,
+        });
+      }
+      return pts;
+    };
+    const BEZ_N = 6; // sub-segments per leader curve for crossing checks
 
     const cellTilesScreen = data.hexTiles
       .filter((t) => t.cluster)
@@ -1277,16 +1475,27 @@ export function HexMap({
 
     // Rectangle-vs-circle overlap (box centered at cx/cy with halfW/halfH).
     const rectCircleOverlap = (
-      rcx: number, rcy: number, hw: number, hh: number,
-      ccx: number, ccy: number, cr: number,
+      rcx: number,
+      rcy: number,
+      hw: number,
+      hh: number,
+      ccx: number,
+      ccy: number,
+      cr: number,
     ) => {
       const dx = Math.max(Math.abs(ccx - rcx) - hw, 0);
       const dy = Math.max(Math.abs(ccy - rcy) - hh, 0);
       return dx * dx + dy * dy < cr * cr;
     };
     const rectsOverlap = (
-      ax: number, ay: number, aw: number, ah: number,
-      bx: number, by: number, bw: number, bh: number,
+      ax: number,
+      ay: number,
+      aw: number,
+      ah: number,
+      bx: number,
+      by: number,
+      bw: number,
+      bh: number,
       gap: number,
     ) =>
       Math.abs(ax - bx) * 2 < aw + bw + gap * 2 &&
@@ -1305,7 +1514,13 @@ export function HexMap({
     };
     const placedList: Placed[] = [];
 
-    const hitsCell = (sx: number, sy: number, hw: number, hh: number, own: Set<number>) => {
+    const hitsCell = (
+      sx: number,
+      sy: number,
+      hw: number,
+      hh: number,
+      own: Set<number>,
+    ) => {
       for (const t of cellTilesScreen) {
         if (own.has(t.clusterId)) continue;
         if (rectCircleOverlap(sx, sy, hw, hh, t.cx, t.cy, t.r)) return true;
@@ -1316,8 +1531,14 @@ export function HexMap({
       for (const p of placedList) {
         if (
           rectsOverlap(
-            sx, sy, hw * 2, hh * 2,
-            p.sx, p.sy, p.box.w, p.box.h,
+            sx,
+            sy,
+            hw * 2,
+            hh * 2,
+            p.sx,
+            p.sy,
+            p.box.w,
+            p.box.h,
             labelGapPx,
           )
         )
@@ -1342,13 +1563,16 @@ export function HexMap({
     //   placement. Pick the candidate that yields the best bracket — short
     //   crossings, wide angular wrap, clean termination.
     const spiralSearch = (
-      cx: number, cy: number,
-      hw: number, hh: number,
+      cx: number,
+      cy: number,
+      hw: number,
+      hh: number,
       own: Set<number>,
       outwardAngle: number,
       startR: number,
       regionData: RawRegion,
       otherCellsData: { x: number; y: number; rad: number }[],
+      adjacentPlaced: Placed[],
     ) => {
       type Vert = { x: number; y: number; rel: number; clean: boolean };
       type Bracket = {
@@ -1390,8 +1614,10 @@ export function HexMap({
         }
         // Count crossings on the actual chosen segments (precise score).
         const segCrossCount = (
-          ax: number, ay: number,
-          bx: number, by: number,
+          ax: number,
+          ay: number,
+          bx: number,
+          by: number,
         ) => {
           let n = 0;
           for (const oc of otherCellsData) {
@@ -1411,12 +1637,22 @@ export function HexMap({
       const dr = 6;
       const maxR = Math.hypot(svgWidth, height);
 
-      let bestPos: {
+      // Two-pass: 0-crossings is a HARD priority. We track the best 0-cross
+      // candidate AND the best fallback-with-crossings separately. If any
+      // 0-cross slot exists in the entire search, it wins regardless of how
+      // good a crossing slot scores on the other terms.
+      let bestZeroPos: {
         sx: number;
         sy: number;
         bracket: Bracket;
       } | null = null;
-      let bestScore = Infinity;
+      let bestZeroScore = Infinity;
+      let bestAnyPos: {
+        sx: number;
+        sy: number;
+        bracket: Bracket;
+      } | null = null;
+      let bestAnyScore = Infinity;
       let outOfBounds: { sx: number; sy: number } | null = null;
 
       for (let r = startR; r < maxR; r += dr) {
@@ -1439,6 +1675,215 @@ export function HexMap({
           const lx = (sx - sCenterX) / (scale || 1) + dataCenter.x;
           const ly = (sy - sCenterY) / (scale || 1) + dataCenter.y;
           const bracket = evalBracket(lx, ly);
+          const sameV =
+            Math.abs(bracket.topV.x - bracket.botV.x) < 0.5 &&
+            Math.abs(bracket.topV.y - bracket.botV.y) < 0.5;
+          // Build the actual rendered cubic Bezier as a polyline (data coords)
+          // for crossing checks. midV is the midpoint of the topV-botV pair
+          // (== topV when sameV) — fed to bezCtrls so both top and bot curves
+          // share their c2 endpoint axis (funnel convergence at label).
+          const midX = sameV
+            ? bracket.topV.x
+            : (bracket.topV.x + bracket.botV.x) / 2;
+          const midY = sameV
+            ? bracket.topV.y
+            : (bracket.topV.y + bracket.botV.y) / 2;
+          const cTop = bezCtrls(
+            bracket.topV.x,
+            bracket.topV.y,
+            lx,
+            ly,
+            midX,
+            midY,
+            regionData.cx,
+            regionData.cy,
+          );
+          const topPoly = bezSampleCubic(
+            bracket.topV.x,
+            bracket.topV.y,
+            cTop.c1x,
+            cTop.c1y,
+            cTop.c2x,
+            cTop.c2y,
+            lx,
+            ly,
+            BEZ_N,
+          );
+          let botPoly: { x: number; y: number }[] | null = null;
+          if (!sameV) {
+            const cBot = bezCtrls(
+              bracket.botV.x,
+              bracket.botV.y,
+              lx,
+              ly,
+              midX,
+              midY,
+              regionData.cx,
+              regionData.cy,
+            );
+            botPoly = bezSampleCubic(
+              bracket.botV.x,
+              bracket.botV.y,
+              cBot.c1x,
+              cBot.c1y,
+              cBot.c2x,
+              cBot.c2y,
+              lx,
+              ly,
+              BEZ_N,
+            );
+          }
+          // Region cell crossings via polyline (count each crossed cell once).
+          let regionCrossings = 0;
+          for (const oc of otherCellsData) {
+            let hit = false;
+            for (let i = 0; i < topPoly.length - 1; i++) {
+              if (
+                distSP(
+                  topPoly[i].x,
+                  topPoly[i].y,
+                  topPoly[i + 1].x,
+                  topPoly[i + 1].y,
+                  oc.x,
+                  oc.y,
+                ) < oc.rad
+              ) {
+                hit = true;
+                break;
+              }
+            }
+            if (!hit && botPoly) {
+              for (let i = 0; i < botPoly.length - 1; i++) {
+                if (
+                  distSP(
+                    botPoly[i].x,
+                    botPoly[i].y,
+                    botPoly[i + 1].x,
+                    botPoly[i + 1].y,
+                    oc.x,
+                    oc.y,
+                  ) < oc.rad
+                ) {
+                  hit = true;
+                  break;
+                }
+              }
+            }
+            if (hit) regionCrossings++;
+          }
+          // Project polylines to screen coords once for label-rect / placed-
+          // leader-segment checks (which are tracked in screen space).
+          const toScreen = (p: { x: number; y: number }) => ({
+            x: (p.x - dataCenter.x) * scale + sCenterX,
+            y: (p.y - dataCenter.y) * scale + sCenterY,
+          });
+          const topPolyS = topPoly.map(toScreen);
+          const botPolyS = botPoly ? botPoly.map(toScreen) : null;
+          let labelCrossings = 0;
+          let leaderCrossings = 0;
+          for (const ap of placedList) {
+            const rx1 = ap.sx - ap.box.w / 2 + 1;
+            const ry1 = ap.sy - ap.box.h / 2 + 1;
+            const rx2 = ap.sx + ap.box.w / 2 - 1;
+            const ry2 = ap.sy + ap.box.h / 2 - 1;
+            // Polyline vs placed label rect.
+            let labHit = false;
+            for (let i = 0; i < topPolyS.length - 1; i++) {
+              if (
+                segRectInter(
+                  topPolyS[i].x,
+                  topPolyS[i].y,
+                  topPolyS[i + 1].x,
+                  topPolyS[i + 1].y,
+                  rx1,
+                  ry1,
+                  rx2,
+                  ry2,
+                )
+              ) {
+                labHit = true;
+                break;
+              }
+            }
+            if (!labHit && botPolyS) {
+              for (let i = 0; i < botPolyS.length - 1; i++) {
+                if (
+                  segRectInter(
+                    botPolyS[i].x,
+                    botPolyS[i].y,
+                    botPolyS[i + 1].x,
+                    botPolyS[i + 1].y,
+                    rx1,
+                    ry1,
+                    rx2,
+                    ry2,
+                  )
+                ) {
+                  labHit = true;
+                  break;
+                }
+              }
+            }
+            if (labHit) labelCrossings++;
+            // Polyline vs placed leader (straight-line approximation of theirs).
+            if (ap.topV && ap.botV) {
+              const apTvSx = (ap.topV.x - dataCenter.x) * scale + sCenterX;
+              const apTvSy = (ap.topV.y - dataCenter.y) * scale + sCenterY;
+              const apBvSx = (ap.botV.x - dataCenter.x) * scale + sCenterX;
+              const apBvSy = (ap.botV.y - dataCenter.y) * scale + sCenterY;
+              const apSameV =
+                Math.abs(ap.topV.x - ap.botV.x) < 0.5 &&
+                Math.abs(ap.topV.y - ap.botV.y) < 0.5;
+              const theirSegs: [number, number, number, number][] = [
+                [apTvSx, apTvSy, ap.sx, ap.sy],
+              ];
+              if (!apSameV) theirSegs.push([apBvSx, apBvSy, ap.sx, ap.sy]);
+              let leadHit = false;
+              for (const [ax, ay, bx, by] of theirSegs) {
+                for (let i = 0; i < topPolyS.length - 1; i++) {
+                  if (
+                    segSegInter(
+                      topPolyS[i].x,
+                      topPolyS[i].y,
+                      topPolyS[i + 1].x,
+                      topPolyS[i + 1].y,
+                      ax,
+                      ay,
+                      bx,
+                      by,
+                    )
+                  ) {
+                    leadHit = true;
+                    break;
+                  }
+                }
+                if (leadHit) break;
+                if (botPolyS) {
+                  for (let i = 0; i < botPolyS.length - 1; i++) {
+                    if (
+                      segSegInter(
+                        botPolyS[i].x,
+                        botPolyS[i].y,
+                        botPolyS[i + 1].x,
+                        botPolyS[i + 1].y,
+                        ax,
+                        ay,
+                        bx,
+                        by,
+                      )
+                    ) {
+                      leadHit = true;
+                      break;
+                    }
+                  }
+                  if (leadHit) break;
+                }
+              }
+              if (leadHit) leaderCrossings++;
+            }
+          }
+          const totalCrossings =
+            regionCrossings + labelCrossings + leaderCrossings;
           const distFromRegion = Math.hypot(sx - cx, sy - cy);
           // Spacing bonus: prefer slots far from any already-placed label so
           // adjacent regions' labels don't crowd together. Capped at 240 px
@@ -1449,20 +1894,45 @@ export function HexMap({
             if (d < nearestLabel) nearestLabel = d;
           }
           const spacingBonus = Math.min(nearestLabel, 240);
-          // Score (lower = better). Crossings dominate; wider bracket span
-          // and spacing from other labels both help; closer to region also
-          // gets a tiny nudge.
-          const score =
-            bracket.crossings * 100 -
-            bracket.span * 25 -
+          // Adjacency angle penalty: among regions whose cells touch this
+          // one's, prefer candidates that sit on a different angular sector
+          // (relative to SVG center) from already-placed adjacent labels.
+          // Stops adjacent regions from clumping into the same margin slot.
+          // Saturates at ~60° separation (Math.PI/3).
+          let angleSepPenalty = 0;
+          if (adjacentPlaced.length > 0) {
+            const candAng = Math.atan2(sy - sCenterY, sx - sCenterX);
+            let minDiff = Math.PI;
+            for (const ap of adjacentPlaced) {
+              const placedAng = Math.atan2(ap.sy - sCenterY, ap.sx - sCenterX);
+              const diff = Math.abs(wrapAng(candAng - placedAng));
+              if (diff < minDiff) minDiff = diff;
+            }
+            const norm = Math.min(minDiff / (Math.PI / 3), 1);
+            angleSepPenalty = (1 - norm) * 80;
+          }
+          // Soft-score (lower = better) excluding crossings. Crossings are
+          // handled by the two-pass split above.
+          const softScore =
+            -bracket.span * 25 -
             spacingBonus * 0.45 +
-            distFromRegion * 0.01;
-          if (score < bestScore) {
-            bestScore = score;
-            bestPos = { sx, sy, bracket };
+            distFromRegion * 0.01 +
+            angleSepPenalty;
+          if (totalCrossings === 0) {
+            if (softScore < bestZeroScore) {
+              bestZeroScore = softScore;
+              bestZeroPos = { sx, sy, bracket };
+            }
+          }
+          const anyScore = softScore + totalCrossings * 100;
+          if (anyScore < bestAnyScore) {
+            bestAnyScore = anyScore;
+            bestAnyPos = { sx, sy, bracket };
           }
         }
       }
+      // Prefer 0-crossings if any exists; otherwise least-bad fallback.
+      const bestPos = bestZeroPos ?? bestAnyPos;
       return (
         bestPos ??
         (outOfBounds
@@ -1471,27 +1941,33 @@ export function HexMap({
       );
     };
 
-    // Process larger regions first so small ones can fit around them.
-    const order = rawRegions
-      .map((r, idx) => ({ r, idx }))
-      .sort((a, b) => b.r.size - a.r.size);
-
-    for (const { r, idx } of order) {
-      // Step 1: highlight box size (already known via boxSize)
+    // ── Per-region precomputation ──
+    // We need geometry (box, centroid, startR, otherCellsData) for every
+    // region BEFORE deciding placement order, because the order itself depends
+    // on each region's "freedom" (how many starting slots are valid).
+    type RegionPrep = {
+      idx: number;
+      box: { w: number; h: number };
+      cxS: number;
+      cyS: number;
+      outwardAngle: number;
+      startR: number;
+      otherCellsData: { x: number; y: number; rad: number }[];
+      freedom: number;
+      size: number;
+    };
+    const regionPreps: RegionPrep[] = [];
+    for (let idx = 0; idx < rawRegions.length; idx++) {
+      const r = rawRegions[idx];
       const box = boxSize(r.lines, r.kind);
       const halfW = box.w / 2;
       const halfH = box.h / 2;
-
-      // Centroid in screen coords + outward angle from svg center
       const cxS = (r.cx - dataCenter.x) * scale + sCenterX;
       const cyS = (r.cy - dataCenter.y) * scale + sCenterY;
       const outX = cxS - sCenterX;
       const outY = cyS - sCenterY;
       const outLen = Math.hypot(outX, outY);
       const outwardAngle = outLen < 1 ? -Math.PI / 2 : Math.atan2(outY, outX);
-
-      // Region's cells in screen coords — used by spiral search for both
-      // radial extent AND for evaluating leader-clear placements.
       const regionCellsScreen = r.cellPoints.map((p) => ({
         x: (p.x - dataCenter.x) * scale + sCenterX,
         y: (p.y - dataCenter.y) * scale + sCenterY,
@@ -1501,15 +1977,8 @@ export function HexMap({
         const d = Math.hypot(p.x - cxS, p.y - cyS);
         if (d > regionRadius) regionRadius = d;
       }
-      // Step 2: spiral search starting just outside the region perimeter.
-      // Account for the cell's own visual extent (HEX_SIZE × scale) so the
-      // label starts well outside the region's outer cells, not just past
-      // their centers.
       const startR =
         regionRadius + HEX_SIZE * scale + Math.max(halfW, halfH) + 14;
-      // Build per-region "other region cell" list (data coords + per-cell
-      // radius) — fed to spiralSearch so bracket scoring can detect crossings
-      // with the correct hex extent for low/mid/high-tier cells.
       const otherCellsData: { x: number; y: number; rad: number }[] = [];
       for (const tt of data.hexTiles) {
         if (!tt.cluster) continue;
@@ -1526,12 +1995,101 @@ export function HexMap({
         otherCellsData.push({
           x: tt.x,
           y: tt.y,
-          rad: HEX_SIZE * cellScaleOf(cid) * 0.92,
+          // Full circumscribed circle so any leader tangent to the hex outline
+          // counts as a crossing, plus a small buffer to absorb the Bezier
+          // deflection of the rendered leader curve.
+          rad: HEX_SIZE * cellScaleOf(cid) * 1.0,
         });
       }
+
+      // Freedom: # of evenly-spaced angles at startR that yield a slot which
+      // doesn't collide with any data cell and is inside the SVG. Lower =
+      // more constrained → must be placed first while options remain.
+      let freedom = 0;
+      const numAng = 16;
+      for (let aIdx = 0; aIdx < numAng; aIdx++) {
+        const theta = (aIdx * 2 * Math.PI) / numAng;
+        const sx = cxS + startR * Math.cos(theta);
+        const sy = cyS + startR * Math.sin(theta);
+        if (hitsCell(sx, sy, halfW, halfH, r.clusterIds)) continue;
+        if (!inSvg(sx, sy, halfW, halfH)) continue;
+        freedom++;
+      }
+
+      regionPreps.push({
+        idx,
+        box,
+        cxS,
+        cyS,
+        outwardAngle,
+        startR,
+        otherCellsData,
+        freedom,
+        size: r.size,
+      });
+    }
+
+    // Adjacency: two regions are adjacent if their nearest cell-to-cell
+    // distance is ≤ ~1 hex away. Used to penalize candidates that share a
+    // similar angular direction with an already-placed adjacent region.
+    const adjacent: boolean[][] = Array.from(
+      { length: rawRegions.length },
+      () => new Array(rawRegions.length).fill(false),
+    );
+    const ADJ_THRESHOLD = HEX_SIZE * 1.8;
+    for (let a = 0; a < rawRegions.length; a++) {
+      for (let b = a + 1; b < rawRegions.length; b++) {
+        const ca = rawRegions[a].cellPoints;
+        const cb = rawRegions[b].cellPoints;
+        let touch = false;
+        for (const pa of ca) {
+          for (const pb of cb) {
+            if (Math.hypot(pa.x - pb.x, pa.y - pb.y) <= ADJ_THRESHOLD) {
+              touch = true;
+              break;
+            }
+          }
+          if (touch) break;
+        }
+        if (touch) {
+          adjacent[a][b] = true;
+          adjacent[b][a] = true;
+        }
+      }
+    }
+
+    // Most-constrained first; ties broken by size desc so that among equally
+    // free regions, the bigger one (which has a larger label box) still gets
+    // first dibs on a clean slot.
+    const order = regionPreps.slice().sort((a, b) => {
+      if (a.freedom !== b.freedom) return a.freedom - b.freedom;
+      return b.size - a.size;
+    });
+
+    for (const prep of order) {
+      const { idx, box, cxS, cyS, outwardAngle, startR, otherCellsData } = prep;
+      const r = rawRegions[idx];
+      const halfW = box.w / 2;
+      const halfH = box.h / 2;
+
+      // Already-placed adjacent regions feed into the angle-separation
+      // penalty inside spiralSearch.
+      const adjacentPlaced: Placed[] = [];
+      for (const p of placedList) {
+        if (adjacent[idx][p.idx]) adjacentPlaced.push(p);
+      }
+
       const pos = spiralSearch(
-        cxS, cyS, halfW, halfH, r.clusterIds, outwardAngle, startR,
-        r, otherCellsData,
+        cxS,
+        cyS,
+        halfW,
+        halfH,
+        r.clusterIds,
+        outwardAngle,
+        startR,
+        r,
+        otherCellsData,
+        adjacentPlaced,
       );
 
       let chosenSx: number;
@@ -1567,7 +2125,10 @@ export function HexMap({
     >();
     for (const p of placedList) {
       finalPos.set(p.idx, { sx: p.sx, sy: p.sy });
-      bracketByIdx.set(p.idx, p.topV && p.botV ? { topV: p.topV, botV: p.botV } : null);
+      bracketByIdx.set(
+        p.idx,
+        p.topV && p.botV ? { topV: p.topV, botV: p.botV } : null,
+      );
     }
     // Step 3: assemble region edge as Bezier curve. The bracket vertices
     // (topV, botV) were already chosen during placement so the label
@@ -1614,47 +2175,56 @@ export function HexMap({
         botV = bestV;
       }
 
-      // Quadratic-Bezier control between an endpoint and the label, biased
-      // perpendicularly AWAY from the region centroid so the curve hugs the
-      // region from the label side.
-      const buildCtrl = (V: { x: number; y: number }) => {
-        const mx = (V.x + labelX) / 2;
-        const my = (V.y + labelY) / 2;
-        const dxV = labelX - V.x;
-        const dyV = labelY - V.y;
-        const segLen = Math.hypot(dxV, dyV) || 1;
-        let pdx = -dyV / segLen;
-        let pdy = dxV / segLen;
-        const cdx = mx - r.cx;
-        const cdy = my - r.cy;
-        if (pdx * cdx + pdy * cdy < 0) {
-          pdx = -pdx;
-          pdy = -pdy;
-        }
-        return {
-          x: mx + pdx * segLen * 0.16,
-          y: my + pdy * segLen * 0.16,
-        };
-      };
-
       const sameVertex =
         Math.abs(topV.x - botV.x) < 0.5 && Math.abs(topV.y - botV.y) < 0.5;
+      const midX = sameVertex ? topV.x : (topV.x + botV.x) / 2;
+      const midY = sameVertex ? topV.y : (topV.y + botV.y) / 2;
 
       let leaderPath: string;
       let handles: { x: number; y: number }[];
       if (sameVertex) {
-        const ctrl = buildCtrl(topV);
-        leaderPath = `M${topV.x},${topV.y}Q${ctrl.x},${ctrl.y} ${labelX},${labelY}`;
-        handles = [topV];
-      } else {
-        // ONE continuous SVG path: top → label → bottom via two joined
-        // quadratic segments. Renders as a single smooth stroke.
-        const cTop = buildCtrl(topV);
-        const cBot = buildCtrl(botV);
+        const c = bezCtrls(
+          topV.x,
+          topV.y,
+          labelX,
+          labelY,
+          midX,
+          midY,
+          r.cx,
+          r.cy,
+        );
         leaderPath =
           `M${topV.x},${topV.y}` +
-          `Q${cTop.x},${cTop.y} ${labelX},${labelY}` +
-          `Q${cBot.x},${cBot.y} ${botV.x},${botV.y}`;
+          `C${c.c1x},${c.c1y} ${c.c2x},${c.c2y} ${labelX},${labelY}`;
+        handles = [topV];
+      } else {
+        // ONE continuous cubic SVG path: topV → label → botV. Both curves
+        // share the c2 axis (midV→label) so they end with matching tangents
+        // at label, producing a funnel-tip rather than two diverging arcs.
+        const cTop = bezCtrls(
+          topV.x,
+          topV.y,
+          labelX,
+          labelY,
+          midX,
+          midY,
+          r.cx,
+          r.cy,
+        );
+        const cBot = bezCtrls(
+          botV.x,
+          botV.y,
+          labelX,
+          labelY,
+          midX,
+          midY,
+          r.cx,
+          r.cy,
+        );
+        leaderPath =
+          `M${topV.x},${topV.y}` +
+          `C${cTop.c1x},${cTop.c1y} ${cTop.c2x},${cTop.c2y} ${labelX},${labelY}` +
+          `C${cBot.c2x},${cBot.c2y} ${cBot.c1x},${cBot.c1y} ${botV.x},${botV.y}`;
         handles = [topV, botV];
       }
 
@@ -1700,7 +2270,8 @@ export function HexMap({
     for (const idxs of m.values()) {
       idxs.sort(
         (a, b) =>
-          coverageRegions[a].clusterIds.size - coverageRegions[b].clusterIds.size,
+          coverageRegions[a].clusterIds.size -
+          coverageRegions[b].clusterIds.size,
       );
     }
     return m;
@@ -1774,17 +2345,14 @@ export function HexMap({
   const onHoverChangeRef = useRef(onHoverChange);
   onHoverChangeRef.current = onHoverChange;
 
-  const handleMouseEnter = useCallback(
-    (tile: HexTile, e: React.MouseEvent) => {
-      if (!tile.cluster) return;
-      setHoveredClusterId(tile.cluster.id);
-      onHoverChangeRef.current?.(tile.cluster.id);
-      const rect = containerRef.current?.getBoundingClientRect();
-      if (rect)
-        setTooltipPos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
-    },
-    [],
-  );
+  const handleMouseEnter = useCallback((tile: HexTile, e: React.MouseEvent) => {
+    if (!tile.cluster) return;
+    setHoveredClusterId(tile.cluster.id);
+    onHoverChangeRef.current?.(tile.cluster.id);
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (rect)
+      setTooltipPos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+  }, []);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     const rect = containerRef.current?.getBoundingClientRect();
@@ -1797,8 +2365,6 @@ export function HexMap({
     onHoverChangeRef.current?.(null);
     setTooltipPos(null);
   }, []);
-
-
 
   // Stats
   // Loading
@@ -1840,7 +2406,15 @@ export function HexMap({
   if (!data) return null;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", width: "100%", height: "100%", overflow: "hidden" }}>
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        width: "100%",
+        height: "100%",
+        overflow: "hidden",
+      }}
+    >
       {/* Controls bar */}
       <ControlsBar
         detailLevel={detailLevel}
@@ -1864,695 +2438,756 @@ export function HexMap({
       />
       <div
         ref={containerRef}
-        style={{ flex: 1, position: "relative", minHeight: 0, overflow: "hidden" }}
-      >
-      <div
         style={{
+          flex: 1,
           position: "relative",
-          width: "100%",
-          height: "100%",
           minHeight: 0,
           overflow: "hidden",
         }}
       >
-        {/* SVG Map */}
-        <svg
-          ref={svgRef}
-          viewBox={`0 0 ${svgWidth} ${height}`}
-          style={{ display: "block", width: "100%", height: "100%", flex: 1, minWidth: 0 }}
+        <div
+          style={{
+            position: "relative",
+            width: "100%",
+            height: "100%",
+            minHeight: 0,
+            overflow: "hidden",
+          }}
         >
-          {/* Per-region clipPath: union of mid-size (HEX_SIZE) hex shapes per
+          {/* SVG Map */}
+          <svg
+            ref={svgRef}
+            viewBox={`0 0 ${svgWidth} ${height}`}
+            style={{
+              display: "block",
+              width: "100%",
+              height: "100%",
+              flex: 1,
+              minWidth: 0,
+            }}
+          >
+            {/* Per-region clipPath: union of mid-size (HEX_SIZE) hex shapes per
               cell. Inset shadow uses this clip — using uniform HEX_SIZE
               regardless of low/mid/high tier so the shadow band thickness
               and shape stays consistent across the region. */}
-          <defs>
-            {/* Hatch pattern for "second-pin" tuner cells in Overview mode. */}
-            {TUNER_NAMES.map((t) => (
-              <pattern
-                key={`hatch-${t}`}
-                id={`hatch-${t}`}
-                patternUnits="userSpaceOnUse"
-                width="8"
-                height="8"
-                patternTransform="rotate(45)"
-              >
-                <rect width="8" height="8" fill={MIXED_COLOR} />
-                <line
-                  x1="0"
-                  y1="0"
-                  x2="0"
-                  y2="8"
-                  stroke={TUNER_COLORS[t]}
-                  strokeWidth="4"
-                />
-              </pattern>
-            ))}
-            {/* Overlap pattern: cells where BOTH pinned tuners have trials.
-                Stripes in the second-pin color over a first-pin color bg. */}
-            {pinnedTuners.length === 2 && (
-              <pattern
-                id="hatch-overlap"
-                patternUnits="userSpaceOnUse"
-                width="8"
-                height="8"
-                patternTransform="rotate(45)"
-              >
-                <rect
+            <defs>
+              {/* Hatch pattern for "second-pin" tuner cells in Tuner mode. */}
+              {TUNER_NAMES.map((t) => (
+                <pattern
+                  key={`hatch-${t}`}
+                  id={`hatch-${t}`}
+                  patternUnits="userSpaceOnUse"
                   width="8"
                   height="8"
-                  fill={TUNER_COLORS[pinnedTuners[0]]}
-                />
-                <line
-                  x1="0"
-                  y1="0"
-                  x2="0"
-                  y2="8"
-                  stroke={TUNER_COLORS[pinnedTuners[1]]}
-                  strokeWidth="4"
-                />
-              </pattern>
-            )}
-            {coverageRegions.map((r, i) => (
-              <clipPath
-                key={`rclip-${i}`}
-                id={`region-clip-${i}`}
-                clipPathUnits="userSpaceOnUse"
-              >
-                {r.cellPoints.map((p, ci) => (
-                  <path
-                    key={ci}
-                    d={hexPath}
-                    transform={`translate(${p.x}, ${p.y})`}
-                  />
-                ))}
-              </clipPath>
-            ))}
-          </defs>
-          {/* ===== HEX GRID ===== */}
-          <g
-            style={{
-              transform: `translate(${centerX}px, ${centerY}px) scale(${scale}) translate(${-dataCenter.x}px, ${-dataCenter.y}px)`,
-            }}
-          >
-            {/* ── Hex tiles: hovered one rendered last so its + button isn't occluded by neighbors ── */}
-            {[...data.hexTiles]
-              .sort((a, b) => {
-                // Hovered always last (on top).
-                const aHover = a.cluster?.id === hoveredClusterId ? 1 : 0;
-                const bHover = b.cluster?.id === hoveredClusterId ? 1 : 0;
-                if (aHover !== bHover) return aHover - bHover;
-                // Then by size tier so high (oversized) cells render last and
-                // visually overflow onto neighbors.
-                const aSize = cellScaleOf(a.cluster?.id);
-                const bSize = cellScaleOf(b.cluster?.id);
-                return aSize - bSize;
-              })
-              .map((tile) => {
-              if (!tile.cluster) return null;
-
-              const hasSelectedTuner = TUNER_NAMES.some(
-                (t) =>
-                  selectedTuners.has(t) && tile.cluster!.tunerCounts[t] > 0,
-              );
-              if (!hasSelectedTuner) return null;
-
-              const fill = getHexFill(tile);
-              const isHovered = hoveredClusterId === tile.cluster.id;
-              const isExternallyHovered =
-                externalHoveredClusterId !== null &&
-                externalHoveredClusterId === tile.cluster.id;
-              const isHighlighted = isHovered || isExternallyHovered;
-              const cellRegions = tile.cluster
-                ? clusterToRegion.get(tile.cluster.id) ?? null
-                : null;
-              const inHoveredRegion =
-                hoveredRegionIdx !== null &&
-                cellRegions !== null &&
-                cellRegions.includes(hoveredRegionIdx);
-              // When a cell sits inside multiple regions, the smaller one wins
-              // by default; on hover, switch to the hovered region's color.
-              const tileRegionIdx = inHoveredRegion
-                ? hoveredRegionIdx
-                : cellRegions !== null
-                  ? cellRegions[0]
-                  : null;
-
-              const cellScale = cellScaleOf(tile.cluster.id);
-
-              return (
-                <g
-                  key={`${tile.q},${tile.r}`}
-                  transform={`translate(${tile.x}, ${tile.y}) scale(${cellScale})`}
-                  onMouseEnter={(e) => handleMouseEnter(tile, e)}
-                  onMouseMove={handleMouseMove}
-                  onMouseLeave={handleMouseLeave}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    // Shift+click: toggle cart
-                    if (e.shiftKey) {
-                      onCartToggle?.(tile.cluster!.id);
-                    }
-                  }}
-                  style={{ cursor: "pointer" }}
+                  patternTransform="rotate(45)"
                 >
-                  <path
-                    d={hexPath}
-                    fill={fill || "#F8FAFC"}
-                    stroke={
-                      isHighlighted ? "#1E293B"
-                        : (effectiveColorMode === "complementary" && tile.cluster && t3TopIds.has(tile.cluster.id))
-                          ? "#059669"
-                          : (tile.cluster && cartIds.has(tile.cluster.id))
-                            ? "#1E293B"
-                            : "#E2E8F0"
-                    }
-                    strokeWidth={
-                      isHighlighted ? 2.5
-                        : (effectiveColorMode === "complementary" && tile.cluster && t3TopIds.has(tile.cluster.id))
-                          ? 2
-                          : (tile.cluster && cartIds.has(tile.cluster.id))
-                            ? 2
-                            : 0.5
-                    }
-                    filter={isHighlighted ? "brightness(1.15)" : undefined}
+                  <rect width="8" height="8" fill={MIXED_COLOR} />
+                  <line
+                    x1="0"
+                    y1="0"
+                    x2="0"
+                    y2="8"
+                    stroke={TUNER_COLORS[t]}
+                    strokeWidth="4"
                   />
-                  {/* Tuner-param: full color wash on cells that belong to a region. */}
-                  {tileRegionIdx !== null &&
-                    effectiveColorMode === "tuner-param" && (
-                      <path
-                        d={hexPath}
-                        fill={coverageRegions[tileRegionIdx].color}
-                        fillOpacity={inHoveredRegion ? 0.5 : 0.28}
-                        pointerEvents="none"
-                      />
-                    )}
-                  {/* Inset shadow is drawn as a region-level border stroke
-                      clipped to region cells (rendered outside this loop) so
-                      only the OUTER perimeter gets the band — interior cells
-                      stay clean. */}
-                  {/* Cart marker: amber dot (non-hovered carted cells) */}
-                  {cartIds.has(tile.cluster!.id) && !isHovered && (
-                    <circle
-                      cx={HEX_SIZE * 0.55}
-                      cy={-HEX_SIZE * 0.55}
-                      r={HEX_SIZE * 0.14}
-                      fill="#F59E0B"
-                      stroke="white"
-                      strokeWidth={1.2}
-                      pointerEvents="none"
+                </pattern>
+              ))}
+              {/* Overlap pattern: cells where BOTH pinned tuners have trials.
+                Stripes in the second-pin color over a first-pin color bg. */}
+              {pinnedTuners.length === 2 && (
+                <pattern
+                  id="hatch-overlap"
+                  patternUnits="userSpaceOnUse"
+                  width="8"
+                  height="8"
+                  patternTransform="rotate(45)"
+                >
+                  <rect
+                    width="8"
+                    height="8"
+                    fill={TUNER_COLORS[pinnedTuners[0]]}
+                  />
+                  <line
+                    x1="0"
+                    y1="0"
+                    x2="0"
+                    y2="8"
+                    stroke={TUNER_COLORS[pinnedTuners[1]]}
+                    strokeWidth="4"
+                  />
+                </pattern>
+              )}
+              {coverageRegions.map((r, i) => (
+                <clipPath
+                  key={`rclip-${i}`}
+                  id={`region-clip-${i}`}
+                  clipPathUnits="userSpaceOnUse"
+                >
+                  {r.cellPoints.map((p, ci) => (
+                    <path
+                      key={ci}
+                      d={hexPath}
+                      transform={`translate(${p.x}, ${p.y})`}
                     />
-                  )}
-                  {/* Hover cart button: + or − (inside tile group so mouse doesn't leave) */}
-                  {isHovered && (
+                  ))}
+                </clipPath>
+              ))}
+            </defs>
+            {/* ===== HEX GRID ===== */}
+            <g
+              style={{
+                transform: `translate(${centerX}px, ${centerY}px) scale(${scale}) translate(${-dataCenter.x}px, ${-dataCenter.y}px)`,
+              }}
+            >
+              {/* ── Hex tiles: hovered one rendered last so its + button isn't occluded by neighbors ── */}
+              {[...data.hexTiles]
+                .sort((a, b) => {
+                  // Hovered always last (on top).
+                  const aHover = a.cluster?.id === hoveredClusterId ? 1 : 0;
+                  const bHover = b.cluster?.id === hoveredClusterId ? 1 : 0;
+                  if (aHover !== bHover) return aHover - bHover;
+                  // Then by size tier so high (oversized) cells render last and
+                  // visually overflow onto neighbors.
+                  const aSize = cellScaleOf(a.cluster?.id);
+                  const bSize = cellScaleOf(b.cluster?.id);
+                  return aSize - bSize;
+                })
+                .map((tile) => {
+                  if (!tile.cluster) return null;
+
+                  const hasSelectedTuner = TUNER_NAMES.some(
+                    (t) =>
+                      selectedTuners.has(t) && tile.cluster!.tunerCounts[t] > 0,
+                  );
+                  if (!hasSelectedTuner) return null;
+
+                  const fill = getHexFill(tile);
+                  const isHovered = hoveredClusterId === tile.cluster.id;
+                  const isExternallyHovered =
+                    externalHoveredClusterId !== null &&
+                    externalHoveredClusterId === tile.cluster.id;
+                  const isHighlighted = isHovered || isExternallyHovered;
+                  const cellRegions = tile.cluster
+                    ? (clusterToRegion.get(tile.cluster.id) ?? null)
+                    : null;
+                  const inHoveredRegion =
+                    hoveredRegionIdx !== null &&
+                    cellRegions !== null &&
+                    cellRegions.includes(hoveredRegionIdx);
+                  // When a cell sits inside multiple regions, the smaller one wins
+                  // by default; on hover, switch to the hovered region's color.
+                  const tileRegionIdx = inHoveredRegion
+                    ? hoveredRegionIdx
+                    : cellRegions !== null
+                      ? cellRegions[0]
+                      : null;
+
+                  const cellScale = cellScaleOf(tile.cluster.id);
+
+                  return (
                     <g
+                      key={`${tile.q},${tile.r}`}
+                      transform={`translate(${tile.x}, ${tile.y}) scale(${cellScale})`}
+                      onMouseEnter={(e) => handleMouseEnter(tile, e)}
+                      onMouseMove={handleMouseMove}
+                      onMouseLeave={handleMouseLeave}
                       onClick={(e) => {
                         e.stopPropagation();
-                        onCartToggle?.(tile.cluster!.id);
+                        // Shift+click: toggle cart
+                        if (e.shiftKey) {
+                          onCartToggle?.(tile.cluster!.id);
+                        }
                       }}
                       style={{ cursor: "pointer" }}
                     >
-                      <circle
-                        cx={HEX_SIZE * 0.55}
-                        cy={-HEX_SIZE * 0.55}
-                        r={HEX_SIZE * 0.22}
-                        fill={cartIds.has(tile.cluster!.id) ? "#F59E0B" : "#374151"}
-                        stroke="white"
-                        strokeWidth={1.5}
+                      <path
+                        d={hexPath}
+                        fill={fill || "#F8FAFC"}
+                        stroke={
+                          isHighlighted
+                            ? "#1E293B"
+                            : effectiveColorMode === "complementary" &&
+                                tile.cluster &&
+                                t3TopIds.has(tile.cluster.id)
+                              ? "#059669"
+                              : tile.cluster && cartIds.has(tile.cluster.id)
+                                ? "#1E293B"
+                                : "#E2E8F0"
+                        }
+                        strokeWidth={
+                          isHighlighted
+                            ? 2.5
+                            : effectiveColorMode === "complementary" &&
+                                tile.cluster &&
+                                t3TopIds.has(tile.cluster.id)
+                              ? 2
+                              : tile.cluster && cartIds.has(tile.cluster.id)
+                                ? 2
+                                : 0.5
+                        }
+                        filter={isHighlighted ? "brightness(1.15)" : undefined}
                       />
-                      <text
-                        x={HEX_SIZE * 0.55}
-                        y={-HEX_SIZE * 0.55}
-                        textAnchor="middle"
-                        dominantBaseline="central"
-                        fontSize={HEX_SIZE * 0.28}
-                        fontWeight={700}
-                        fill="white"
-                        pointerEvents="none"
-                      >
-                        {cartIds.has(tile.cluster!.id) ? "−" : "+"}
-                      </text>
-                    </g>
-                  )}
-                </g>
-              );
-            })}
-
-
-
-            {/* ── Parameter bin boundaries (boolean params) ── */}
-            {paramBinBoundaryPath && (
-              <>
-                <path
-                  d={paramBinBoundaryPath}
-                  fill="none"
-                  stroke="white"
-                  strokeWidth={4 / renderScale}
-                  strokeLinecap="round"
-                  opacity={0.8}
-                  pointerEvents="none"
-                />
-                <path
-                  d={paramBinBoundaryPath}
-                  fill="none"
-                  stroke="#374151"
-                  strokeWidth={1.5 / renderScale}
-                  strokeLinecap="round"
-                  opacity={0.6}
-                  pointerEvents="none"
-                />
-              </>
-            )}
-
-            {/* ── Notable-cell labels: optional text + optional tuner badge, stacked ── */}
-            {effectiveHighlightLabels.map(({ tile, clusterId, text, badge }) => {
-              const halo = 3 / renderScale;
-              const valueSize = 12 / renderScale;
-              const unitSize = 10 / renderScale;
-              const lineGap = 4 / renderScale;
-              const badgeFont = 11 / renderScale;
-              const badgePadX = 6 / renderScale;
-              const badgePadY = 3 / renderScale;
-              const charW = badgeFont * 0.62;
-
-              // Pre-compute the height of each piece so we can vertically center the stack.
-              const textH = text
-                ? valueSize + (text.unit ? lineGap + unitSize : 0)
-                : 0;
-              const badgeH = badge ? badgeFont + badgePadY * 2 : 0;
-              const stackGap = text && badge ? 4 / renderScale : 0;
-              const totalH = textH + stackGap + badgeH;
-
-              let cursorY = tile.y - totalH / 2;
-
-              return (
-                <g key={`label-${clusterId}`} pointerEvents="none">
-                  {text && (
-                    <>
-                      <text
-                        x={tile.x}
-                        y={cursorY + valueSize / 2}
-                        textAnchor="middle"
-                        dominantBaseline="central"
-                        fontSize={valueSize}
-                        fontWeight={700}
-                        fill="#0F172A"
-                        stroke="white"
-                        strokeWidth={halo}
-                        paintOrder="stroke"
-                        style={{ userSelect: "none" }}
-                      >
-                        {text.value}
-                      </text>
-                      {text.unit && (
-                        <text
-                          x={tile.x}
-                          y={cursorY + valueSize + lineGap + unitSize / 2}
-                          textAnchor="middle"
-                          dominantBaseline="central"
-                          fontSize={unitSize}
-                          fontWeight={600}
-                          fill="#475569"
-                          stroke="white"
-                          strokeWidth={halo}
-                          paintOrder="stroke"
-                          style={{ userSelect: "none" }}
+                      {/* Tuner-param: full color wash on cells that belong to a region.
+                      Skipped when a tuner is pinned/hovered (param-comparison
+                      mode) so the underlying tuner color stays visible. */}
+                      {tileRegionIdx !== null &&
+                        effectiveColorMode === "tuner-param" &&
+                        pinnedTuners.length === 0 &&
+                        !hoveredTuner && (
+                          <path
+                            d={hexPath}
+                            fill={coverageRegions[tileRegionIdx].color}
+                            fillOpacity={inHoveredRegion ? 0.5 : 0.28}
+                            pointerEvents="none"
+                          />
+                        )}
+                      {/* Inset shadow is drawn as a region-level border stroke
+                      clipped to region cells (rendered outside this loop) so
+                      only the OUTER perimeter gets the band — interior cells
+                      stay clean. */}
+                      {/* Cart amber dot is rendered AFTER all region/label
+                      passes so it's never occluded by inset shadows, borders,
+                      or leader paths. See the dedicated pass after tiles. */}
+                      {/* Hover cart button: + or − (inside tile group so mouse doesn't leave) */}
+                      {isHovered && (
+                        <g
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onCartToggle?.(tile.cluster!.id);
+                          }}
+                          style={{ cursor: "pointer" }}
                         >
-                          {text.unit}
-                        </text>
+                          <circle
+                            cx={HEX_SIZE * 0.55}
+                            cy={-HEX_SIZE * 0.55}
+                            r={HEX_SIZE * 0.22}
+                            fill={
+                              cartIds.has(tile.cluster!.id)
+                                ? "#F59E0B"
+                                : "#374151"
+                            }
+                            stroke="white"
+                            strokeWidth={1.5}
+                          />
+                          <text
+                            x={HEX_SIZE * 0.55}
+                            y={-HEX_SIZE * 0.55}
+                            textAnchor="middle"
+                            dominantBaseline="central"
+                            fontSize={HEX_SIZE * 0.28}
+                            fontWeight={700}
+                            fill="white"
+                            pointerEvents="none"
+                          >
+                            {cartIds.has(tile.cluster!.id) ? "−" : "+"}
+                          </text>
+                        </g>
                       )}
-                    </>
-                  )}
-                  {badge && (() => {
-                    cursorY += textH + stackGap;
-                    const label = TUNER_DISPLAY_NAMES[badge.tuner];
-                    const w = label.length * charW + badgePadX * 2;
-                    const h = badgeH;
-                    const cy = cursorY + h / 2;
-                    return (
-                      <g transform={`translate(${tile.x}, ${cy})`}>
-                        <rect
-                          x={-w / 2}
-                          y={-h / 2}
-                          width={w}
-                          height={h}
-                          rx={h / 2}
-                          ry={h / 2}
-                          fill={TUNER_COLORS[badge.tuner]}
-                          stroke="white"
-                          strokeWidth={1.5 / renderScale}
-                        />
-                        <text
-                          x={0}
-                          y={0}
-                          textAnchor="middle"
-                          dominantBaseline="central"
-                          fontSize={badgeFont}
-                          fontWeight={700}
-                          fill="white"
-                          style={{ userSelect: "none" }}
-                        >
-                          {label}
-                        </text>
-                      </g>
-                    );
-                  })()}
-                </g>
-              );
-            })}
+                    </g>
+                  );
+                })}
 
-            {/* ── Coverage-mode region callouts: border + leader line + label in margin ── */}
-            {coverageRegions.map((r, i) => {
-              const isHov = hoveredRegionIdx === i;
-              const isOtherHov = hoveredRegionIdx !== null && !isHov;
-              const fontSize = (isHov ? 14 : 13) / renderScale;
-              const borderStrokeOuter = (isHov ? 6.5 : 5.5) / renderScale;
-              const borderStrokeInner = (isHov ? 4 : 3) / renderScale;
-              const leaderStroke = (isHov ? 1.8 : 1.2) / renderScale;
-              const opacity = isOtherHov ? 0.35 : 1;
-              // Borders use one neutral dark color so they don't compete with the
-              // YlOrBr coverage fill. Categories are still differentiated by the
-              // leader line + label color and the per-region hover wash.
-              const BORDER_COLOR = "#0F172A";
-              return (
-                <g key={`region-${i}`} pointerEvents="none" opacity={opacity}>
-                  {/* Inset shadow: thick stroke along the region perimeter,
+              {/* ── Parameter bin boundaries (boolean params) ── */}
+              {paramBinBoundaryPath && (
+                <>
+                  <path
+                    d={paramBinBoundaryPath}
+                    fill="none"
+                    stroke="white"
+                    strokeWidth={4 / renderScale}
+                    strokeLinecap="round"
+                    opacity={0.8}
+                    pointerEvents="none"
+                  />
+                  <path
+                    d={paramBinBoundaryPath}
+                    fill="none"
+                    stroke="#374151"
+                    strokeWidth={1.5 / renderScale}
+                    strokeLinecap="round"
+                    opacity={0.6}
+                    pointerEvents="none"
+                  />
+                </>
+              )}
+
+              {/* ── Notable-cell labels: optional text + optional tuner badge, stacked ── */}
+              {effectiveHighlightLabels.map(
+                ({ tile, clusterId, text, badge }) => {
+                  const halo = 3 / renderScale;
+                  const valueSize = 12 / renderScale;
+                  const unitSize = 10 / renderScale;
+                  const lineGap = 4 / renderScale;
+                  const badgeFont = 11 / renderScale;
+                  const badgePadX = 6 / renderScale;
+                  const badgePadY = 3 / renderScale;
+                  const charW = badgeFont * 0.62;
+
+                  // Pre-compute the height of each piece so we can vertically center the stack.
+                  const textH = text
+                    ? valueSize + (text.unit ? lineGap + unitSize : 0)
+                    : 0;
+                  const badgeH = badge ? badgeFont + badgePadY * 2 : 0;
+                  const stackGap = text && badge ? 4 / renderScale : 0;
+                  const totalH = textH + stackGap + badgeH;
+
+                  let cursorY = tile.y - totalH / 2;
+
+                  return (
+                    <g key={`label-${clusterId}`} pointerEvents="none">
+                      {text && (
+                        <>
+                          <text
+                            x={tile.x}
+                            y={cursorY + valueSize / 2}
+                            textAnchor="middle"
+                            dominantBaseline="central"
+                            fontSize={valueSize}
+                            fontWeight={700}
+                            fill="#0F172A"
+                            stroke="white"
+                            strokeWidth={halo}
+                            paintOrder="stroke"
+                            style={{ userSelect: "none" }}
+                          >
+                            {text.value}
+                          </text>
+                          {text.unit && (
+                            <text
+                              x={tile.x}
+                              y={cursorY + valueSize + lineGap + unitSize / 2}
+                              textAnchor="middle"
+                              dominantBaseline="central"
+                              fontSize={unitSize}
+                              fontWeight={600}
+                              fill="#475569"
+                              stroke="white"
+                              strokeWidth={halo}
+                              paintOrder="stroke"
+                              style={{ userSelect: "none" }}
+                            >
+                              {text.unit}
+                            </text>
+                          )}
+                        </>
+                      )}
+                      {badge &&
+                        (() => {
+                          cursorY += textH + stackGap;
+                          const label = TUNER_DISPLAY_NAMES[badge.tuner];
+                          const w = label.length * charW + badgePadX * 2;
+                          const h = badgeH;
+                          const cy = cursorY + h / 2;
+                          return (
+                            <g transform={`translate(${tile.x}, ${cy})`}>
+                              <rect
+                                x={-w / 2}
+                                y={-h / 2}
+                                width={w}
+                                height={h}
+                                rx={h / 2}
+                                ry={h / 2}
+                                fill={TUNER_COLORS[badge.tuner]}
+                                stroke="white"
+                                strokeWidth={1.5 / renderScale}
+                              />
+                              <text
+                                x={0}
+                                y={0}
+                                textAnchor="middle"
+                                dominantBaseline="central"
+                                fontSize={badgeFont}
+                                fontWeight={700}
+                                fill="white"
+                                style={{ userSelect: "none" }}
+                              >
+                                {label}
+                              </text>
+                            </g>
+                          );
+                        })()}
+                    </g>
+                  );
+                },
+              )}
+
+              {/* ── Coverage-mode region callouts: border + leader line + label in margin ── */}
+              {coverageRegions.map((r, i) => {
+                const isHov = hoveredRegionIdx === i;
+                const isOtherHov = hoveredRegionIdx !== null && !isHov;
+                const fontSize = (isHov ? 14 : 13) / renderScale;
+                const borderStrokeOuter = (isHov ? 6.5 : 5.5) / renderScale;
+                const borderStrokeInner = (isHov ? 4 : 3) / renderScale;
+                const leaderStroke = (isHov ? 1.8 : 1.2) / renderScale;
+                const opacity = isOtherHov ? 0.35 : 1;
+                // Borders use one neutral dark color so they don't compete with the
+                // YlOrBr coverage fill. Categories are still differentiated by the
+                // leader line + label color and the per-region hover wash.
+                const BORDER_COLOR = "#0F172A";
+                // In param mode with a pinned/hovered tuner, the cells already
+                // carry the tuner color — the inset shadow is rendered grey so
+                // it doesn't fight that color.
+                const isParamComparison =
+                  effectiveColorMode === "tuner-param" &&
+                  (pinnedTuners.length > 0 || hoveredTuner !== null);
+                const insetShadowColor = isParamComparison
+                  ? "#475569"
+                  : r.color;
+                return (
+                  <g key={`region-${i}`} pointerEvents="none" opacity={opacity}>
+                    {/* Inset shadow: thick stroke along the region perimeter,
                       clipped to the region cells so only the INNER half of
                       the stroke is visible — produces a band that hugs the
                       perimeter from the inside.
                       Round linecap/linejoin so the per-segment sub-paths
                       visually bridge across shared vertices (otherwise the
                       band looks broken at every cell corner). */}
-                  <path
-                    d={r.borderPath}
-                    fill="none"
-                    stroke={r.color}
-                    strokeWidth={HEX_SIZE * 0.7}
-                    strokeOpacity={isHov ? 0.55 : 0.4}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    clipPath={`url(#region-clip-${i})`}
-                  />
-                  {/* White underlay for border */}
-                  <path
-                    d={r.borderPath}
-                    fill="none"
-                    stroke="white"
-                    strokeWidth={borderStrokeOuter}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    opacity={0.9}
-                  />
-                  {/* Region border (unified contrast color) */}
-                  <path
-                    d={r.borderPath}
-                    fill="none"
-                    stroke={BORDER_COLOR}
-                    strokeWidth={borderStrokeInner}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    opacity={isHov ? 1 : 0.85}
-                  />
-                  {/* Single leader path — for multi-cell regions this curves
-                      top→label→bottom as one continuous edge wrapping the region. */}
-                  <path
-                    d={r.leaderPath}
-                    fill="none"
-                    stroke="white"
-                    strokeWidth={leaderStroke + 1.5 / renderScale}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    opacity={0.85}
-                  />
-                  <path
-                    d={r.leaderPath}
-                    fill="none"
-                    stroke={r.color}
-                    strokeWidth={leaderStroke}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  {/* Circular handle on each anchor vertex (1 or 2). */}
-                  {r.handles.map((h, hi) => (
-                    <circle
-                      key={`h-${hi}`}
-                      cx={h.x}
-                      cy={h.y}
-                      r={3.5 / renderScale}
-                      fill={r.color}
-                      stroke="white"
-                      strokeWidth={1.4 / renderScale}
+                    <path
+                      d={r.borderPath}
+                      fill="none"
+                      stroke={insetShadowColor}
+                      strokeWidth={HEX_SIZE * 0.7}
+                      strokeOpacity={isHov ? 0.55 : 0.4}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      clipPath={`url(#region-clip-${i})`}
                     />
-                  ))}
-                  {/* Interactive label group — hovering it highlights the
-                      region the same way as hovering one of its cells. */}
-                  <g
-                    pointerEvents="all"
-                    style={{ cursor: "pointer" }}
-                    onMouseEnter={() => setHoveredLabelIdx(i)}
-                    onMouseLeave={() => setHoveredLabelIdx(null)}
-                  >
-                  {/* Backing pill — same shape for every label, white fill +
-                      subtle border, sits behind text/badges. */}
-                  {(() => {
-                    const charPxR = 7.6 / renderScale;
-                    const lineHpxR = 14 / renderScale;
-                    const boxPadXR = 20 / renderScale;
-                    const boxPadYR = 10 / renderScale;
-                    const combinedRowGap = 10 / renderScale;
-                    const maxLen = Math.max(...r.lines.map((l) => l.length));
-                    const boxW = maxLen * charPxR + boxPadXR * 2;
-                    const boxH =
-                      r.lines.length * lineHpxR +
-                      boxPadYR * 2 +
-                      (r.kind === "combined" ? combinedRowGap : 0);
-                    return (
-                      <rect
-                        x={r.labelX - boxW / 2}
-                        y={r.labelY - boxH / 2}
-                        width={boxW}
-                        height={boxH}
-                        rx={boxH / 2}
-                        ry={boxH / 2}
-                        fill="white"
-                        stroke={r.color}
-                        strokeWidth={(isHov ? 2.5 : 1.8) / renderScale}
+                    {/* White underlay for border */}
+                    <path
+                      d={r.borderPath}
+                      fill="none"
+                      stroke="white"
+                      strokeWidth={borderStrokeOuter}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      opacity={0.9}
+                    />
+                    {/* Region border (unified contrast color) */}
+                    <path
+                      d={r.borderPath}
+                      fill="none"
+                      stroke={BORDER_COLOR}
+                      strokeWidth={borderStrokeInner}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      opacity={isHov ? 1 : 0.85}
+                    />
+                    {/* Single leader path — for multi-cell regions this curves
+                      top→label→bottom as one continuous edge wrapping the region. */}
+                    <path
+                      d={r.leaderPath}
+                      fill="none"
+                      stroke="white"
+                      strokeWidth={leaderStroke + 1.5 / renderScale}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      opacity={0.85}
+                    />
+                    <path
+                      d={r.leaderPath}
+                      fill="none"
+                      stroke={r.color}
+                      strokeWidth={leaderStroke}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                    {/* Circular handle on each anchor vertex (1 or 2). */}
+                    {r.handles.map((h, hi) => (
+                      <circle
+                        key={`h-${hi}`}
+                        cx={h.x}
+                        cy={h.y}
+                        r={3.5 / renderScale}
+                        fill={r.color}
+                        stroke="white"
+                        strokeWidth={1.4 / renderScale}
                       />
-                    );
-                  })()}
-                  {/* Label content:
+                    ))}
+                    {/* Interactive label group — hovering it highlights the
+                      region the same way as hovering one of its cells. */}
+                    <g
+                      pointerEvents="all"
+                      style={{ cursor: "pointer" }}
+                      onMouseEnter={() => setHoveredLabelIdx(i)}
+                      onMouseLeave={() => setHoveredLabelIdx(null)}
+                    >
+                      {/* Backing pill — same shape for every label, white fill +
+                      subtle border, sits behind text/badges. */}
+                      {(() => {
+                        const charPxR = 7.6 / renderScale;
+                        const lineHpxR = 14 / renderScale;
+                        const boxPadXR = 20 / renderScale;
+                        const boxPadYR = 10 / renderScale;
+                        const combinedRowGap = 10 / renderScale;
+                        const maxLen = Math.max(
+                          ...r.lines.map((l) => l.length),
+                        );
+                        const boxW = maxLen * charPxR + boxPadXR * 2;
+                        const boxH =
+                          r.lines.length * lineHpxR +
+                          boxPadYR * 2 +
+                          (r.kind === "combined" ? combinedRowGap : 0);
+                        return (
+                          <rect
+                            x={r.labelX - boxW / 2}
+                            y={r.labelY - boxH / 2}
+                            width={boxW}
+                            height={boxH}
+                            rx={boxH / 2}
+                            ry={boxH / 2}
+                            fill="white"
+                            stroke={r.color}
+                            strokeWidth={(isHov ? 2.5 : 1.8) / renderScale}
+                          />
+                        );
+                      })()}
+                      {/* Label content:
                        - tuner    → inner pill + DOMINANT inline (single line)
                        - combined → tuner pill+DOMINANT row above category text
                        - category → plain text lines */}
-                  {r.kind === "combined" ? (() => {
-                    const pillFont = fontSize;
-                    const pillPadX = 7 / renderScale;
-                    const pillPadY = 3 / renderScale;
-                    const charW = pillFont * 0.62;
-                    const tunerAbbr = r.tunerLabel ?? "";
-                    const pillW = tunerAbbr.length * charW + pillPadX * 2;
-                    const pillH = pillFont + pillPadY * 2;
-                    const subText = "DOMINANT";
-                    const subW = subText.length * charW;
-                    const innerGap = 6 / renderScale;
-                    const totalW = pillW + innerGap + subW;
-                    const lineH = fontSize * 1.05;
-                    const interRowGap = 10 / renderScale;
-                    // Top row = tuner pill + DOMINANT; below it, category lines
-                    // separated by `interRowGap` for visual breathing room.
-                    const catLines = r.lines.slice(1);
-                    const tunerRowH = pillH;
-                    const catBlockH = catLines.length * lineH;
-                    const totalContentH = tunerRowH + interRowGap + catBlockH;
-                    const startY = r.labelY - totalContentH / 2;
-                    const topY = startY + tunerRowH / 2;
-                    const catBlockStartY = startY + tunerRowH + interRowGap;
-                    const pillCx = r.labelX - totalW / 2 + pillW / 2;
-                    const subCx = r.labelX + totalW / 2 - subW / 2;
-                    return (
-                      <>
-                        <rect
-                          x={pillCx - pillW / 2}
-                          y={topY - pillH / 2}
-                          width={pillW}
-                          height={pillH}
-                          rx={pillH / 2}
-                          ry={pillH / 2}
-                          fill={r.tunerColor ?? r.color}
-                        />
-                        <text
-                          x={pillCx}
-                          y={topY}
-                          textAnchor="middle"
-                          dominantBaseline="central"
-                          fontSize={pillFont}
-                          fontWeight={700}
-                          fill="white"
-                          style={{ userSelect: "none" }}
-                        >
-                          {tunerAbbr}
-                        </text>
-                        <text
-                          x={subCx}
-                          y={topY}
-                          textAnchor="middle"
-                          dominantBaseline="central"
-                          fontSize={pillFont}
-                          fontWeight={700}
-                          fill={r.tunerColor ?? r.color}
-                          style={{
-                            userSelect: "none",
-                            letterSpacing: 0.4,
-                          }}
-                        >
-                          {subText}
-                        </text>
-                        {catLines.map((line, li) => (
-                          <text
-                            key={li}
-                            x={r.labelX}
-                            y={catBlockStartY + lineH * (li + 0.5)}
-                            textAnchor="middle"
-                            dominantBaseline="central"
-                            fontSize={fontSize}
-                            fontWeight={isHov ? 900 : 800}
-                            fill={r.color}
-                            style={{
-                              userSelect: "none",
-                              letterSpacing: 0.2,
-                              textTransform: "uppercase",
-                            }}
-                          >
-                            {line}
-                          </text>
-                        ))}
-                      </>
-                    );
-                  })() : r.kind === "tuner" ? (() => {
-                    const pillFont = fontSize;
-                    const pillPadX = 7 / renderScale;
-                    const pillPadY = 3 / renderScale;
-                    const charW = pillFont * 0.62;
-                    const tunerAbbr = r.label;
-                    const pillW = tunerAbbr.length * charW + pillPadX * 2;
-                    const pillH = pillFont + pillPadY * 2;
-                    const subText = "DOMINANT";
-                    const subW = subText.length * charW;
-                    const innerGap = 6 / renderScale;
-                    const totalW = pillW + innerGap + subW;
-                    const pillCx = r.labelX - totalW / 2 + pillW / 2;
-                    const subCx = r.labelX + totalW / 2 - subW / 2;
-                    return (
-                      <>
-                        <rect
-                          x={pillCx - pillW / 2}
-                          y={r.labelY - pillH / 2}
-                          width={pillW}
-                          height={pillH}
-                          rx={pillH / 2}
-                          ry={pillH / 2}
-                          fill={r.color}
-                        />
-                        <text
-                          x={pillCx}
-                          y={r.labelY}
-                          textAnchor="middle"
-                          dominantBaseline="central"
-                          fontSize={pillFont}
-                          fontWeight={700}
-                          fill="white"
-                          style={{ userSelect: "none" }}
-                        >
-                          {tunerAbbr}
-                        </text>
-                        <text
-                          x={subCx}
-                          y={r.labelY}
-                          textAnchor="middle"
-                          dominantBaseline="central"
-                          fontSize={pillFont}
-                          fontWeight={700}
-                          fill={r.color}
-                          style={{
-                            userSelect: "none",
-                            letterSpacing: 0.4,
-                          }}
-                        >
-                          {subText}
-                        </text>
-                      </>
-                    );
-                  })() : (
-                    r.lines.map((line, li) => {
-                      const lineH = fontSize * 1.05;
-                      const yOffset = (li - (r.lines.length - 1) / 2) * lineH;
-                      return (
-                        <text
-                          key={li}
-                          x={r.labelX}
-                          y={r.labelY + yOffset}
-                          textAnchor="middle"
-                          dominantBaseline="central"
-                          fontSize={fontSize}
-                          fontWeight={isHov ? 900 : 800}
-                          fill={r.color}
-                          style={{
-                            userSelect: "none",
-                            letterSpacing: 0.2,
-                            textTransform: "uppercase",
-                          }}
-                        >
-                          {line}
-                        </text>
-                      );
-                    })
-                  )}
+                      {r.kind === "combined"
+                        ? (() => {
+                            const pillFont = fontSize;
+                            const pillPadX = 7 / renderScale;
+                            const pillPadY = 3 / renderScale;
+                            const charW = pillFont * 0.62;
+                            const tunerAbbr = r.tunerLabel ?? "";
+                            const pillW =
+                              tunerAbbr.length * charW + pillPadX * 2;
+                            const pillH = pillFont + pillPadY * 2;
+                            const subText = "DOMINANT";
+                            const subW = subText.length * charW;
+                            const innerGap = 6 / renderScale;
+                            const totalW = pillW + innerGap + subW;
+                            const lineH = fontSize * 1.05;
+                            const interRowGap = 10 / renderScale;
+                            // Top row = tuner pill + DOMINANT; below it, category lines
+                            // separated by `interRowGap` for visual breathing room.
+                            const catLines = r.lines.slice(1);
+                            const tunerRowH = pillH;
+                            const catBlockH = catLines.length * lineH;
+                            const totalContentH =
+                              tunerRowH + interRowGap + catBlockH;
+                            const startY = r.labelY - totalContentH / 2;
+                            const topY = startY + tunerRowH / 2;
+                            const catBlockStartY =
+                              startY + tunerRowH + interRowGap;
+                            const pillCx = r.labelX - totalW / 2 + pillW / 2;
+                            const subCx = r.labelX + totalW / 2 - subW / 2;
+                            return (
+                              <>
+                                <rect
+                                  x={pillCx - pillW / 2}
+                                  y={topY - pillH / 2}
+                                  width={pillW}
+                                  height={pillH}
+                                  rx={pillH / 2}
+                                  ry={pillH / 2}
+                                  fill={r.tunerColor ?? r.color}
+                                />
+                                <text
+                                  x={pillCx}
+                                  y={topY}
+                                  textAnchor="middle"
+                                  dominantBaseline="central"
+                                  fontSize={pillFont}
+                                  fontWeight={700}
+                                  fill="white"
+                                  style={{ userSelect: "none" }}
+                                >
+                                  {tunerAbbr}
+                                </text>
+                                <text
+                                  x={subCx}
+                                  y={topY}
+                                  textAnchor="middle"
+                                  dominantBaseline="central"
+                                  fontSize={pillFont}
+                                  fontWeight={700}
+                                  fill={r.tunerColor ?? r.color}
+                                  style={{
+                                    userSelect: "none",
+                                    letterSpacing: 0.4,
+                                  }}
+                                >
+                                  {subText}
+                                </text>
+                                {catLines.map((line, li) => (
+                                  <text
+                                    key={li}
+                                    x={r.labelX}
+                                    y={catBlockStartY + lineH * (li + 0.5)}
+                                    textAnchor="middle"
+                                    dominantBaseline="central"
+                                    fontSize={fontSize}
+                                    fontWeight={isHov ? 900 : 800}
+                                    fill={r.color}
+                                    style={{
+                                      userSelect: "none",
+                                      letterSpacing: 0.2,
+                                      textTransform: "uppercase",
+                                    }}
+                                  >
+                                    {line}
+                                  </text>
+                                ))}
+                              </>
+                            );
+                          })()
+                        : r.kind === "tuner"
+                          ? (() => {
+                              const pillFont = fontSize;
+                              const pillPadX = 7 / renderScale;
+                              const pillPadY = 3 / renderScale;
+                              const charW = pillFont * 0.62;
+                              const tunerAbbr = r.label;
+                              const pillW =
+                                tunerAbbr.length * charW + pillPadX * 2;
+                              const pillH = pillFont + pillPadY * 2;
+                              const subText = "DOMINANT";
+                              const subW = subText.length * charW;
+                              const innerGap = 6 / renderScale;
+                              const totalW = pillW + innerGap + subW;
+                              const pillCx = r.labelX - totalW / 2 + pillW / 2;
+                              const subCx = r.labelX + totalW / 2 - subW / 2;
+                              return (
+                                <>
+                                  <rect
+                                    x={pillCx - pillW / 2}
+                                    y={r.labelY - pillH / 2}
+                                    width={pillW}
+                                    height={pillH}
+                                    rx={pillH / 2}
+                                    ry={pillH / 2}
+                                    fill={r.color}
+                                  />
+                                  <text
+                                    x={pillCx}
+                                    y={r.labelY}
+                                    textAnchor="middle"
+                                    dominantBaseline="central"
+                                    fontSize={pillFont}
+                                    fontWeight={700}
+                                    fill="white"
+                                    style={{ userSelect: "none" }}
+                                  >
+                                    {tunerAbbr}
+                                  </text>
+                                  <text
+                                    x={subCx}
+                                    y={r.labelY}
+                                    textAnchor="middle"
+                                    dominantBaseline="central"
+                                    fontSize={pillFont}
+                                    fontWeight={700}
+                                    fill={r.color}
+                                    style={{
+                                      userSelect: "none",
+                                      letterSpacing: 0.4,
+                                    }}
+                                  >
+                                    {subText}
+                                  </text>
+                                </>
+                              );
+                            })()
+                          : r.lines.map((line, li) => {
+                              const lineH = fontSize * 1.05;
+                              const yOffset =
+                                (li - (r.lines.length - 1) / 2) * lineH;
+                              return (
+                                <text
+                                  key={li}
+                                  x={r.labelX}
+                                  y={r.labelY + yOffset}
+                                  textAnchor="middle"
+                                  dominantBaseline="central"
+                                  fontSize={fontSize}
+                                  fontWeight={isHov ? 900 : 800}
+                                  fill={r.color}
+                                  style={{
+                                    userSelect: "none",
+                                    letterSpacing: 0.2,
+                                    textTransform: "uppercase",
+                                  }}
+                                >
+                                  {line}
+                                </text>
+                              );
+                            })}
+                    </g>
                   </g>
-                </g>
-              );
-            })}
+                );
+              })}
 
-          </g>
-        </svg>
+              {/* ── Cart amber-dot layer ──
+                Drawn AFTER tiles + regions so the dot is always on top of any
+                inset shadow / border / leader. Hovered cells use the in-tile
+                +/− button instead, so we skip them here. */}
+              {data.hexTiles
+                .filter(
+                  (t) =>
+                    t.cluster &&
+                    cartIds.has(t.cluster.id) &&
+                    hoveredClusterId !== t.cluster.id,
+                )
+                .map((t) => {
+                  const cellScale = cellScaleOf(t.cluster!.id);
+                  return (
+                    <circle
+                      key={`cart-dot-${t.cluster!.id}`}
+                      cx={t.x + HEX_SIZE * 0.55 * cellScale}
+                      cy={t.y - HEX_SIZE * 0.55 * cellScale}
+                      r={HEX_SIZE * 0.14 * cellScale}
+                      fill="#F59E0B"
+                      stroke="white"
+                      strokeWidth={1.2}
+                      pointerEvents="none"
+                    />
+                  );
+                })}
+            </g>
+          </svg>
 
-        {/* Complementary empty-cart overlay */}
-        {effectiveColorMode === "complementary" && cartIds.size === 0 && (
-          <div
-            style={{
-              position: "absolute",
-              inset: 0,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              pointerEvents: "none",
-              zIndex: 5,
-            }}
-          >
+          {/* Complementary empty-cart overlay */}
+          {effectiveColorMode === "complementary" && cartIds.size === 0 && (
             <div
               style={{
-                background: "rgba(255,255,255,0.94)",
-                backdropFilter: "blur(4px)",
-                borderRadius: 10,
-                border: "1px solid #E5E7EB",
-                boxShadow: "0 4px 16px rgba(0,0,0,0.08)",
-                padding: "12px 20px",
-                fontSize: 15,
-                fontWeight: 500,
-                color: "#475569",
-                textAlign: "center",
-                maxWidth: 360,
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                pointerEvents: "none",
+                zIndex: 5,
               }}
             >
-              Add at least one cell to the working set to see complementary candidates.
-              <div style={{ fontSize: 13, color: "#94A3B8", marginTop: 4 }}>
-                Shift+click a cell to add it.
+              <div
+                style={{
+                  background: "rgba(255,255,255,0.94)",
+                  backdropFilter: "blur(4px)",
+                  borderRadius: 10,
+                  border: "1px solid #E5E7EB",
+                  boxShadow: "0 4px 16px rgba(0,0,0,0.08)",
+                  padding: "12px 20px",
+                  fontSize: 15,
+                  fontWeight: 500,
+                  color: "#475569",
+                  textAlign: "center",
+                  maxWidth: 360,
+                }}
+              >
+                Add at least one cell to the working set to see complementary
+                candidates.
+                <div style={{ fontSize: 13, color: "#94A3B8", marginTop: 4 }}>
+                  Shift+click a cell to add it.
+                </div>
               </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {/* In-map legend (top-right) */}
-        {(effectiveColorMode === "tuner-perf" ||
-          (selectedParam && paramCellBins)) && (
+          {/* In-map legend (top-right). Always rendered — child blocks decide
+            their own visibility based on mode. */}
           <div
             style={{
               position: "absolute",
@@ -2568,8 +3203,79 @@ export function HexMap({
               pointerEvents: "none",
             }}
           >
-            {/* Overview legend — tuner-dominant colors + Mixed */}
-            {effectiveColorMode === "tuner-perf" && (
+            {/* Toolbar row — master legend toggle + figure-capture legend
+                toggle (Tuner mode only). */}
+            <div
+              style={{
+                display: "flex",
+                gap: 6,
+                pointerEvents: "auto",
+              }}
+            >
+              <button
+                onClick={() => setLegendsVisible((v) => !v)}
+                title={legendsVisible ? "Hide legends" : "Show legends"}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  background: legendsVisible
+                    ? "rgba(255,255,255,0.92)"
+                    : "rgba(15,23,42,0.85)",
+                  color: legendsVisible ? "#374151" : "white",
+                  border: "1px solid #E5E7EB",
+                  borderRadius: 8,
+                  boxShadow: "0 2px 8px rgba(0,0,0,0.10)",
+                  padding: "5px 9px",
+                  fontSize: 11,
+                  fontWeight: 600,
+                  cursor: "pointer",
+                }}
+              >
+                {legendsVisible ? "Hide legends" : "Show legends"}
+              </button>
+              {effectiveColorMode === "tuner-perf" && legendsVisible && (
+                <button
+                  onClick={() => setFigureLegendVisible((v) => !v)}
+                  title={
+                    figureLegendVisible
+                      ? "Back to standard legends"
+                      : "Show figure-capture legend"
+                  }
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                    background: figureLegendVisible
+                      ? "rgba(15,23,42,0.85)"
+                      : "rgba(255,255,255,0.92)",
+                    color: figureLegendVisible ? "white" : "#374151",
+                    border: "1px solid #E5E7EB",
+                    borderRadius: 8,
+                    boxShadow: "0 2px 8px rgba(0,0,0,0.10)",
+                    padding: "5px 9px",
+                    fontSize: 11,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                  }}
+                >
+                  <svg width={12} height={12} viewBox="-6 -6 12 12">
+                    <path
+                      d={getHexPath(4.5)}
+                      fill="none"
+                      stroke={figureLegendVisible ? "white" : "#475569"}
+                      strokeWidth={1.4}
+                    />
+                  </svg>
+                  Figure legend
+                </button>
+              )}
+            </div>
+
+            {legendsVisible && (<>
+            {/* Original Tuner-mode legend — tuner-dominant colors + Mixed.
+                Hidden when the big figure-capture legend is active. */}
+            {effectiveColorMode === "tuner-perf" && !figureLegendVisible && (
               <div
                 style={{
                   background: "rgba(255,255,255,0.92)",
@@ -2659,192 +3365,922 @@ export function HexMap({
               </div>
             )}
 
-            {/* Cell-size legend — fixed trial-count buckets drive the hex scale. */}
-            {cellSizeTier.tierMap.size > 0 && (() => {
-              const fmt = (v: number) => v.toLocaleString();
-              const tiers = [
-                {
-                  key: "low",
-                  scale: 0.7,
-                  range: `≤ ${fmt(cellSizeTier.lowMax)}`,
-                },
-                {
-                  key: "mid",
-                  scale: 1.0,
-                  range: `${fmt(cellSizeTier.lowMax)}–${fmt(cellSizeTier.midMax)}`,
-                },
-                {
-                  key: "high",
-                  scale: 1.25,
-                  range: `> ${fmt(cellSizeTier.midMax)}`,
-                },
-              ] as const;
-              const hexBoxPx = 26;
-              const hexR = 9; // legend hex base radius
-              return (
-                <div
-                  style={{
-                    background: "rgba(255,255,255,0.92)",
-                    backdropFilter: "blur(4px)",
-                    borderRadius: 8,
-                    border: "1px solid #E5E7EB",
-                    boxShadow: "0 2px 8px rgba(0,0,0,0.10)",
-                    padding: "6px 10px",
-                  }}
-                >
+            {/* Tuner-mode big legend — figure-style consolidated CELL + REGION
+                key. Replaces all other legend cards while in this mode. */}
+            {effectiveColorMode === "tuner-perf" &&
+              figureLegendVisible &&
+              (() => {
+                const fmt = (v: number) => v.toLocaleString();
+                const sectionHeader = (title: string) => (
                   <div
                     style={{
-                      fontSize: 13,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
+                      margin: "0 0 10px",
+                    }}
+                  >
+                    <div
+                      style={{ flex: 1, height: 1, background: "#CBD5E1" }}
+                    />
+                    <span
+                      style={{
+                        fontSize: 16,
+                        fontWeight: 700,
+                        letterSpacing: 1.8,
+                        color: "#475569",
+                      }}
+                    >
+                      {title}
+                    </span>
+                    <div
+                      style={{ flex: 1, height: 1, background: "#CBD5E1" }}
+                    />
+                  </div>
+                );
+                const subHeader = (title: string) => (
+                  <div
+                    style={{
+                      fontSize: 16,
                       fontWeight: 700,
                       color: "#374151",
-                      marginBottom: 6,
+                      marginBottom: 4,
                     }}
                   >
-                    Trials per cell
+                    {title}
                   </div>
+                );
+                const tiers = [
+                  { scale: 0.7, range: `≤ ${fmt(cellSizeTier.lowMax)}` },
+                  {
+                    scale: 1.0,
+                    range: `${fmt(cellSizeTier.lowMax)}–${fmt(cellSizeTier.midMax)}`,
+                  },
+                  { scale: 1.25, range: `> ${fmt(cellSizeTier.midMax)}` },
+                ];
+                // Match the apparent hex radius on the map: HEX_SIZE × scale
+                // (the same product that produces an on-map cell's visible
+                // size). Multiplied by per-tier cellScale (0.7 / 1.0 / 1.25).
+                const baseHexR = HEX_SIZE * scale;
+                const maxTierR = baseHexR * 1.25;
+                const sampleBox = Math.max(Math.ceil(maxTierR * 2 + 10), 36);
+                // Default-tier hex used in annotation rows.
+                const sampleHexR = baseHexR;
+                // Same font sizes the on-map highlight labels use (12px value,
+                // 10px unit) so the legend's sample hexes match what the user
+                // sees in the data view.
+                const VALUE_SIZE = 12;
+                const UNIT_SIZE = 10;
+                const LINE_GAP = 4;
+                // Match map's halo (white stroke + paintOrder=stroke) so the
+                // sample text reads exactly the same as on-map highlight text.
+                const HALO_W = 3;
+                const sampleHex = (
+                  opts: { text?: string; sub?: string; dot?: boolean } = {},
+                ) => {
+                  const totalH = opts.text
+                    ? opts.sub
+                      ? VALUE_SIZE + LINE_GAP + UNIT_SIZE
+                      : VALUE_SIZE
+                    : 0;
+                  const topY = -totalH / 2;
+                  const valueY = opts.sub ? topY + VALUE_SIZE / 2 : 0;
+                  const unitY = topY + VALUE_SIZE + LINE_GAP + UNIT_SIZE / 2;
+                  return (
+                    <svg
+                      width={sampleBox}
+                      height={sampleBox}
+                      viewBox={`-${sampleBox / 2} -${sampleBox / 2} ${sampleBox} ${sampleBox}`}
+                    >
+                      {/* Cell hex — no visible border, matching the map where
+                        the default cell stroke is barely-perceptible (0.5px
+                        SVG × scale ≈ sub-pixel). */}
+                      <path
+                        d={getHexPath(sampleHexR)}
+                        fill={MIXED_COLOR}
+                        stroke="none"
+                      />
+                      {opts.text && (
+                        <text
+                          x={0}
+                          y={valueY}
+                          textAnchor="middle"
+                          dominantBaseline="central"
+                          fontSize={VALUE_SIZE}
+                          fontWeight={700}
+                          fill="#0F172A"
+                          stroke="white"
+                          strokeWidth={HALO_W}
+                          paintOrder="stroke"
+                        >
+                          {opts.text}
+                        </text>
+                      )}
+                      {opts.sub && (
+                        <text
+                          x={0}
+                          y={unitY}
+                          textAnchor="middle"
+                          dominantBaseline="central"
+                          fontSize={UNIT_SIZE}
+                          fontWeight={600}
+                          fill="#475569"
+                          stroke="white"
+                          strokeWidth={HALO_W}
+                          paintOrder="stroke"
+                        >
+                          {opts.sub}
+                        </text>
+                      )}
+                      {/* Amber dot — proportions match the on-map cart marker
+                        (r = HEX × 0.14, offset = HEX × 0.55) so the legend
+                        glyph and the actual map glyph are pixel-equivalent. */}
+                      {opts.dot && (
+                        <circle
+                          cx={sampleHexR * 0.55}
+                          cy={-sampleHexR * 0.55}
+                          r={sampleHexR * 0.14}
+                          fill="#F59E0B"
+                          stroke="white"
+                          strokeWidth={1.2 * scale}
+                        />
+                      )}
+                    </svg>
+                  );
+                };
+                // Annotation row template
+                const annoRow = (
+                  visual: React.ReactNode,
+                  label: string,
+                  key: string,
+                ) => (
+                  <div
+                    key={key}
+                    style={{ display: "flex", alignItems: "center", gap: 12 }}
+                  >
+                    <div
+                      style={{
+                        width: sampleBox,
+                        flexShrink: 0,
+                        display: "flex",
+                        justifyContent: "center",
+                      }}
+                    >
+                      {visual}
+                    </div>
+                    <span style={{ fontSize: 16, color: "#475569" }}>
+                      {label}
+                    </span>
+                  </div>
+                );
+                // Width scales loosely with hex size so larger viewports get
+                // a roomier legend (still capped to keep portrait layouts sane).
+                const legendWidth = Math.min(
+                  Math.max(340, sampleBox * 6 + 40),
+                  420,
+                );
+                return (
                   <div
                     style={{
-                      display: "flex",
-                      alignItems: "flex-end",
-                      gap: 12,
+                      pointerEvents: "auto",
+                      position: "relative",
+                      background: "rgba(255,255,255)",
+                      backdropFilter: "blur(4px)",
+                      borderRadius: 12,
+                      // border: "1px solid #E5E7EB",
+                      // boxShadow: "0 6px 22px rgba(0,0,0,0.12)",
+                      padding: "14px 18px 16px",
+                      width: legendWidth,
+                      color: "#374151",
                     }}
                   >
-                    {tiers.map((t) => (
-                      <div
-                        key={t.key}
-                        style={{
-                          display: "flex",
-                          flexDirection: "column",
-                          alignItems: "center",
-                          gap: 2,
-                        }}
-                      >
-                        <svg
-                          width={hexBoxPx}
-                          height={hexBoxPx}
-                          viewBox={`-${hexBoxPx / 2} -${hexBoxPx / 2} ${hexBoxPx} ${hexBoxPx}`}
-                        >
-                          <path
-                            d={getHexPath(hexR * t.scale)}
-                            fill="#94A3B8"
-                            stroke="#475569"
-                            strokeWidth={0.8}
-                          />
-                        </svg>
-                        <span
-                          style={{
-                            fontSize: 11,
-                            color: "#6B7280",
-                            fontWeight: 600,
-                          }}
-                        >
-                          {t.range}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              );
-            })()}
+                    <button
+                      onClick={() => setFigureLegendVisible(false)}
+                      title="Hide legend"
+                      style={{
+                        position: "absolute",
+                        top: 6,
+                        right: 8,
+                        width: 22,
+                        height: 22,
+                        border: "none",
+                        borderRadius: 6,
+                        background: "transparent",
+                        color: "#94A3B8",
+                        fontSize: 16,
+                        lineHeight: 1,
+                        cursor: "pointer",
+                        pointerEvents: "auto",
+                      }}
+                    >
+                      ×
+                    </button>
+                    {sectionHeader("CELL")}
 
-            {/* Parameter bin legend */}
-            {selectedParam && paramCellBins && (() => {
-              const isNumeric = selectedParamType === "numeric";
-              const manyBins = paramCellBins.binNames.length > 3;
-              // Numeric labels carry the range string and must stay readable.
-              const layoutStyle: React.CSSProperties = isNumeric
-                ? {
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: 2,
-                  }
-                : manyBins
-                  ? {
-                      display: "grid",
-                      gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-                      columnGap: 10,
-                      rowGap: 2,
-                    }
-                  : {
-                      display: "flex",
-                      flexWrap: "wrap",
-                      gap: "2px 8px",
-                      alignItems: "center",
-                    };
-              return (
-                <div
-                  style={{
-                    background: "rgba(255,255,255,0.92)",
-                    backdropFilter: "blur(4px)",
-                    borderRadius: 8,
-                    border: "1px solid #E5E7EB",
-                    boxShadow: "0 2px 8px rgba(0,0,0,0.10)",
-                    padding: "6px 10px",
-                    maxWidth: isNumeric ? 260 : 240,
-                  }}
-                >
-                  <div style={{ fontSize: 13, fontWeight: 700, color: "#374151", marginBottom: 4 }}>
-                    {selectedParam} ({selectedParamType})
-                  </div>
-                  <div style={layoutStyle}>
-                    {paramCellBins.binNames.map((bin) => (
+                    {/* Tuner colors */}
+                    <div
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "1fr 1fr 1fr 1fr",
+                        columnGap: 12,
+                        rowGap: 6,
+                        marginBottom: 6,
+                      }}
+                    >
+                      {TUNER_NAMES.filter((t) => selectedTuners.has(t)).map(
+                        (t) => (
+                          <div
+                            key={t}
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 8,
+                              fontSize: 14,
+                            }}
+                          >
+                            <span
+                              style={{
+                                width: 12,
+                                height: 12,
+                                borderRadius: "50%",
+                                background: TUNER_COLORS[t],
+                                flexShrink: 0,
+                              }}
+                            />
+                            <span style={{ fontWeight: 600 }}>
+                              {TUNER_DISPLAY_NAMES[t]}
+                            </span>
+                          </div>
+                        ),
+                      )}
                       <div
-                        key={bin}
                         style={{
                           display: "flex",
                           alignItems: "center",
-                          gap: 5,
-                          minWidth: 0,
+                          gap: 8,
+                          fontSize: 14,
                         }}
                       >
-                        <div
+                        <span
                           style={{
                             width: 12,
                             height: 12,
-                            borderRadius: 2,
-                            backgroundColor: paramCellBins.binColors[bin] ?? MIXED_COLOR,
-                            opacity: 0.7,
+                            borderRadius: "50%",
+                            background: MIXED_COLOR,
                             flexShrink: 0,
                           }}
                         />
-                        <span
-                          style={{
-                            fontSize: 13,
-                            fontWeight: 600,
-                            color: paramCellBins.binColors[bin] ?? MIXED_COLOR,
-                            whiteSpace: "nowrap",
-                            overflow: isNumeric ? "visible" : "hidden",
-                            textOverflow: isNumeric ? "clip" : "ellipsis",
-                          }}
-                          title={bin}
-                        >
-                          {bin}
-                        </span>
+                        <span style={{ fontWeight: 600 }}>Mixed</span>
                       </div>
-                    ))}
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: "#94A3B8",
+                        fontStyle: "italic",
+                        marginBottom: 14,
+                      }}
+                    >
+                      {/* ≥ 50% of trials → tuner color */}
+                    </div>
+
+                    {/* Trials-per-cell hex sizes */}
+                    {subHeader("Trials per cell")}
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "flex-end",
+                        gap: 18,
+                        marginBottom: 14,
+                      }}
+                    >
+                      {tiers.map((t) => (
+                        <div
+                          key={t.range}
+                          style={{
+                            display: "flex",
+                            flexDirection: "column",
+                            alignItems: "center",
+                            gap: 4,
+                          }}
+                        >
+                          <svg
+                            width={sampleBox}
+                            height={sampleBox}
+                            viewBox={`-${sampleBox / 2} -${sampleBox / 2} ${sampleBox} ${sampleBox}`}
+                          >
+                            <path
+                              d={getHexPath(sampleHexR * t.scale)}
+                              fill={MIXED_COLOR}
+                              stroke="none"
+                            />
+                          </svg>
+                          <span
+                            style={{
+                              fontSize: 13,
+                              color: "#6B7280",
+                              fontWeight: 600,
+                            }}
+                          >
+                            {t.range}
+                          </span>
+                        </div>
+                      ))}
+                      <div
+                        style={{
+                          flex: 1,
+                          fontSize: 11,
+                          color: "#94A3B8",
+                          fontStyle: "italic",
+                          alignSelf: "flex-end",
+                          paddingBottom: 18,
+                        }}
+                      >
+                        {/* trials */}
+                      </div>
+                    </div>
+
+                    {/* Annotations */}
+                    {subHeader("Annotations")}
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 1,
+                        marginBottom: 4,
+                      }}
+                    >
+                      {annoRow(
+                        sampleHex({ text: "82.6", sub: "branches" }),
+                        "Min / Max coverage",
+                        "anno-cov",
+                      )}
+                      {annoRow(
+                        sampleHex({ text: "16", sub: "trials" }),
+                        "Density extremes",
+                        "anno-dens",
+                      )}
+                      {annoRow(
+                        sampleHex({ dot: true }),
+                        "Working set member",
+                        "anno-cart",
+                      )}
+                    </div>
+
+                    {sectionHeader("REGION")}
+
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 2,
+                      }}
+                    >
+                      {/* Coverage region — slate inset shadow band (clipped to
+                        the hex interior) plus the unified dark border. Mirrors
+                        the on-map "tuner-perf" region rendering. */}
+                      {annoRow(
+                        <svg
+                          width={sampleBox}
+                          height={sampleBox}
+                          viewBox={`-${sampleBox / 2} -${sampleBox / 2} ${sampleBox} ${sampleBox}`}
+                        >
+                          <defs>
+                            <clipPath id="legend-cov-region-clip">
+                              <path d={getHexPath(sampleHexR)} />
+                            </clipPath>
+                          </defs>
+                          <path
+                            d={getHexPath(sampleHexR)}
+                            fill="none"
+                            stroke="#475569"
+                            strokeWidth={sampleHexR * 0.7}
+                            strokeOpacity={0.4}
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            clipPath="url(#legend-cov-region-clip)"
+                          />
+                          <path
+                            d={getHexPath(sampleHexR)}
+                            fill="none"
+                            stroke="white"
+                            strokeWidth={5.5}
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            opacity={0.9}
+                          />
+                          <path
+                            d={getHexPath(sampleHexR)}
+                            fill="none"
+                            stroke="#0F172A"
+                            strokeWidth={3}
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        </svg>,
+                        "Coverage region",
+                        "reg-cov",
+                      )}
+                      {/* Contrastive parameter region — same border + inset
+                        shadow recipe but in a category color, plus the 0.28
+                        cell wash that param mode adds inside region cells. */}
+                      {annoRow(
+                        <svg
+                          width={sampleBox}
+                          height={sampleBox}
+                          viewBox={`-${sampleBox / 2} -${sampleBox / 2} ${sampleBox} ${sampleBox}`}
+                        >
+                          <defs>
+                            <clipPath id="legend-cp-region-clip">
+                              <path d={getHexPath(sampleHexR)} />
+                            </clipPath>
+                          </defs>
+                          <path
+                            d={getHexPath(sampleHexR)}
+                            fill="#F28E2B"
+                            fillOpacity={0.28}
+                          />
+                          <path
+                            d={getHexPath(sampleHexR)}
+                            fill="none"
+                            stroke="#F28E2B"
+                            strokeWidth={sampleHexR * 0.7}
+                            strokeOpacity={0.4}
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            clipPath="url(#legend-cp-region-clip)"
+                          />
+                          <path
+                            d={getHexPath(sampleHexR)}
+                            fill="none"
+                            stroke="white"
+                            strokeWidth={5.5}
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            opacity={0.9}
+                          />
+                          <path
+                            d={getHexPath(sampleHexR)}
+                            fill="none"
+                            stroke="#0F172A"
+                            strokeWidth={3}
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        </svg>,
+                        "Contrastive parameter region",
+                        "reg-contra",
+                      )}
+                      {/* Region annotation — bordered "Annotation" label + the
+                        cubic Bezier leader curve + a circular handle at the
+                        anchor end. No sample cell shown (per request). */}
+                      {(() => {
+                        const annoSvgW = 152;
+                        const annoSvgH = 44;
+                        const cy = annoSvgH / 2;
+                        const labelW = 92;
+                        const labelH = 24;
+                        const labelX1 = 4;
+                        const labelX2 = labelX1 + labelW;
+                        const handleX = annoSvgW - 8;
+                        // Cubic curve from label right edge → handle. Control
+                        // offsets are roughly ⅓ of the gap so the curve still
+                        // bends visibly even at the shortened length.
+                        const curveD = `M ${labelX2},${cy} C ${labelX2 + 15},${cy - 8} ${handleX - 15},${cy + 8} ${handleX},${cy}`;
+                        return (
+                          <div
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 12,
+                            }}
+                          >
+                            <svg width={annoSvgW} height={annoSvgH}>
+                              {/* Label box — pill-shape (rx = h/2) to match the
+                                on-map region label box; stroke width 1.8 px
+                                matches the map's apparent border (1.8 SVG ÷
+                                renderScale, then × outer scale). */}
+                              <path
+                                d={curveD}
+                                fill="none"
+                                stroke="white"
+                                strokeWidth={2.7}
+                                strokeLinecap="round"
+                                opacity={0.85}
+                              />
+                              <path
+                                d={curveD}
+                                fill="none"
+                                stroke="#0F172A"
+                                strokeWidth={1.2}
+                                strokeLinecap="round"
+                              />
+                              <rect
+                                x={labelX1}
+                                y={cy - labelH / 2}
+                                width={labelW}
+                                height={labelH}
+                                rx={labelH / 2}
+                                ry={labelH / 2}
+                                fill="white"
+                                stroke="#0F172A"
+                                strokeWidth={1.8}
+                              />
+                              <text
+                                x={labelX1 + labelW / 2}
+                                y={cy + 0.5}
+                                textAnchor="middle"
+                                dominantBaseline="central"
+                                fontSize={12}
+                                fontWeight={700}
+                                fill="#0F172A"
+                              >
+                                Annotation
+                              </text>
+                              {/* Bezier leader — apparent widths matching the
+                                map: white underlay 2.7 px, dark stroke 1.2
+                                px (default, non-hover values). */}
+
+                              {/* Circle handle at the anchor end */}
+                              <circle
+                                cx={handleX}
+                                cy={cy}
+                                r={3.5}
+                                fill="#475569"
+                                stroke="white"
+                                strokeWidth={1.4}
+                              />
+                            </svg>
+                            <span style={{ fontSize: 16, color: "#475569" }}>
+                              Region annotation
+                            </span>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  </div>
+                );
+              })()}
+
+            {/* Cell-size legend — fixed trial-count buckets drive the hex scale.
+                Hidden in figure-capture mode (covered by the big legend). */}
+            {!(effectiveColorMode === "tuner-perf" && figureLegendVisible) &&
+              cellSizeTier.tierMap.size > 0 &&
+              (() => {
+                const fmt = (v: number) => v.toLocaleString();
+                const tiers = [
+                  {
+                    key: "low",
+                    scale: 0.7,
+                    range: `≤ ${fmt(cellSizeTier.lowMax)}`,
+                  },
+                  {
+                    key: "mid",
+                    scale: 1.0,
+                    range: `${fmt(cellSizeTier.lowMax)}–${fmt(cellSizeTier.midMax)}`,
+                  },
+                  {
+                    key: "high",
+                    scale: 1.25,
+                    range: `> ${fmt(cellSizeTier.midMax)}`,
+                  },
+                ] as const;
+                const hexBoxPx = 26;
+                const hexR = 9; // legend hex base radius
+                return (
+                  <div
+                    style={{
+                      background: "rgba(255,255,255,0.92)",
+                      backdropFilter: "blur(4px)",
+                      borderRadius: 8,
+                      border: "1px solid #E5E7EB",
+                      boxShadow: "0 2px 8px rgba(0,0,0,0.10)",
+                      padding: "6px 10px",
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 13,
+                        fontWeight: 700,
+                        color: "#374151",
+                        marginBottom: 6,
+                      }}
+                    >
+                      Trials per cell
+                    </div>
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "flex-end",
+                        gap: 12,
+                      }}
+                    >
+                      {tiers.map((t) => (
+                        <div
+                          key={t.key}
+                          style={{
+                            display: "flex",
+                            flexDirection: "column",
+                            alignItems: "center",
+                            gap: 2,
+                          }}
+                        >
+                          <svg
+                            width={hexBoxPx}
+                            height={hexBoxPx}
+                            viewBox={`-${hexBoxPx / 2} -${hexBoxPx / 2} ${hexBoxPx} ${hexBoxPx}`}
+                          >
+                            <path
+                              d={getHexPath(hexR * t.scale)}
+                              fill="#94A3B8"
+                              stroke="#475569"
+                              strokeWidth={0.8}
+                            />
+                          </svg>
+                          <span
+                            style={{
+                              fontSize: 11,
+                              color: "#6B7280",
+                              fontWeight: 600,
+                            }}
+                          >
+                            {t.range}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+
+            {/* Parameter bin legend */}
+            {selectedParam &&
+              paramCellBins &&
+              (() => {
+                const isNumeric = selectedParamType === "numeric";
+                const manyBins = paramCellBins.binNames.length > 3;
+                // Numeric labels carry the range string and must stay readable.
+                const layoutStyle: React.CSSProperties = isNumeric
+                  ? {
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 2,
+                    }
+                  : manyBins
+                    ? {
+                        display: "grid",
+                        gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+                        columnGap: 10,
+                        rowGap: 2,
+                      }
+                    : {
+                        display: "flex",
+                        flexWrap: "wrap",
+                        gap: "2px 8px",
+                        alignItems: "center",
+                      };
+                return (
+                  <div
+                    style={{
+                      background: "rgba(255,255,255,0.92)",
+                      backdropFilter: "blur(4px)",
+                      borderRadius: 8,
+                      border: "1px solid #E5E7EB",
+                      boxShadow: "0 2px 8px rgba(0,0,0,0.10)",
+                      padding: "6px 10px",
+                      maxWidth: isNumeric ? 260 : 240,
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 13,
+                        fontWeight: 700,
+                        color: "#374151",
+                        marginBottom: 4,
+                      }}
+                    >
+                      {selectedParam} ({selectedParamType})
+                    </div>
+                    <div style={layoutStyle}>
+                      {paramCellBins.binNames.map((bin) => (
+                        <div
+                          key={bin}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 5,
+                            minWidth: 0,
+                          }}
+                        >
+                          <div
+                            style={{
+                              width: 12,
+                              height: 12,
+                              borderRadius: 2,
+                              backgroundColor:
+                                paramCellBins.binColors[bin] ?? MIXED_COLOR,
+                              opacity: 0.7,
+                              flexShrink: 0,
+                            }}
+                          />
+                          <span
+                            style={{
+                              fontSize: 13,
+                              fontWeight: 600,
+                              color:
+                                paramCellBins.binColors[bin] ?? MIXED_COLOR,
+                              whiteSpace: "nowrap",
+                              overflow: isNumeric ? "visible" : "hidden",
+                              textOverflow: isNumeric ? "clip" : "ellipsis",
+                            }}
+                            title={bin}
+                          >
+                            {bin}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+
+            {/* Annotations legend — Tuner / Parameter modes share the same
+                notable-cell labels; Complementary has its own block below.
+                Hidden in figure-capture mode (covered by the big legend). */}
+            {!(effectiveColorMode === "tuner-perf" && figureLegendVisible) &&
+              (effectiveColorMode === "tuner-perf" ||
+                effectiveColorMode === "tuner-param") && (
+              <div
+                style={{
+                  background: "rgba(255,255,255,0.92)",
+                  backdropFilter: "blur(4px)",
+                  borderRadius: 8,
+                  border: "1px solid #E5E7EB",
+                  boxShadow: "0 2px 8px rgba(0,0,0,0.10)",
+                  padding: "6px 10px",
+                  maxWidth: 240,
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: 13,
+                    fontWeight: 700,
+                    color: "#374151",
+                    marginBottom: 6,
+                  }}
+                >
+                  Annotations
+                </div>
+                <div
+                  style={{ display: "flex", flexDirection: "column", gap: 3 }}
+                >
+                  <div
+                    style={{ display: "flex", gap: 8, alignItems: "baseline" }}
+                  >
+                    <span
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 700,
+                        color: "#0F172A",
+                        whiteSpace: "nowrap",
+                        minWidth: 90,
+                      }}
+                    >
+                      N{" "}
+                      <span style={{ fontWeight: 600, color: "#475569" }}>
+                        branches
+                      </span>
+                    </span>
+                    <span style={{ fontSize: 11, color: "#475569" }}>
+                      Max / Min coverage
+                    </span>
+                  </div>
+                  <div
+                    style={{ display: "flex", gap: 8, alignItems: "baseline" }}
+                  >
+                    <span
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 700,
+                        color: "#0F172A",
+                        whiteSpace: "nowrap",
+                        minWidth: 90,
+                      }}
+                    >
+                      N{" "}
+                      <span style={{ fontWeight: 600, color: "#475569" }}>
+                        trials
+                      </span>
+                    </span>
+                    <span style={{ fontSize: 11, color: "#475569" }}>
+                      Densest / Sparsest cell
+                    </span>
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 10,
+                      color: "#94A3B8",
+                      marginTop: 3,
+                      fontStyle: "italic",
+                    }}
+                  >
+                    Pill badge = tuner-exclusive cell
                   </div>
                 </div>
-              );
-            })()}
+              </div>
+            )}
+            {effectiveColorMode === "complementary" && (
+              <div
+                style={{
+                  background: "rgba(255,255,255,0.92)",
+                  backdropFilter: "blur(4px)",
+                  borderRadius: 8,
+                  border: "1px solid #E5E7EB",
+                  boxShadow: "0 2px 8px rgba(0,0,0,0.10)",
+                  padding: "6px 10px",
+                  maxWidth: 260,
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: 13,
+                    fontWeight: 700,
+                    color: "#374151",
+                    marginBottom: 6,
+                  }}
+                >
+                  Annotations
+                </div>
+                <div
+                  style={{ display: "flex", flexDirection: "column", gap: 3 }}
+                >
+                  <div
+                    style={{ display: "flex", gap: 8, alignItems: "baseline" }}
+                  >
+                    <span
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 700,
+                        color: "#0F172A",
+                        whiteSpace: "nowrap",
+                        minWidth: 90,
+                      }}
+                    >
+                      #N
+                    </span>
+                    <span style={{ fontSize: 11, color: "#475569" }}>
+                      Working set member (cluster ID)
+                    </span>
+                  </div>
+                  <div
+                    style={{ display: "flex", gap: 8, alignItems: "baseline" }}
+                  >
+                    <span
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 700,
+                        color: "#0F172A",
+                        whiteSpace: "nowrap",
+                        minWidth: 90,
+                      }}
+                    >
+                      No. N{" "}
+                      <span style={{ fontWeight: 600, color: "#10B981" }}>
+                        +X new
+                      </span>
+                    </span>
+                    <span style={{ fontSize: 11, color: "#475569" }}>
+                      Top complement candidates
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+            </>)}
           </div>
-        )}
 
-        {/* Hover tooltip */}
-        <HexTooltip
-          tooltipPos={tooltipPos}
-          hoveredClusterId={hoveredClusterId}
-          data={data}
-          selectedTuners={selectedTuners}
-          effectiveColorMode={effectiveColorMode}
-          coverageMetric={coverageMetric}
-          getClusterCov={getClusterCov}
-          containerRef={containerRef}
-          selectedParam={selectedParam}
-          paramBin={hoveredClusterId !== null && paramCellBins ? (paramCellBins.bins.get(hoveredClusterId) ?? null) : null}
-          t3Scores={t3Scores}
-          isCartMember={hoveredClusterId !== null && cartIds.has(hoveredClusterId)}
-        />
-      </div>
+          {/* Hover tooltip */}
+          <HexTooltip
+            tooltipPos={tooltipPos}
+            hoveredClusterId={hoveredClusterId}
+            data={data}
+            selectedTuners={selectedTuners}
+            effectiveColorMode={effectiveColorMode}
+            coverageMetric={coverageMetric}
+            getClusterCov={getClusterCov}
+            containerRef={containerRef}
+            selectedParam={selectedParam}
+            paramBin={
+              hoveredClusterId !== null && paramCellBins
+                ? (paramCellBins.bins.get(hoveredClusterId) ?? null)
+                : null
+            }
+            t3Scores={t3Scores}
+            isCartMember={
+              hoveredClusterId !== null && cartIds.has(hoveredClusterId)
+            }
+          />
+        </div>
       </div>
     </div>
   );

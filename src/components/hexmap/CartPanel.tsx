@@ -436,6 +436,21 @@ export function CartPanel({
                     >
                       {TUNER_DISPLAY_NAMES[dominant]}
                     </span>
+                    {/* Amber dot — mirrors the on-map cart marker so the
+                        list entry and the highlighted hex are visually
+                        linked. */}
+                    <span
+                      title="Working set member"
+                      style={{
+                        width: 8,
+                        height: 8,
+                        borderRadius: "50%",
+                        background: "#F59E0B",
+                        border: "1.2px solid white",
+                        boxShadow: "0 0 0 1px rgba(15,23,42,0.12)",
+                        flexShrink: 0,
+                      }}
+                    />
                     <span
                       style={{
                         fontSize: 13,
