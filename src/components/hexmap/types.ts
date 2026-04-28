@@ -21,7 +21,6 @@ export interface HexMapProps {
   selectedParam?: string | null;
   onParamSelect?: (param: string | null) => void;
   selectedTuners?: Set<import("../../utils/hexMapUtils").TunerType>;
-  onToggleTuner?: (tuner: import("../../utils/hexMapUtils").TunerType) => void;
   cartIds?: Set<number>;
   onCartToggle?: (clusterId: number) => void;
   onCartDataUpdate?: (data: CartData | null) => void;
@@ -69,12 +68,17 @@ export interface QualRegion {
 // ============================================================
 
 export const TUNER_DISPLAY_NAMES: Record<TunerType, string> = {
+  // SE
   SymTuner: "Sym",
   CMA_ES: "CMA",
-  Genetic: "Gen",
+  Genetic: "Genetic",
   SuccessiveHalving: "SH",
   TPE: "TPE",
   BayesianOptimization: "BO",
+  // HPO unique
+  Random: "Random",
+  Grid: "Grid",
+  BOHB: "BOHB",
 };
 
 export const HEX_SIZE_DEFAULT = 32;

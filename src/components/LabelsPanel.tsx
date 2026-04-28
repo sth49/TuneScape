@@ -7,9 +7,9 @@ import {
 
 const LABEL_DESCRIPTIONS: Record<QualitativeLabel, string> = {
   "Failure-prone": "Coverage = 0 trials dominate this region",
-  "High Novelty": "High marginal coverage — discovers many new branches",
-  "High Avg Cov": "Consistently high average branch coverage",
-  "High Cum Cov": "Large cumulative branch union across trials",
+  "High Novelty": "High marginal coverage — each trial adds a lot",
+  "High Avg Cov": "Consistently high average coverage",
+  "High Cum Cov": "Large cumulative coverage across trials",
   "High Density": "Many trials concentrated in this region",
   "Low Density": "Few trials — under-explored parameter space",
 };

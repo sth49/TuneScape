@@ -3,16 +3,46 @@ import { GiHoneycomb } from "react-icons/gi";
 import { HexMap } from "./components/hexmap";
 import { CartPanel } from "./components/hexmap/CartPanel";
 import type { CartData } from "./components/hexmap/types";
-import { TUNER_NAMES, type TunerType } from "./utils/hexMapUtils";
+import {
+  getTunersForProgram,
+  isHPOProgram,
+  metricLabelFor,
+  formatMetricValue,
+  type TunerType,
+} from "./utils/hexMapUtils";
 import "./App.css";
 
-type Program = "gawk" | "gcal" | "grep";
+type Domain = "SE" | "ML";
+type Program =
+  | "gawk"
+  | "gcal"
+  | "grep"
+  | "adult"
+  | "phoneme";
+
+const PROGRAMS_BY_DOMAIN: Record<Domain, Program[]> = {
+  SE: ["gawk", "gcal", "grep"],
+  // covertype joins this list once its trial run finishes preprocessing.
+  ML: ["adult", "phoneme"],
+};
+
+const DOMAIN_LABELS: Record<Domain, string> = {
+  SE: "SE",
+  ML: "ML",
+};
+
+const PROGRAM_LABELS: Record<Domain, string> = {
+  SE: "Program",
+  ML: "Task",
+};
 
 function App() {
+  const [mapDomain, setMapDomain] = useState<Domain>("SE");
   const [mapProgram, setMapProgram] = useState<Program>("gawk");
   const [selectedParam, setSelectedParam] = useState<string | null>(null);
+  // Tuner subset shown depends on the current program (SE vs HPO).
   const [selectedTuners, setSelectedTuners] = useState<Set<TunerType>>(
-    () => new Set(TUNER_NAMES),
+    () => new Set(getTunersForProgram("gawk")),
   );
   const [cartIds, setCartIds] = useState<Set<number>>(() => new Set());
   const [cartData, setCartData] = useState<CartData | null>(null);
@@ -20,18 +50,6 @@ function App() {
 
   const handleParamSelect = useCallback((param: string | null) => {
     setSelectedParam(param);
-  }, []);
-
-  const handleToggleTuner = useCallback((tuner: TunerType) => {
-    setSelectedTuners((prev) => {
-      const next = new Set(prev);
-      if (next.has(tuner)) {
-        if (next.size > 1) next.delete(tuner);
-      } else {
-        next.add(tuner);
-      }
-      return next;
-    });
   }, []);
 
   const handleCartToggle = useCallback((clusterId: number) => {
@@ -48,11 +66,26 @@ function App() {
     setCartData(null);
   }, []);
 
-  // Clear cart when program changes
+  // Clear cart + reset tuner selection when program changes (SE/HPO have
+  // different tuner sets — selectedTuners must match the current program).
   useEffect(() => {
     setCartIds(new Set());
     setCartData(null);
+    setSelectedTuners(new Set(getTunersForProgram(mapProgram)));
+    setSelectedParam(null);
   }, [mapProgram]);
+
+  // When domain switches, jump to the first program in that domain.
+  const handleDomainChange = useCallback((d: Domain) => {
+    setMapDomain(d);
+    setMapProgram(PROGRAMS_BY_DOMAIN[d][0]);
+  }, []);
+
+  // Keep domain in sync if mapProgram is changed externally (e.g. on load).
+  useEffect(() => {
+    const expected: Domain = isHPOProgram(mapProgram) ? "ML" : "SE";
+    if (expected !== mapDomain) setMapDomain(expected);
+  }, [mapProgram, mapDomain]);
 
   return (
     <div className="w-[100vw] h-[100vh] flex flex-col bg-base-100">
@@ -61,16 +94,38 @@ function App() {
         <div className="flex-1 gap-3">
           <div className="flex items-center gap-2">
             <GiHoneycomb className="text-amber-400 text-xl" />
-            <h1 className="text-lg font-bold">SymComb</h1>
+            <h1 className="text-lg font-bold">TuneScape</h1>
           </div>
         </div>
 
         <div className="flex-none flex items-center gap-4">
-          {/* Program selector */}
+          {/* Domain (SE / ML) toggle */}
           <div className="flex items-center gap-2">
-            <span className="text-sm font-medium text-gray-500">Program:</span>
+            <span className="text-sm font-medium text-gray-500">Domain:</span>
             <div className="flex gap-1">
-              {(["gawk", "gcal", "grep"] as Program[]).map((p) => (
+              {(Object.keys(PROGRAMS_BY_DOMAIN) as Domain[]).map((d) => (
+                <button
+                  key={d}
+                  onClick={() => handleDomainChange(d)}
+                  className={`px-3 py-1 text-sm rounded ${
+                    mapDomain === d
+                      ? "bg-slate-700 text-white"
+                      : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                  }`}
+                >
+                  {DOMAIN_LABELS[d]}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Program / Task selector — buttons depend on the active domain */}
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium text-gray-500">
+              {PROGRAM_LABELS[mapDomain]}:
+            </span>
+            <div className="flex gap-1">
+              {PROGRAMS_BY_DOMAIN[mapDomain].map((p) => (
                 <button
                   key={p}
                   onClick={() => setMapProgram(p)}
@@ -97,7 +152,6 @@ function App() {
               selectedParam={selectedParam}
               onParamSelect={handleParamSelect}
               selectedTuners={selectedTuners}
-              onToggleTuner={handleToggleTuner}
               cartIds={cartIds}
               onCartToggle={handleCartToggle}
               onCartDataUpdate={setCartData}
@@ -116,6 +170,8 @@ function App() {
               onClear={handleClearCart}
               hoveredClusterId={hoveredClusterId}
               onHoverChange={setHoveredClusterId}
+              metricLabel={metricLabelFor(mapProgram)}
+              formatMetric={(v) => formatMetricValue(v, mapProgram)}
             />
           </div>
         </div>

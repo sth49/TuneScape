@@ -1,9 +1,8 @@
-import React from "react";
+import { BsPinAngleFill } from "react-icons/bs";
 import type { ColorMode } from "./types";
 import { TUNER_DISPLAY_NAMES } from "./types";
 import {
   TUNER_COLORS,
-  TUNER_NAMES,
   type TunerType,
 } from "../../utils/hexMapUtils";
 
@@ -11,10 +10,12 @@ import {
 // Mode tabs — paper-aligned: T1 + T2 + T3
 // ============================================================
 
+// Complementary is no longer user-selectable — it activates automatically
+// whenever the working set has at least one cell. Only the two base modes
+// stay in the tab strip.
 const MODE_TABS: { mode: ColorMode; label: string }[] = [
   { mode: "tuner-perf", label: "Tuner" },
   { mode: "tuner-param", label: "Parameter" },
-  { mode: "complementary", label: "Complementary" },
 ];
 
 // ============================================================
@@ -41,21 +42,22 @@ export interface ControlsBarProps {
   onParamSelect: (param: string | null) => void;
   paramList: { name: string; importance: number }[];
 
-  t3Scores: {
-    scores: Map<number, number>;
-    maxScore: number;
-    anchorBranchCount: number;
-  } | null;
-  cartSize: number;
-
-  selectedTuners: Set<TunerType>;
-  onToggleTuner: (tuner: TunerType) => void;
+  /** Tuner subset to render — depends on program (SE 6 vs HPO 4). */
+  tunerNames: TunerType[];
+  /** Display label for the score metric ("coverage" / "accuracy"). */
+  metricLabel: string;
   /** Hovered tuner — used in Tuner mode to highlight that tuner's cells. */
   onHoverTuner?: (tuner: TunerType | null) => void;
   /** Pinned tuners (up to 2). Second pin renders cells as hatch pattern. */
   pinnedTuners?: TunerType[];
   /** Toggle pin: caller manages add/remove + max-2 cap. */
   onPinTuner?: (tuner: TunerType) => void;
+  /** Coverage overlay toggle — layers a teal sequential wash on top of cells. */
+  coverageOverlay: boolean;
+  setCoverageOverlay: (v: boolean) => void;
+  /** Hovered preview — fires true on mouseenter, false on mouseleave so the
+    map can swap to a teal-only fill while the user is over the checkbox. */
+  onHoverCoverage?: (hovered: boolean) => void;
 }
 
 // ============================================================
@@ -74,17 +76,16 @@ export function ControlsBar({
   selectedParam,
   onParamSelect,
   paramList,
-  t3Scores,
-  cartSize,
-  selectedTuners,
-  onToggleTuner,
+  tunerNames,
+  metricLabel,
   onHoverTuner,
   pinnedTuners,
   onPinTuner,
+  coverageOverlay,
+  setCoverageOverlay,
+  onHoverCoverage,
 }: ControlsBarProps) {
-  const [hoverEntered, setHoverEntered] = React.useState<TunerType | null>(null);
   const pinnedSet = new Set(pinnedTuners ?? []);
-  const pinnedList = pinnedTuners ?? [];
   return (
     <div
       style={{
@@ -172,102 +173,6 @@ export function ControlsBar({
 
         <Divider />
 
-        {/* Tuner toggles */}
-        <div style={{ display: "flex", gap: 3 }}>
-          {TUNER_NAMES.map((t) => {
-            const isOn = selectedTuners.has(t);
-            const isLast = isOn && selectedTuners.size === 1;
-            const color = TUNER_COLORS[t];
-            const isPinned = pinnedSet.has(t);
-            const pinIndex = pinnedList.indexOf(t); // 0 = solid, 1 = hatch
-            const showPopup = hoverEntered === t || isPinned;
-            return (
-              <div
-                key={t}
-                style={{ position: "relative" }}
-                onMouseEnter={() => {
-                  setHoverEntered(t);
-                  onHoverTuner?.(t);
-                }}
-                onMouseLeave={() => {
-                  setHoverEntered(null);
-                  onHoverTuner?.(null);
-                }}
-              >
-                <button
-                  onClick={() => {
-                    if (isLast) return;
-                    onToggleTuner(t);
-                  }}
-                  title={isLast ? `${t} (at least one must stay on)` : t}
-                  style={{
-                    padding: "3px 7px",
-                    fontSize: 13,
-                    fontWeight: 700,
-                    lineHeight: 1.4,
-                    color: isOn ? "#fff" : "#9CA3AF",
-                    background: isOn ? color : "#F1F5F9",
-                    border: `1px solid ${isOn ? color : "#E5E7EB"}`,
-                    borderRadius: 4,
-                    cursor: isLast ? "not-allowed" : "pointer",
-                    opacity: isLast ? 0.85 : 1,
-                    transition: "all 0.12s ease",
-                    position: "relative",
-                  }}
-                >
-                  {TUNER_DISPLAY_NAMES[t]}
-                  {isPinned && (
-                    <span
-                      style={{
-                        marginLeft: 4,
-                        fontSize: 10,
-                        verticalAlign: "middle",
-                      }}
-                    >
-                      {pinIndex === 1 ? "▦" : "📌"}
-                    </span>
-                  )}
-                </button>
-                {showPopup && (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onPinTuner?.(t);
-                    }}
-                    style={{
-                      position: "absolute",
-                      // Overlap the tuner button slightly so the mouse can
-                      // travel from button to popup without crossing a gap
-                      // that would fire onMouseLeave on the wrapper.
-                      top: "calc(100% - 2px)",
-                      left: "50%",
-                      transform: "translateX(-50%)",
-                      paddingTop: 6,
-                      paddingBottom: 4,
-                      paddingLeft: 8,
-                      paddingRight: 8,
-                      fontSize: 11,
-                      fontWeight: 600,
-                      color: isPinned ? "#fff" : color,
-                      background: isPinned ? color : "white",
-                      border: `1px solid ${color}`,
-                      borderRadius: 4,
-                      cursor: "pointer",
-                      whiteSpace: "nowrap",
-                      boxShadow: "0 2px 6px rgba(0,0,0,0.12)",
-                      zIndex: 50,
-                    }}
-                  >
-                    {isPinned ? "Unpin" : "Pin"}
-                  </button>
-                )}
-              </div>
-            );
-          })}
-        </div>
-
-        <Divider />
-
         {/* Mode tabs */}
         {MODE_TABS.map(({ mode, label }) => {
           const isActive = colorMode === mode;
@@ -297,12 +202,119 @@ export function ControlsBar({
 
         <Divider />
 
-        {/* === Contextual options per mode === */}
+        {/* Tuner pin selectors — checkbox prefix toggles the pin (max 2,
+          enforced by onPinTuner upstream). The colored label is informative
+          only; clicking the checkbox is the only interaction. */}
+        <div style={{ display: "flex", gap: 6 }}>
+          {tunerNames.map((t, idx) => {
+            const color = TUNER_COLORS[t];
+            const isPinned = pinnedSet.has(t);
+            const shortcutNum = idx + 1;
+            return (
+              <button
+                key={t}
+                type="button"
+                onClick={() => onPinTuner?.(t)}
+                onMouseEnter={() => onHoverTuner?.(t)}
+                onMouseLeave={() => onHoverTuner?.(null)}
+                title={`Shift+${shortcutNum}: preview ${t}`}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 4,
+                  padding: "3px 7px",
+                  fontSize: 13,
+                  fontWeight: 700,
+                  lineHeight: 1.4,
+                  color: "#fff",
+                  background: color,
+                  border: `1px solid ${color}`,
+                  borderRadius: 4,
+                  cursor: "pointer",
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 10,
+                    fontWeight: 700,
+                    background: "rgba(255,255,255,0.25)",
+                    padding: "0 4px",
+                    borderRadius: 2,
+                    lineHeight: 1.6,
+                  }}
+                >
+                  {shortcutNum}
+                </span>
+                {TUNER_DISPLAY_NAMES[t]}
+                {isPinned && (
+                  <BsPinAngleFill
+                    size={11}
+                    style={{ marginLeft: 1 }}
+                    aria-label="Pinned"
+                  />
+                )}
+              </button>
+            );
+          })}
+        </div>
 
-        {/* Tuner×Coverage: coverage metric selector */}
-        {effectiveColorMode === "tuner-perf" && (
+        <Divider />
+
+        {/* Coverage group: overlay toggle + metric selector. Sits in its own
+          divided section so it reads as "tuners | coverage" rather than
+          mixing with the tuner pins. */}
+        <button
+          type="button"
+          onClick={() => setCoverageOverlay(!coverageOverlay)}
+          onMouseEnter={() => onHoverCoverage?.(true)}
+          onMouseLeave={() => onHoverCoverage?.(false)}
+          title={`Shift+7: preview ${metricLabel}`}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
+            padding: "3px 7px",
+            fontSize: 13,
+            fontWeight: 600,
+            lineHeight: 1.4,
+            color: coverageOverlay ? "#fff" : "#15803D",
+            background: coverageOverlay ? "#15803D" : "#F0FDF4",
+            border: `1px solid ${coverageOverlay ? "#15803D" : "#BBF7D0"}`,
+            borderRadius: 4,
+            cursor: "pointer",
+          }}
+        >
+          <span
+            style={{
+              fontSize: 10,
+              fontWeight: 700,
+              background: coverageOverlay
+                ? "rgba(255,255,255,0.25)"
+                : "rgba(21,128,61,0.12)",
+              padding: "0 4px",
+              borderRadius: 2,
+              lineHeight: 1.6,
+            }}
+          >
+            7
+          </span>
+          {metricLabel.charAt(0).toUpperCase() + metricLabel.slice(1)}
+          {coverageOverlay && (
+            <BsPinAngleFill
+              size={11}
+              style={{ marginLeft: 1 }}
+              aria-label="Pinned"
+            />
+          )}
+        </button>
+
+        {/* Coverage metric selector — always shown in tuner mode (the
+          baseline coverage view), and also surfaced in parameter / other
+          modes once the Coverage overlay is pinned, since the overlay's
+          fill depends on this metric. */}
+        {(effectiveColorMode === "tuner-perf" || coverageOverlay) && (
           <div style={{ display: "flex", gap: 2 }}>
-            {(["mean", "cumulative"] as const).map(
+            {(["cumulative", "mean"] as const).map(
               (m) => {
                 const isActive = coverageMetric === m;
                 return (
@@ -328,6 +340,10 @@ export function ControlsBar({
             )}
           </div>
         )}
+
+        <Divider />
+
+        {/* === Other contextual options per mode === */}
 
         {/* Tuner×Parameter: param select */}
         {effectiveColorMode === "tuner-param" && (
@@ -363,33 +379,6 @@ export function ControlsBar({
           </>
         )}
 
-        {/* Complement hint / summary */}
-        {effectiveColorMode === "complementary" && (
-          <>
-            {cartSize === 0 ? (
-              <span style={{ fontSize: 13, color: "#64748B", fontWeight: 500 }}>
-                Shift+click cells to build the working set
-              </span>
-            ) : t3Scores ? (
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                  fontSize: 13,
-                }}
-              >
-                <span style={{ color: "#4F46E5", fontWeight: 600 }}>
-                  Working set: {t3Scores.anchorBranchCount.toLocaleString()} branches
-                </span>
-                <span style={{ color: "#64748B" }}>·</span>
-                <span style={{ color: "#10B981", fontWeight: 500 }}>
-                  Best +{t3Scores.maxScore.toLocaleString()} new
-                </span>
-              </div>
-            ) : null}
-          </>
-        )}
       </div>
     </div>
   );

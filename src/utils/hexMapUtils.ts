@@ -26,7 +26,18 @@ function seededRng(seed: number): () => number {
 // Types
 // ============================================================
 
-export type TunerType = "SymTuner" | "CMA_ES" | "Genetic" | "SuccessiveHalving" | "TPE" | "BayesianOptimization";
+export type TunerType =
+  // SE / fuzzing tuners
+  | "SymTuner"
+  | "CMA_ES"
+  | "Genetic"
+  | "SuccessiveHalving"
+  | "TPE"
+  | "BayesianOptimization"
+  // HPO tuners (Genetic is shared with SE)
+  | "Random"
+  | "Grid"
+  | "BOHB";
 
 export interface Trial {
   id: number;
@@ -118,17 +129,23 @@ export interface HexMapData {
 // Constants
 // ============================================================
 
-// schemeCategory10 excluding orange (#ff7f0e) and red (#d62728)
+// SE + HPO palette. Some hues are shared across modes since SE and HPO
+// tuners are never displayed together (one program at a time).
 export const TUNER_COLORS: Record<TunerType, string> = {
-  SymTuner: "#1f77b4",           // blue
-  CMA_ES: "#2ca02c",             // green
-  Genetic: "#9467bd",            // purple
-  SuccessiveHalving: "#8c564b",  // brown
-  TPE: "#b85e93",                // muted pink
-  BayesianOptimization: "#17becf", // cyan
+  // SE
+  SymTuner: "#3B82F6",             // blue
+  CMA_ES: "#EF4444",               // red
+  Genetic: "#EAB308",              // yellow (shared with HPO Genetic)
+  SuccessiveHalving: "#8B5CF6",    // violet
+  TPE: "#F9A8D4",                  // light pink
+  BayesianOptimization: "#92400E", // brown
+  // HPO (Random/Grid/BOHB unique; Genetic above is shared)
+  Random: "#3B82F6",               // blue
+  Grid: "#EF4444",                 // red
+  BOHB: "#8B5CF6",                 // violet
 };
 
-export const TUNER_NAMES: TunerType[] = [
+export const SE_TUNERS: TunerType[] = [
   "SymTuner",
   "CMA_ES",
   "Genetic",
@@ -136,6 +153,56 @@ export const TUNER_NAMES: TunerType[] = [
   "TPE",
   "BayesianOptimization",
 ];
+
+export const HPO_TUNERS: TunerType[] = [
+  "Random",
+  "Grid",
+  "Genetic",
+  "BOHB",
+];
+
+export const HPO_PROGRAMS = new Set<string>(["adult", "phoneme", "covertype"]);
+
+export function getTunersForProgram(program: string): TunerType[] {
+  return HPO_PROGRAMS.has(program) ? HPO_TUNERS : SE_TUNERS;
+}
+
+/** Programs encode metric values as round(score × HPO_SCORE_SCALE).
+ *  Display divides by this to recover the raw 0–1 accuracy. */
+export const HPO_SCORE_SCALE = 1000;
+
+export function isHPOProgram(program: string): boolean {
+  return HPO_PROGRAMS.has(program);
+}
+
+export function metricLabelFor(program: string): string {
+  return isHPOProgram(program) ? "accuracy" : "coverage";
+}
+
+/** Formats a stored metric integer for display.
+ *  HPO  : v / 1000 → "0.872" (3 decimals)
+ *  Fuzz : v → "1,500" (integer with thousands separator)
+ */
+export function formatMetricValue(v: number, program: string): string {
+  if (isHPOProgram(program)) return (v / HPO_SCORE_SCALE).toFixed(3);
+  return Math.round(v).toLocaleString();
+}
+
+/** Per-program trial-count thresholds that drive hex-cell sizing.
+ *  HPO sees ~5–25 trials per cell; fuzzing sees 100s–1000s.
+ */
+export function cellSizeThresholdsFor(program: string): {
+  lowMax: number;
+  midMax: number;
+} {
+  return isHPOProgram(program)
+    ? { lowMax: 10, midMax: 20 }
+    : { lowMax: 100, midMax: 1000 };
+}
+
+// Backward-compat: TUNER_NAMES = union of every supported tuner. Components
+// that need a *program-specific* subset should call getTunersForProgram().
+export const TUNER_NAMES: TunerType[] = [...SE_TUNERS, "Random", "Grid", "BOHB"];
 
 // ============================================================
 // Parameter Analysis
@@ -423,7 +490,8 @@ function kMeansClustering(
     if (clusterTrials.length === 0) continue;
 
     const tunerCounts: Record<TunerType, number> = {
-      SymTuner: 0, CMA_ES: 0, Genetic: 0, SuccessiveHalving: 0, TPE: 0, BayesianOptimization: 0,
+      SymTuner: 0, CMA_ES: 0, Genetic: 0, SuccessiveHalving: 0,
+      TPE: 0, BayesianOptimization: 0, Random: 0, Grid: 0, BOHB: 0,
     };
     let totalMarginal = 0;
     let totalBranchCoverage = 0;
@@ -772,12 +840,8 @@ function computeTerritories(
       const clusters = tiles.map((t) => t.cluster!);
       const trials: Trial[] = clusters.flatMap((c) => c.trials);
       const tunerCounts: Record<TunerType, number> = {
-        SymTuner: 0,
-        CMA_ES: 0,
-        Genetic: 0,
-        SuccessiveHalving: 0,
-        TPE: 0,
-        BayesianOptimization: 0,
+        SymTuner: 0, CMA_ES: 0, Genetic: 0, SuccessiveHalving: 0,
+        TPE: 0, BayesianOptimization: 0, Random: 0, Grid: 0, BOHB: 0,
       };
       let totalTrials = 0;
       let cx = 0,
@@ -982,12 +1046,8 @@ function makeSubRegionObj(
   tiles: HexTile[],
 ): Omit<SubRegion, "label" | "children" | "splittable" | "depth"> {
   const tunerCounts: Record<TunerType, number> = {
-    SymTuner: 0,
-    CMA_ES: 0,
-    Genetic: 0,
-    SuccessiveHalving: 0,
-    TPE: 0,
-    BayesianOptimization: 0,
+    SymTuner: 0, CMA_ES: 0, Genetic: 0, SuccessiveHalving: 0,
+    TPE: 0, BayesianOptimization: 0, Random: 0, Grid: 0, BOHB: 0,
   };
   let totalTrials = 0,
     pcx = 0,
@@ -1600,7 +1660,10 @@ export function buildCoarseLevels(data: HexMapData): CoarseLevel[] {
       if (!coarseMap.has(ci)) {
         coarseMap.set(ci, {
           memberClusterIds: [],
-          tunerCounts: { SymTuner: 0, CMA_ES: 0, Genetic: 0, SuccessiveHalving: 0, TPE: 0, BayesianOptimization: 0 },
+          tunerCounts: {
+            SymTuner: 0, CMA_ES: 0, Genetic: 0, SuccessiveHalving: 0,
+            TPE: 0, BayesianOptimization: 0, Random: 0, Grid: 0, BOHB: 0,
+          },
           totalTrials: 0,
           pixelXs: [], pixelYs: [],
         });
@@ -1813,8 +1876,8 @@ export function buildMergedLevel(
   for (const [groupId, memberClusters] of groups) {
     const allTrials = memberClusters.flatMap((c) => c.trials);
     const tunerCounts: Record<TunerType, number> = {
-      SymTuner: 0, CMA_ES: 0, Genetic: 0,
-      SuccessiveHalving: 0, TPE: 0, BayesianOptimization: 0,
+      SymTuner: 0, CMA_ES: 0, Genetic: 0, SuccessiveHalving: 0,
+      TPE: 0, BayesianOptimization: 0, Random: 0, Grid: 0, BOHB: 0,
     };
     let sumCov = 0, sumBranch = 0, maxBranch = 0, sumMarginal = 0;
     for (const mc of memberClusters) {
@@ -2190,7 +2253,7 @@ export function getDominantTuner(
   tunerCounts: Record<TunerType, number>,
 ): TunerType {
   let max = 0;
-  let dominant: TunerType = "SymTuner";
+  let dominant: TunerType = "Random";
   for (const [tuner, count] of Object.entries(tunerCounts)) {
     if (count > max) {
       max = count;
@@ -2204,15 +2267,13 @@ export function getTunerRatios(
   tunerCounts: Record<TunerType, number>,
 ): Record<TunerType, number> {
   const total = Object.values(tunerCounts).reduce((a, b) => a + b, 0);
-  if (total === 0)
-    return { SymTuner: 0, CMA_ES: 0, Genetic: 0, SuccessiveHalving: 0, TPE: 0, BayesianOptimization: 0 };
-
-  return {
-    SymTuner: tunerCounts.SymTuner / total,
-    CMA_ES: tunerCounts.CMA_ES / total,
-    Genetic: tunerCounts.Genetic / total,
-    SuccessiveHalving: tunerCounts.SuccessiveHalving / total,
-    TPE: tunerCounts.TPE / total,
-    BayesianOptimization: tunerCounts.BayesianOptimization / total,
+  const out: Record<TunerType, number> = {
+    SymTuner: 0, CMA_ES: 0, Genetic: 0, SuccessiveHalving: 0,
+    TPE: 0, BayesianOptimization: 0, Random: 0, Grid: 0, BOHB: 0,
   };
+  if (total === 0) return out;
+  for (const k of Object.keys(out) as TunerType[]) {
+    out[k] = (tunerCounts[k] ?? 0) / total;
+  }
+  return out;
 }

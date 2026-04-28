@@ -18,7 +18,11 @@ from scipy.spatial.distance import squareform
 from scipy.cluster.hierarchy import linkage, fcluster
 
 # ─── Config ───────────────────────────────────────────────────────────────────
-TUNERS = ["SymTuner", "CMA_ES", "Genetic", "SuccessiveHalving", "TPE", "BayesianOptimization"]
+# Default fuzzing tuner set; HPO tasks override via --tuners or auto-detect.
+DEFAULT_FUZZING_TUNERS = [
+    "SymTuner", "CMA_ES", "Genetic", "SuccessiveHalving", "TPE", "BayesianOptimization",
+]
+HPO_TUNERS = ["Random", "Grid", "Genetic", "BOHB"]
 DATA_DIR = Path(__file__).parent.parent / "public" / "data"
 OUTPUT_DIR = Path(__file__).parent.parent / "public" / "data"
 
@@ -45,7 +49,13 @@ BOOLEAN_PARAMS = [
 BOOLEAN_SET = set(BOOLEAN_PARAMS)
 CATEGORICAL_SET = set(CATEGORICAL_PARAMS)
 
+# Filled in lazily for HPO tasks based on a sample value's runtime type.
+AUTO_PARAM_TYPES: dict[str, str] = {}
+
 N_BINS = 5  # quantile bins for numeric parameters
+
+# Module-level state, set by main() before pipeline runs.
+TUNERS = DEFAULT_FUZZING_TUNERS
 
 
 def get_param_type(name):
@@ -53,7 +63,30 @@ def get_param_type(name):
         return "boolean"
     if name in CATEGORICAL_SET:
         return "categorical"
+    if name in AUTO_PARAM_TYPES:
+        return AUTO_PARAM_TYPES[name]
     return "numeric"
+
+
+def auto_detect_param_types(trials):
+    """For HPO tasks: classify each parameter by the Python type of its first
+    non-None value across trials. bool→boolean, str→categorical, else numeric.
+    """
+    AUTO_PARAM_TYPES.clear()
+    if not trials:
+        return
+    seen: set[str] = set()
+    for t in trials:
+        for k, v in t.get("parameters", {}).items():
+            if k in seen or v is None:
+                continue
+            if isinstance(v, bool):
+                AUTO_PARAM_TYPES[k] = "boolean"
+            elif isinstance(v, str):
+                AUTO_PARAM_TYPES[k] = "categorical"
+            else:
+                AUTO_PARAM_TYPES[k] = "numeric"
+            seen.add(k)
 
 
 # ─── Step 1: Load Data ───────────────────────────────────────────────────────
@@ -825,16 +858,44 @@ def run_pipeline(program):
     print(f"  Grid bounds: q=[{min(qs)}, {max(qs)}], r=[{min(rs)}, {max(rs)}]")
 
 
+HPO_TASKS = {"adult", "phoneme", "covertype"}
+
+
+def configure_for(program: str):
+    """Switch TUNERS list + reset auto param types based on program.
+    Fuzzing programs use the 6-tuner default with hardcoded param sets.
+    HPO tasks (adult/phoneme/covertype) use 4 HPO tuners and auto-detected types.
+    """
+    global TUNERS
+    if program in HPO_TASKS:
+        TUNERS = list(HPO_TUNERS)
+        AUTO_PARAM_TYPES.clear()
+        # Peek at one tuner file to seed AUTO_PARAM_TYPES from real values.
+        for tuner in TUNERS:
+            fp = DATA_DIR / f"{program}_{tuner}_processed.json"
+            if fp.exists():
+                with open(fp) as f:
+                    sample = json.load(f)
+                auto_detect_param_types(sample.get("trials", [])[:5])
+                break
+    else:
+        TUNERS = list(DEFAULT_FUZZING_TUNERS)
+        AUTO_PARAM_TYPES.clear()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Build hex layout for parameter visualization")
     parser.add_argument("--program", type=str, default=None,
-                        help="Program to process (gawk, gcal, grep). If omitted, runs all three.")
+                        help="Program/task to process. Fuzzing: gawk/gcal/grep. "
+                             "HPO: adult/phoneme/covertype. Omit = all fuzzing programs.")
     args = parser.parse_args()
 
     if args.program:
+        configure_for(args.program)
         run_pipeline(args.program)
     else:
         for prog in ["gawk", "gcal", "grep"]:
+            configure_for(prog)
             run_pipeline(prog)
             print("\n\n")
 

@@ -22,7 +22,7 @@ const DATA_DIR = path.join(ROOT, "public", "data");
 import {
   processHexMapData,
   buildMergedLevel,
-  TUNER_NAMES,
+  getTunersForProgram,
   type HexMapData,
   type Trial,
   type HexTile,
@@ -205,7 +205,7 @@ function serializeLevel(
 
 // ── Main ──
 
-const PROGRAMS = ["gawk", "gcal", "grep"] as const;
+const PROGRAMS = ["gawk", "gcal", "grep", "adult", "phoneme"] as const;
 
 async function main() {
   const dtPath = path.join(DATA_DIR, "decision_tree_data.json");
@@ -220,9 +220,10 @@ async function main() {
   for (const program of PROGRAMS) {
     console.log(`\n=== Processing ${program} ===`);
 
-    // Load tuner data
+    // Load tuner data — per-program tuner subset (SE 6 vs HPO 4).
+    const programTuners = getTunersForProgram(program);
     const tunerData: ProcessedData[] = [];
-    for (const tuner of TUNER_NAMES) {
+    for (const tuner of programTuners) {
       const fpath = path.join(DATA_DIR, `${program}_${tuner}_processed.json`);
       console.log(`  Loading ${tuner} ...`);
       tunerData.push(JSON.parse(fs.readFileSync(fpath, "utf-8")));

@@ -16,6 +16,10 @@ export interface CartPanelProps {
   /** Shared hover id (same state HexMap writes to). Used to highlight the matching card. */
   hoveredClusterId?: number | null;
   onHoverChange?: (clusterId: number | null) => void;
+  /** Display label for the score metric ("coverage" / "accuracy"). */
+  metricLabel?: string;
+  /** Formats the stored metric integer for display. */
+  formatMetric?: (v: number) => string;
 }
 
 /** Stacked bar: tuner proportions within a trial set (counts).
@@ -100,7 +104,7 @@ function CoverageDonut({
         cy={size / 2}
         r={r}
         fill="none"
-        stroke="#4F46E5"
+        stroke="#475569"
         strokeWidth={stroke}
         strokeDasharray={`${dash} ${c - dash}`}
         strokeDashoffset={c / 4}
@@ -131,8 +135,12 @@ export function CartPanel({
   onClear,
   hoveredClusterId = null,
   onHoverChange,
+  metricLabel = "coverage",
+  formatMetric,
 }: CartPanelProps) {
   const empty = cartIds.size === 0;
+  const fmtMetric =
+    formatMetric ?? ((v: number) => Math.round(v).toLocaleString());
 
   const unionCovRatio = cartData?.unionCoverage ?? 0;
   const unionBranchCount = cartData?.unionBranches.size ?? 0;
@@ -188,8 +196,46 @@ export function CartPanel({
           alignItems: "baseline",
         }}
       >
-        <span style={{ fontWeight: 700, fontSize: 17, color: "#1E293B" }}>
-          Working Set{!empty && ` (${cartIds.size})`}
+        <span
+          style={{
+            fontWeight: 700,
+            fontSize: 17,
+            color: "#1E293B",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+          }}
+        >
+          Working Set
+          {!empty && (
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                fontSize: 14,
+                fontWeight: 600,
+                color: "#475569",
+              }}
+            >
+              (
+              <span
+                title="Working set marker — orange dot on the map"
+                style={{
+                  // Matches the on-map dot: r = HEX_SIZE * 0.2 (≈ 6.4px) +
+                  // 1.5 white outer ring, with HEX_SIZE_DEFAULT = 32.
+                  width: 13,
+                  height: 13,
+                  borderRadius: "50%",
+                  background: "#F59E0B",
+                  border: "1.5px solid white",
+                  boxShadow: "0 0 0 1px rgba(15,23,42,0.12)",
+                  display: "inline-block",
+                }}
+              />
+              {cartIds.size})
+            </span>
+          )}
         </span>
         {!empty && (
           <button
@@ -394,35 +440,31 @@ export function CartPanel({
                     transition: "background 0.1s, border-color 0.1s, box-shadow 0.1s",
                   }}
                 >
-                  {/* Header: order + dominant badge + ID + trials + remove */}
+                  {/* Header: cluster ID first + dominant tuner + trials.
+                      Add-order ("info.order") is kept internally for sorting
+                      but no longer rendered as a badge. */}
                   <div
                     style={{
                       display: "flex",
                       alignItems: "center",
-                      gap: 5,
+                      gap: 6,
                       marginBottom: 3,
                     }}
                   >
-                    {info && (
-                      <span
-                        title={`Added ${info.order === 1 ? "1st" : info.order === 2 ? "2nd" : info.order === 3 ? "3rd" : `${info.order}th`}`}
-                        style={{
-                          width: 18,
-                          height: 18,
-                          borderRadius: "50%",
-                          background: "#EEF2FF",
-                          color: "#4F46E5",
-                          fontSize: 11,
-                          fontWeight: 700,
-                          display: "inline-flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          flexShrink: 0,
-                        }}
-                      >
-                        {info.order}
-                      </span>
-                    )}
+                    <span
+                      title={
+                        info
+                          ? `Added ${info.order === 1 ? "1st" : info.order === 2 ? "2nd" : info.order === 3 ? "3rd" : `${info.order}th`}`
+                          : undefined
+                      }
+                      style={{
+                        fontSize: 14,
+                        color: "#1E293B",
+                        fontWeight: 700,
+                      }}
+                    >
+                      #{c.id + 1}
+                    </span>
                     <span
                       style={{
                         background: TUNER_COLORS[dominant],
@@ -435,30 +477,6 @@ export function CartPanel({
                       }}
                     >
                       {TUNER_DISPLAY_NAMES[dominant]}
-                    </span>
-                    {/* Amber dot — mirrors the on-map cart marker so the
-                        list entry and the highlighted hex are visually
-                        linked. */}
-                    <span
-                      title="Working set member"
-                      style={{
-                        width: 8,
-                        height: 8,
-                        borderRadius: "50%",
-                        background: "#F59E0B",
-                        border: "1.2px solid white",
-                        boxShadow: "0 0 0 1px rgba(15,23,42,0.12)",
-                        flexShrink: 0,
-                      }}
-                    />
-                    <span
-                      style={{
-                        fontSize: 13,
-                        color: "#374151",
-                        fontWeight: 600,
-                      }}
-                    >
-                      #{c.id + 1}
                     </span>
                     <span style={{ fontSize: 12, color: "#94A3B8" }}>
                       · {trialCount.toLocaleString()} trials
@@ -481,16 +499,22 @@ export function CartPanel({
                     </button>
                   </div>
 
-                  {/* Coverage (branches) + new contribution at add-time */}
+                  {/* Coverage values + new contribution at add-time */}
                   <div
                     style={{ fontSize: 12, color: "#64748B", marginBottom: 4 }}
                   >
-                    mean {meanBranches.toLocaleString()} · cum{" "}
-                    {cumBranches.toLocaleString()} branches
+                    mean {fmtMetric(meanBranches)} · cum{" "}
+                    {fmtMetric(cumBranches)} {metricLabel}
                     {info && (
-                      <span style={{ color: "#10B981", fontWeight: 600 }}>
+                      <span
+                        style={{
+                          color: "#10B981",
+                          fontWeight: 600,
+                          fontStyle: "italic",
+                        }}
+                      >
                         {" · +"}
-                        {info.added.toLocaleString()} new
+                        {fmtMetric(info.added)}
                       </span>
                     )}
                   </div>

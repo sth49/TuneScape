@@ -20,6 +20,11 @@ import {
   deserializePrecomputed,
   TUNER_COLORS,
   TUNER_NAMES,
+  getTunersForProgram,
+  cellSizeThresholdsFor,
+  isHPOProgram,
+  metricLabelFor,
+  formatMetricValue,
 } from "../../utils/hexMapUtils";
 import type { HexMapData, HexTile, TunerType, Cluster } from "./types";
 import type { ColorMode, HexMapProps } from "./types";
@@ -61,7 +66,6 @@ export function HexMap({
   selectedParam: selectedParamProp = null,
   onParamSelect,
   selectedTuners: selectedTunersProp,
-  onToggleTuner,
   cartIds: cartIdsProp,
   onCartToggle,
   onCartDataUpdate,
@@ -88,6 +92,20 @@ export function HexMap({
 
   const svgWidth = containerSize.width;
   const height = containerSize.height;
+  // Per-program tuner subset (SE → 6, HPO → 4). Drives ControlsBar buttons,
+  // legends, dominance computations everywhere a tuner roster is needed.
+  const programTuners = useMemo(
+    () => getTunersForProgram(program),
+    [program],
+  );
+  // Cached HPO/SE flags + display helpers. Used wherever we need to format
+  // a metric value or pick a label ("coverage" vs "accuracy").
+  const isHPO = useMemo(() => isHPOProgram(program), [program]);
+  const metricLabel = useMemo(() => metricLabelFor(program), [program]);
+  const fmtMetric = useCallback(
+    (v: number) => formatMetricValue(v, program),
+    [program],
+  );
   // All 5 levels: index 0 = L0, ... 4 = L4
   const [allLevels, setAllLevels] = useState<HexMapData[]>([]);
   const [loading, setLoading] = useState(true);
@@ -104,6 +122,14 @@ export function HexMap({
   const [coverageMetric, setCoverageMetric] = useState<"mean" | "cumulative">(
     "cumulative",
   );
+  // Coverage overlay: paint a teal sequential wash on every cell so the
+  // tuner-identity fill stays visible underneath while the user can scan for
+  // high/low-coverage cells via teal darkness.
+  const [coverageOverlay, setCoverageOverlay] = useState(false);
+  // Coverage preview: hovering the Coverage checkbox swaps the cell fill to
+  // the teal coverage scale and strips all tuner colors so the user can see
+  // what the overlay represents before toggling it on.
+  const [coverageHovered, setCoverageHovered] = useState(false);
   // hover: drives tooltip
   const [hoveredClusterId, setHoveredClusterId] = useState<number | null>(null);
   // Hovering a label highlights its region without picking a specific cell —
@@ -194,6 +220,53 @@ export function HexMap({
     };
   }, [program]);
 
+  // Shift + number keyboard preview:
+  //   Shift + 1..6  → preview the matching tuner (same as hovering its
+  //                   checkbox in ControlsBar).
+  //   Shift + 7     → preview the coverage overlay (same as hovering the
+  //                   Coverage checkbox).
+  // Uses e.code ("Digit1"..) so it works regardless of the shifted character
+  // (!, @, #, $, %, ^, & on US/KR layouts). Released Shift or number key
+  // clears the preview. Skipped when focus is in a form element so typing
+  // isn't intercepted.
+  useEffect(() => {
+    const isFormFocus = (el: EventTarget | null) => {
+      if (!(el instanceof HTMLElement)) return false;
+      const t = el.tagName;
+      return t === "INPUT" || t === "SELECT" || t === "TEXTAREA";
+    };
+    const clearPreview = () => {
+      setHoveredTuner(null);
+      setCoverageHovered(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (isFormFocus(e.target)) return;
+      if (!e.shiftKey) return;
+      const m = e.code.match(/^Digit([1-7])$/);
+      if (!m) return;
+      e.preventDefault();
+      const num = parseInt(m[1], 10);
+      if (num <= 6) {
+        setHoveredTuner(programTuners[num - 1] ?? null);
+        setCoverageHovered(false);
+      } else {
+        setCoverageHovered(true);
+        setHoveredTuner(null);
+      }
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === "Shift" || /^Digit[1-7]$/.test(e.code)) {
+        clearPreview();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
+  }, [programTuners]);
+
   // Auto-select top param when switching to tuner-param with no param selected
   const onParamSelectRef = useRef(setSelectedParam);
   onParamSelectRef.current = setSelectedParam;
@@ -207,9 +280,14 @@ export function HexMap({
     setColorMode(mode);
   }, []);
 
-  // Effective values (preview overrides actual for hover preview)
+  // Effective values (preview overrides actual for hover preview).
+  // The Complementary mode tab was removed; instead, cart membership drives
+  // the switch automatically — any cell in the working set forces the
+  // complementary view, and clearing it falls back to the user's last
+  // explicitly chosen mode.
   const effectiveDetailLevel = detailLevel;
-  const effectiveColorMode = previewColorMode ?? colorMode;
+  const effectiveColorMode: ColorMode =
+    cartIds.size > 0 ? "complementary" : (previewColorMode ?? colorMode);
 
   // Active data for current detail level
   const data = allLevels[effectiveDetailLevel] ?? null;
@@ -235,17 +313,21 @@ export function HexMap({
     const dataWidth = maxX - minX;
     const dataHeight = maxY - minY;
 
-    // Roomy padding so callouts have margin to land in. Vertical gets more
-    // because top/bottom labels sit between data and SVG edge — without extra
-    // vertical headroom they'd glue to the screen edge.
-    const PAD_X = 80;
+    // Asymmetric horizontal padding — the legend column lives in the
+    // top-right, so we reserve more room there and tighten the left side.
+    // Vertical stays generous so top/bottom labels don't glue to the edge.
+    const PAD_LEFT = 40;
+    const PAD_RIGHT = 200;
     const PAD_Y = 110;
-    const scaleX = (svgWidth - PAD_X * 2) / dataWidth;
+    const usableW = svgWidth - PAD_LEFT - PAD_RIGHT;
+    const scaleX = usableW / dataWidth;
     const scaleY = (height - PAD_Y * 2) / dataHeight;
     const fitScale = Math.min(scaleX, scaleY, 1.2);
 
     return {
-      centerX: svgWidth / 2,
+      // Centered within the asymmetric usable region — shifts the whole
+      // map slightly left of geometric center so legends don't overlap.
+      centerX: PAD_LEFT + usableW / 2,
       centerY: height / 2,
       scale: fitScale,
     };
@@ -310,13 +392,16 @@ export function HexMap({
     return { min: Math.min(...vals), max: Math.max(...vals), mean };
   }, [data, getClusterCov]);
 
+  // d3-scale-chromatic Greens (single-hue ColorBrewer sequential).
+  // Sub-range [0.1, 0.9] keeps low coverage cells from washing out to near
+  // white and the high end from going so dark that text reads poorly.
   const getCoverageColor = useCallback(
     (coverage: number): string => {
       const { min: gMin, max: gMax } = globalCovRange;
       const range = gMax - gMin;
-      if (range <= 0) return d3.interpolateYlOrBr(0.5);
-      const t = Math.max(0, Math.min(1, (coverage - gMin) / range));
-      return d3.interpolateYlOrBr(t);
+      const t =
+        range > 0 ? Math.max(0, Math.min(1, (coverage - gMin) / range)) : 0.5;
+      return d3.interpolateGreens(0.1 + t * 0.8);
     },
     [globalCovRange],
   );
@@ -530,10 +615,14 @@ export function HexMap({
         return {
           bins,
           binNames: [lowLabel, midLabel, highLabel, "Mixed"],
+          // Source colors span a wide lightness range so the wash overlays
+          // produce three clearly distinct tints — light sky-blue, vivid
+          // blue, and near-black indigo — instead of looking like one
+          // uniform pastel band.
           binColors: {
-            [lowLabel]: "#BFDBFE",
-            [midLabel]: "#3B82F6",
-            [highLabel]: "#1E3A8A",
+            [lowLabel]: "#93C5FD",
+            [midLabel]: "#1D4ED8",
+            [highLabel]: "#172554",
             Mixed: MIXED_COLOR,
           },
         };
@@ -556,11 +645,13 @@ export function HexMap({
         }
         return {
           bins,
-          binNames: ["Mostly True", "Mixed", "Mostly False"],
+          binNames: ["Mostly True", "Mostly False", "Mixed"],
+          // Cyan vs orange — opposite ends of the wheel, no green, render
+          // as soft pastel after the 28% wash.
           binColors: {
-            "Mostly True": "#10B981",
+            "Mostly True": "#06B6D4",
             Mixed: MIXED_COLOR,
-            "Mostly False": "#F59E0B",
+            "Mostly False": "#F97316",
           },
         };
       }
@@ -635,8 +726,8 @@ export function HexMap({
           // that tuner show its color — everything else falls back to MIXED.
           let total = 0;
           let domCount = 0;
-          let domTuner: TunerType = TUNER_NAMES[0];
-          for (const t of TUNER_NAMES) {
+          let domTuner: TunerType = programTuners[0];
+          for (const t of programTuners) {
             if (!selectedTuners.has(t)) continue;
             const c = tile.cluster.tunerCounts[t];
             total += c;
@@ -652,14 +743,17 @@ export function HexMap({
               ? TUNER_COLORS[hoveredTuner]
               : MIXED_COLOR;
           }
-          // Two pins: first = solid, second = hatch (over MIXED bg),
-          // overlap (both present) = hatch in second color OVER first color.
+          // Two pins:
+          //   - only pin[0] → solid pin[0] color
+          //   - only pin[1] → solid pin[1] color
+          //   - both present → per-cell hatch with stripe width proportional
+          //     to the pin[1]/(pin[0]+pin[1]) ratio
           if (pinnedTuners.length === 2) {
             const has0 = tile.cluster.tunerCounts[pinnedTuners[0]] > 0;
             const has1 = tile.cluster.tunerCounts[pinnedTuners[1]] > 0;
-            if (has0 && has1) return "url(#hatch-overlap)";
+            if (has0 && has1) return `url(#hatch-overlap-${tile.cluster.id})`;
             if (has0) return TUNER_COLORS[pinnedTuners[0]];
-            if (has1) return `url(#hatch-${pinnedTuners[1]})`;
+            if (has1) return TUNER_COLORS[pinnedTuners[1]];
             return MIXED_COLOR;
           }
           // Single pin (or none) — activeTuner already covers single pin case.
@@ -683,9 +777,9 @@ export function HexMap({
           if (pinnedTuners.length === 2) {
             const has0 = tile.cluster.tunerCounts[pinnedTuners[0]] > 0;
             const has1 = tile.cluster.tunerCounts[pinnedTuners[1]] > 0;
-            if (has0 && has1) return "url(#hatch-overlap)";
+            if (has0 && has1) return `url(#hatch-overlap-${tile.cluster.id})`;
             if (has0) return TUNER_COLORS[pinnedTuners[0]];
-            if (has1) return `url(#hatch-${pinnedTuners[1]})`;
+            if (has1) return TUNER_COLORS[pinnedTuners[1]];
             return MIXED_COLOR;
           }
           if (activeTuner) {
@@ -693,11 +787,12 @@ export function HexMap({
               ? TUNER_COLORS[activeTuner]
               : MIXED_COLOR;
           }
-          if (!paramCellBins) return "#E2E8F0";
-          const bin = paramCellBins.bins.get(tile.cluster.id);
-          return bin
-            ? (paramCellBins.binColors[bin] ?? MIXED_COLOR)
-            : "#E2E8F0";
+          // Both All and single-param views use the same grey base — the
+          // bin/region color is layered on top via a 28% wash so the visual
+          // tone stays consistent (pastel) across both. Mixed cells get no
+          // wash, so they read as plain grey and stand apart from the
+          // tinted bin cells.
+          return "#E2E8F0";
         }
 
         case "complementary": {
@@ -720,6 +815,7 @@ export function HexMap({
       activeTuner,
       hoveredTuner,
       pinnedTuners,
+      programTuners,
     ],
   );
 
@@ -792,7 +888,7 @@ export function HexMap({
     type CellLabel = {
       tile: HexTile;
       clusterId: number;
-      text?: { value: string; unit?: string };
+      text?: { value: string; unit?: string; italic?: boolean };
       badge?: { tuner: TunerType };
     };
     // Each cell can hold one text label AND one badge — they stack vertically
@@ -807,12 +903,20 @@ export function HexMap({
       }
       return l;
     };
-    const pushText = (e: Entry, value: string, unit?: string) => {
+    const pushText = (
+      e: Entry,
+      value: string,
+      unit?: string,
+      italic?: boolean,
+    ) => {
       const l = ensure(e);
       if (l.text) return; // first text wins (priority order)
-      l.text = { value, unit };
+      l.text = { value, unit, italic };
     };
-    const fmt = (n: number) => Math.round(n).toLocaleString();
+    // Coverage values use program-specific formatting (HPO → "0.872",
+    // fuzzing → "1,500"). Trial counts always render as integers.
+    const fmt = (n: number) => fmtMetric(n);
+    const fmtCount = (n: number) => Math.round(n).toLocaleString();
     if (effectiveColorMode === "complementary") {
       // Cart members: show their cluster id (#N) so the working set is
       // identifiable on the map.
@@ -831,17 +935,17 @@ export function HexMap({
           .filter((x) => x.s > 0 && !cartIds.has(x.e.cluster.id))
           .sort((a, b) => b.s - a.s);
         if (ranked[0])
-          pushText(ranked[0].e, "No. 1", `+${fmt(ranked[0].s)} new`);
+          pushText(ranked[0].e, "No. 1", `+${fmt(ranked[0].s)}`, true);
         if (ranked[1])
-          pushText(ranked[1].e, "No. 2", `+${fmt(ranked[1].s)} new`);
+          pushText(ranked[1].e, "No. 2", `+${fmt(ranked[1].s)}`, true);
         if (ranked[2])
-          pushText(ranked[2].e, "No. 3", `+${fmt(ranked[2].s)} new`);
+          pushText(ranked[2].e, "No. 3", `+${fmt(ranked[2].s)}`, true);
       }
     } else {
-      pushText(maxCov, fmt(maxCov.cov), "branches");
-      pushText(minCov, fmt(minCov.cov), "branches");
-      pushText(dense, fmt(dense.tcount), "trials");
-      pushText(sparse, fmt(sparse.tcount), "trials");
+      pushText(maxCov, fmt(maxCov.cov), undefined, true);
+      pushText(minCov, fmt(minCov.cov), undefined, true);
+      pushText(dense, fmtCount(dense.tcount), "trials");
+      pushText(sparse, fmtCount(sparse.tcount), "trials");
     }
     return Array.from(byCluster.values());
   }, [
@@ -851,6 +955,7 @@ export function HexMap({
     effectiveColorMode,
     t3Scores,
     cartIds,
+    fmtMetric,
   ]);
 
   // Map clusterId → density tier (low/mid/high) by fixed trial-count buckets:
@@ -859,8 +964,9 @@ export function HexMap({
   //   high : > 1000
   const cellSizeTier = useMemo(() => {
     const tierMap = new Map<number, "low" | "mid" | "high">();
-    const LOW_MAX = 100;
-    const MID_MAX = 1000;
+    // SE programs see hundreds of trials per cell; HPO programs only have
+    // 4 tuner × 200 trials total = much smaller per-cell counts.
+    const { lowMax: LOW_MAX, midMax: MID_MAX } = cellSizeThresholdsFor(program);
     if (!data) return { tierMap, lowMax: LOW_MAX, midMax: MID_MAX };
     for (const c of data.clusters) {
       let total = 0;
@@ -873,7 +979,7 @@ export function HexMap({
       else tierMap.set(c.id, "high");
     }
     return { tierMap, lowMax: LOW_MAX, midMax: MID_MAX };
-  }, [data, selectedTuners]);
+  }, [data, selectedTuners, program]);
   const cellScaleOf = useCallback(
     (clusterId: number | null | undefined) => {
       if (clusterId == null) return 1;
@@ -885,7 +991,6 @@ export function HexMap({
 
   // ── Region labels in tuner-perf and tuner-param modes ──
   // Coverage categories (tuner-perf, most-specific first):
-  //   1. Underexplored Promising: cov ≥ p75 AND tcount ≤ p25
   //   2. Overexplored but Low:    cov ≤ p25 AND tcount ≥ p75
   //   3. High-Coverage Zone:      cov ≥ p75
   //   4. Low-Coverage Zone:       cov ≤ p25
@@ -922,7 +1027,6 @@ export function HexMap({
     const covP33 = pct(covs, 0.33);
     const covP67 = pct(covs, 0.67);
     const covP75 = pct(covs, 0.75);
-    const tcP25 = pct(tcs, 0.25);
     const tcP75 = pct(tcs, 0.75);
 
     const claimed = new Set<string>();
@@ -1123,17 +1227,11 @@ export function HexMap({
     const meanTc = (cs: Cell[]) =>
       cs.reduce((s, c) => s + c.tcount, 0) / cs.length;
 
-    if (effectiveColorMode === "tuner-perf") {
-      // All coverage-category labels share one neutral color so they read as a
-      // distinct group from the tuner regions (which carry semantic tuner colors).
+    // Five coverage qualitative regions shared across modes that want a
+    // coverage-context overlay (tuner-perf and single-param). Single neutral
+    // color so they form a distinct group from any palette-colored regions.
+    const addCoverageQualitativeRegions = () => {
       const COV_NEUTRAL = "#475569";
-      addOne(
-        "Underexplored Promising",
-        COV_NEUTRAL,
-        (c) => c.cov >= covP75 && c.tcount <= tcP25,
-        2,
-        (cs) => meanCov(cs) - meanTc(cs) * 0,
-      );
       addOne(
         "Overexplored but Low",
         COV_NEUTRAL,
@@ -1166,24 +1264,17 @@ export function HexMap({
           return cs.length * 100 - Math.sqrt(v);
         },
       );
+    };
+
+    if (effectiveColorMode === "tuner-perf") {
+      addCoverageQualitativeRegions();
     } else if (effectiveColorMode === "tuner-param") {
       if (selectedParam && paramCellBins) {
-        // Single-param mode: one region per non-Mixed bin.
-        for (const binName of paramCellBins.binNames) {
-          if (binName === "Mixed") continue;
-          const color = paramCellBins.binColors[binName];
-          if (!color) continue;
-          addOne(
-            binName,
-            color,
-            (c) =>
-              c.tile.cluster
-                ? paramCellBins.bins.get(c.tile.cluster.id) === binName
-                : false,
-            2,
-            (cs) => cs.length,
-          );
-        }
+        // Single-param mode: no per-bin region overlays (bin colors come
+        // from the wash directly), but the same five coverage qualitative
+        // regions appear so users still see Failure-prone / High-Cov etc.
+        // landmarks for orientation.
+        addCoverageQualitativeRegions();
       } else {
         // Default tuner-param view (no specific param selected): show the
         // largest contrastive region for each of the top-5 important
@@ -1192,7 +1283,7 @@ export function HexMap({
         const TOP_N_PARAMS = 5;
         const topParams = paramImportanceList.slice(0, TOP_N_PARAMS);
         let palettePos = 0;
-        for (const { name: pname, importance } of topParams) {
+        for (const { name: pname } of topParams) {
           const ptype = getParamType(pname);
           const binData = binsForParam(pname, ptype);
           if (!binData) continue;
@@ -1217,10 +1308,9 @@ export function HexMap({
             const color = CAT_PALETTE[palettePos % CAT_PALETTE.length];
             palettePos++;
             for (const k of bestKeys) claimed.add(k);
-            const impStr = importance.toFixed(1);
             rawRegions.push(
-              buildRegion(bestKeys, `${pname} (${impStr}): ${bestBin}`, color, [
-                `${pname} (${impStr})`,
+              buildRegion(bestKeys, `${pname}: ${bestBin}`, color, [
+                pname,
                 bestBin,
               ]),
             );
@@ -1234,8 +1324,11 @@ export function HexMap({
     // labels on the same side are spread along that side by perpendicular
     // coordinate (sweep to avoid overlap). Leader is a straight line from the
     // region cell nearest to the label out to the label.
-    const sCenterX = svgWidth / 2;
-    const sCenterY = height / 2;
+    // Must mirror the render center (which is offset to leave room for the
+    // legend column on the right) so label placement projects data coords
+    // through the same transform as the SVG group.
+    const sCenterX = centerX;
+    const sCenterY = centerY;
     // Min distance from SVG edge to the label box so labels don't visually
     // glue to the SVG border when the data extends close to it.
     const screenMargin = 28;
@@ -1423,10 +1516,10 @@ export function HexMap({
         pdx = -pdx;
         pdy = -pdy;
       }
-      const c1x = vx + dxV * 0.4 + pdx * segLen * 0.04;
-      const c1y = vy + dyV * 0.4 + pdy * segLen * 0.04;
-      const c2x = lx + (midX - lx) * 0.18;
-      const c2y = ly + (midY - ly) * 0.18;
+      const c1x = vx + dxV * 0.4 + pdx * segLen * 0.12;
+      const c1y = vy + dyV * 0.4 + pdy * segLen * 0.12;
+      const c2x = lx + (midX - lx) * 0.32;
+      const c2y = ly + (midY - ly) * 0.32;
       return { c1x, c1y, c2x, c2y };
     };
     // Sample a cubic Bezier into N+1 points (polyline approximation).
@@ -2253,6 +2346,8 @@ export function HexMap({
     scale,
     svgWidth,
     height,
+    centerX,
+    centerY,
   ]);
 
   // Map clusterId → ALL region indices the cell belongs to, sorted by region
@@ -2308,38 +2403,6 @@ export function HexMap({
     }
     return result;
   }, [highlightLabels, coverageRegions]);
-
-  // ── Boundary path between different param bins ──
-  const paramBinBoundaryPath = useMemo((): string | null => {
-    if (!paramCellBins || !data) return null;
-    const tileBin = new Map<string, string>();
-    for (const tile of data.hexTiles) {
-      if (!tile.cluster) continue;
-      const bin = paramCellBins.bins.get(tile.cluster.id);
-      if (bin) tileBin.set(`${tile.q},${tile.r}`, bin);
-    }
-    const verts = Array.from({ length: 6 }, (_, i) => ({
-      x: HEX_SIZE * Math.cos((i * Math.PI) / 3),
-      y: HEX_SIZE * Math.sin((i * Math.PI) / 3),
-    }));
-    let d = "";
-    for (const tile of data.hexTiles) {
-      const tk = `${tile.q},${tile.r}`;
-      const myBin = tileBin.get(tk);
-      if (!myBin) continue;
-      for (let ei = 0; ei < 6; ei++) {
-        const dir = HEX_DIRECTIONS[ei];
-        const nk = `${tile.q + dir.dq},${tile.r + dir.dr}`;
-        const nBin = tileBin.get(nk);
-        if (nBin !== undefined && nBin !== myBin) {
-          const va = verts[ei];
-          const vb = verts[(ei + 1) % 6];
-          d += `M${tile.x + va.x},${tile.y + va.y}L${tile.x + vb.x},${tile.y + vb.y}`;
-        }
-      }
-    }
-    return d || null;
-  }, [paramCellBins, data, HEX_SIZE, HEX_DIRECTIONS]);
 
   // Mouse handlers
   const onHoverChangeRef = useRef(onHoverChange);
@@ -2423,18 +2486,19 @@ export function HexMap({
         colorMode={colorMode}
         setColorMode={wrappedSetColorMode}
         effectiveColorMode={effectiveColorMode}
+        tunerNames={programTuners}
+        metricLabel={metricLabel}
         coverageMetric={coverageMetric}
         setCoverageMetric={setCoverageMetric}
         selectedParam={selectedParam}
         onParamSelect={setSelectedParam}
         paramList={paramImportanceList}
-        t3Scores={t3Scores}
-        cartSize={cartIds.size}
-        selectedTuners={selectedTuners}
-        onToggleTuner={onToggleTuner ?? (() => {})}
         onHoverTuner={setHoveredTuner}
         pinnedTuners={pinnedTuners}
         onPinTuner={togglePin}
+        coverageOverlay={coverageOverlay}
+        setCoverageOverlay={setCoverageOverlay}
+        onHoverCoverage={setCoverageHovered}
       />
       <div
         ref={containerRef}
@@ -2471,52 +2535,46 @@ export function HexMap({
               regardless of low/mid/high tier so the shadow band thickness
               and shape stays consistent across the region. */}
             <defs>
-              {/* Hatch pattern for "second-pin" tuner cells in Tuner mode. */}
-              {TUNER_NAMES.map((t) => (
-                <pattern
-                  key={`hatch-${t}`}
-                  id={`hatch-${t}`}
-                  patternUnits="userSpaceOnUse"
-                  width="8"
-                  height="8"
-                  patternTransform="rotate(45)"
-                >
-                  <rect width="8" height="8" fill={MIXED_COLOR} />
-                  <line
-                    x1="0"
-                    y1="0"
-                    x2="0"
-                    y2="8"
-                    stroke={TUNER_COLORS[t]}
-                    strokeWidth="4"
-                  />
-                </pattern>
-              ))}
-              {/* Overlap pattern: cells where BOTH pinned tuners have trials.
-                Stripes in the second-pin color over a first-pin color bg. */}
-              {pinnedTuners.length === 2 && (
-                <pattern
-                  id="hatch-overlap"
-                  patternUnits="userSpaceOnUse"
-                  width="8"
-                  height="8"
-                  patternTransform="rotate(45)"
-                >
-                  <rect
-                    width="8"
-                    height="8"
-                    fill={TUNER_COLORS[pinnedTuners[0]]}
-                  />
-                  <line
-                    x1="0"
-                    y1="0"
-                    x2="0"
-                    y2="8"
-                    stroke={TUNER_COLORS[pinnedTuners[1]]}
-                    strokeWidth="4"
-                  />
-                </pattern>
-              )}
+              {/* Per-cell overlap hatch: cells where BOTH pinned tuners have
+                trials. Stripe width is proportional to the pin[1] share so
+                the visual mix reflects how dominant each tuner is in that
+                cell. Clamped to [1, 7] in an 8-px pattern so neither color
+                disappears at extreme ratios. */}
+              {pinnedTuners.length === 2 &&
+                data &&
+                data.hexTiles.map((tile) => {
+                  const c = tile.cluster;
+                  if (!c) return null;
+                  const c0 = c.tunerCounts[pinnedTuners[0]];
+                  const c1 = c.tunerCounts[pinnedTuners[1]];
+                  if (c0 === 0 || c1 === 0) return null;
+                  const r1 = c1 / (c0 + c1);
+                  const stripeW = Math.max(1, Math.min(7, 8 * r1));
+                  return (
+                    <pattern
+                      key={`hatch-overlap-${c.id}`}
+                      id={`hatch-overlap-${c.id}`}
+                      patternUnits="userSpaceOnUse"
+                      width="8"
+                      height="8"
+                      patternTransform="rotate(45)"
+                    >
+                      <rect
+                        width="8"
+                        height="8"
+                        fill={TUNER_COLORS[pinnedTuners[0]]}
+                      />
+                      <line
+                        x1="0"
+                        y1="0"
+                        x2="0"
+                        y2="8"
+                        stroke={TUNER_COLORS[pinnedTuners[1]]}
+                        strokeWidth={stripeW}
+                      />
+                    </pattern>
+                  );
+                })}
               {coverageRegions.map((r, i) => (
                 <clipPath
                   key={`rclip-${i}`}
@@ -2531,6 +2589,50 @@ export function HexMap({
                     />
                   ))}
                 </clipPath>
+              ))}
+              {/* Gaussian blur for the inset shadow — gives the band a smooth
+                gradient falloff from the perimeter inward (instead of the
+                stepped contour-line look from stacked strokes). The clipPath
+                still cuts the outer half at the perimeter, so the visible
+                result is one half of a Gaussian. */}
+              <filter
+                id="inset-shadow-soft"
+                x="-50%"
+                y="-50%"
+                width="200%"
+                height="200%"
+              >
+                <feGaussianBlur stdDeviation="4" />
+              </filter>
+              {/* Inverse of region-clip: white everywhere EXCEPT the region's
+                cells. Used to limit the border's white halo to the outside
+                of the region only. */}
+              {coverageRegions.map((r, i) => (
+                <mask
+                  key={`rmask-${i}`}
+                  id={`region-outside-mask-${i}`}
+                  maskUnits="userSpaceOnUse"
+                  x={-100000}
+                  y={-100000}
+                  width={200000}
+                  height={200000}
+                >
+                  <rect
+                    x={-100000}
+                    y={-100000}
+                    width={200000}
+                    height={200000}
+                    fill="white"
+                  />
+                  {r.cellPoints.map((p, ci) => (
+                    <path
+                      key={ci}
+                      d={hexPath}
+                      transform={`translate(${p.x}, ${p.y})`}
+                      fill="black"
+                    />
+                  ))}
+                </mask>
               ))}
             </defs>
             {/* ===== HEX GRID ===== */}
@@ -2561,7 +2663,13 @@ export function HexMap({
                   );
                   if (!hasSelectedTuner) return null;
 
-                  const fill = getHexFill(tile);
+                  // Coverage active = either hovering or pinned via the
+                  // checkbox. Both states swap the cell fill to the teal
+                  // coverage scale and drop tuner colors entirely.
+                  const coverageActive = coverageHovered || coverageOverlay;
+                  const fill = coverageActive
+                    ? getCoverageColor(getClusterCov(tile.cluster))
+                    : getHexFill(tile);
                   const isHovered = hoveredClusterId === tile.cluster.id;
                   const isExternallyHovered =
                     externalHoveredClusterId !== null &&
@@ -2604,36 +2712,35 @@ export function HexMap({
                         d={hexPath}
                         fill={fill || "#F8FAFC"}
                         stroke={
-                          isHighlighted
-                            ? "#1E293B"
-                            : effectiveColorMode === "complementary" &&
-                                tile.cluster &&
-                                t3TopIds.has(tile.cluster.id)
-                              ? "#059669"
-                              : tile.cluster && cartIds.has(tile.cluster.id)
-                                ? "#1E293B"
-                                : "#E2E8F0"
+                          effectiveColorMode === "complementary" &&
+                          tile.cluster &&
+                          t3TopIds.has(tile.cluster.id)
+                            ? "#059669"
+                            : tile.cluster && cartIds.has(tile.cluster.id)
+                              ? "#1E293B"
+                              : "#E2E8F0"
                         }
                         strokeWidth={
-                          isHighlighted
-                            ? 2.5
-                            : effectiveColorMode === "complementary" &&
-                                tile.cluster &&
-                                t3TopIds.has(tile.cluster.id)
+                          effectiveColorMode === "complementary" &&
+                          tile.cluster &&
+                          t3TopIds.has(tile.cluster.id)
+                            ? 2
+                            : tile.cluster && cartIds.has(tile.cluster.id)
                               ? 2
-                              : tile.cluster && cartIds.has(tile.cluster.id)
-                                ? 2
-                                : 0.5
+                              : 0.5
                         }
                         filter={isHighlighted ? "brightness(1.15)" : undefined}
                       />
                       {/* Tuner-param: full color wash on cells that belong to a region.
                       Skipped when a tuner is pinned/hovered (param-comparison
-                      mode) so the underlying tuner color stays visible. */}
+                      mode) so the underlying tuner color stays visible.
+                      Also skipped while the Coverage overlay/preview is
+                      active so the teal coverage fill isn't repainted. */}
                       {tileRegionIdx !== null &&
                         effectiveColorMode === "tuner-param" &&
                         pinnedTuners.length === 0 &&
-                        !hoveredTuner && (
+                        !hoveredTuner &&
+                        !coverageActive && (
                           <path
                             d={hexPath}
                             fill={coverageRegions[tileRegionIdx].color}
@@ -2641,6 +2748,34 @@ export function HexMap({
                             pointerEvents="none"
                           />
                         )}
+                      {/* Single-param wash: 28% opacity over grey base for
+                        boolean / categorical (matches the All-mode pastel
+                        feel), bumped to 0.42 for numeric so the three
+                        single-hue tints stay clearly distinguishable.
+                        Skipped for Mixed cells so they stay plain grey and
+                        visibly differ from any tinted bin. */}
+                      {effectiveColorMode === "tuner-param" &&
+                        selectedParam &&
+                        paramCellBins &&
+                        pinnedTuners.length === 0 &&
+                        !hoveredTuner &&
+                        !coverageActive &&
+                        (() => {
+                          const bin = paramCellBins.bins.get(tile.cluster!.id);
+                          if (!bin || bin === "Mixed") return null;
+                          const c = paramCellBins.binColors[bin];
+                          if (!c) return null;
+                          const op =
+                            selectedParamType === "numeric" ? 0.42 : 0.28;
+                          return (
+                            <path
+                              d={hexPath}
+                              fill={c}
+                              fillOpacity={op}
+                              pointerEvents="none"
+                            />
+                          );
+                        })()}
                       {/* Inset shadow is drawn as a region-level border stroke
                       clipped to region cells (rendered outside this loop) so
                       only the OUTER perimeter gets the band — interior cells
@@ -2648,68 +2783,12 @@ export function HexMap({
                       {/* Cart amber dot is rendered AFTER all region/label
                       passes so it's never occluded by inset shadows, borders,
                       or leader paths. See the dedicated pass after tiles. */}
-                      {/* Hover cart button: + or − (inside tile group so mouse doesn't leave) */}
-                      {isHovered && (
-                        <g
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onCartToggle?.(tile.cluster!.id);
-                          }}
-                          style={{ cursor: "pointer" }}
-                        >
-                          <circle
-                            cx={HEX_SIZE * 0.55}
-                            cy={-HEX_SIZE * 0.55}
-                            r={HEX_SIZE * 0.22}
-                            fill={
-                              cartIds.has(tile.cluster!.id)
-                                ? "#F59E0B"
-                                : "#374151"
-                            }
-                            stroke="white"
-                            strokeWidth={1.5}
-                          />
-                          <text
-                            x={HEX_SIZE * 0.55}
-                            y={-HEX_SIZE * 0.55}
-                            textAnchor="middle"
-                            dominantBaseline="central"
-                            fontSize={HEX_SIZE * 0.28}
-                            fontWeight={700}
-                            fill="white"
-                            pointerEvents="none"
-                          >
-                            {cartIds.has(tile.cluster!.id) ? "−" : "+"}
-                          </text>
-                        </g>
-                      )}
+                      {/* +/− button for hovered cell is rendered in a top
+                        pass below so it's never occluded by region borders
+                        or other layers. */}
                     </g>
                   );
                 })}
-
-              {/* ── Parameter bin boundaries (boolean params) ── */}
-              {paramBinBoundaryPath && (
-                <>
-                  <path
-                    d={paramBinBoundaryPath}
-                    fill="none"
-                    stroke="white"
-                    strokeWidth={4 / renderScale}
-                    strokeLinecap="round"
-                    opacity={0.8}
-                    pointerEvents="none"
-                  />
-                  <path
-                    d={paramBinBoundaryPath}
-                    fill="none"
-                    stroke="#374151"
-                    strokeWidth={1.5 / renderScale}
-                    strokeLinecap="round"
-                    opacity={0.6}
-                    pointerEvents="none"
-                  />
-                </>
-              )}
 
               {/* ── Notable-cell labels: optional text + optional tuner badge, stacked ── */}
               {effectiveHighlightLabels.map(
@@ -2744,6 +2823,7 @@ export function HexMap({
                             dominantBaseline="central"
                             fontSize={valueSize}
                             fontWeight={700}
+                            fontStyle={text.italic ? "italic" : undefined}
                             fill="#0F172A"
                             stroke="white"
                             strokeWidth={halo}
@@ -2760,6 +2840,7 @@ export function HexMap({
                               dominantBaseline="central"
                               fontSize={unitSize}
                               fontWeight={600}
+                              fontStyle={text.italic ? "italic" : undefined}
                               fill="#475569"
                               stroke="white"
                               strokeWidth={halo}
@@ -2824,35 +2905,32 @@ export function HexMap({
                 // YlOrBr coverage fill. Categories are still differentiated by the
                 // leader line + label color and the per-region hover wash.
                 const BORDER_COLOR = "#0F172A";
-                // In param mode with a pinned/hovered tuner, the cells already
-                // carry the tuner color — the inset shadow is rendered grey so
-                // it doesn't fight that color.
-                const isParamComparison =
-                  effectiveColorMode === "tuner-param" &&
-                  (pinnedTuners.length > 0 || hoveredTuner !== null);
-                const insetShadowColor = isParamComparison
-                  ? "#475569"
-                  : r.color;
+                // Inset shadow is always the same dark neutral as the region
+                // border so the perimeter band reads consistently across all
+                // modes (tuner-perf / tuner-param / coverage active).
+                const insetShadowColor = BORDER_COLOR;
                 return (
                   <g key={`region-${i}`} pointerEvents="none" opacity={opacity}>
-                    {/* Inset shadow: thick stroke along the region perimeter,
-                      clipped to the region cells so only the INNER half of
-                      the stroke is visible — produces a band that hugs the
-                      perimeter from the inside.
-                      Round linecap/linejoin so the per-segment sub-paths
-                      visually bridge across shared vertices (otherwise the
-                      band looks broken at every cell corner). */}
+                    {/* Inset shadow: a single stroke centered on the perimeter
+                      with Gaussian blur applied, then clipped to the region.
+                      Half of the blurred Gaussian sits outside (clipped away)
+                      and the inside half shows a continuous falloff — peak
+                      alpha at the perimeter, smoothly fading to 0 inward. */}
                     <path
                       d={r.borderPath}
                       fill="none"
                       stroke={insetShadowColor}
-                      strokeWidth={HEX_SIZE * 0.7}
+                      strokeWidth={HEX_SIZE * 0.45}
                       strokeOpacity={isHov ? 0.55 : 0.4}
                       strokeLinecap="round"
                       strokeLinejoin="round"
+                      filter="url(#inset-shadow-soft)"
                       clipPath={`url(#region-clip-${i})`}
                     />
-                    {/* White underlay for border */}
+                    {/* White underlay for border — masked to the OUTSIDE of
+                      the region so the inner half of the stroke is hidden;
+                      this lets the inset colored band meet the dark border
+                      directly with no white sliver between them. */}
                     <path
                       d={r.borderPath}
                       fill="none"
@@ -2861,6 +2939,7 @@ export function HexMap({
                       strokeLinecap="round"
                       strokeLinejoin="round"
                       opacity={0.9}
+                      mask={`url(#region-outside-mask-${i})`}
                     />
                     {/* Region border (unified contrast color) */}
                     <path
@@ -2891,18 +2970,9 @@ export function HexMap({
                       strokeLinecap="round"
                       strokeLinejoin="round"
                     />
-                    {/* Circular handle on each anchor vertex (1 or 2). */}
-                    {r.handles.map((h, hi) => (
-                      <circle
-                        key={`h-${hi}`}
-                        cx={h.x}
-                        cy={h.y}
-                        r={3.5 / renderScale}
-                        fill={r.color}
-                        stroke="white"
-                        strokeWidth={1.4 / renderScale}
-                      />
-                    ))}
+                    {/* Handles are rendered in a separate top-pass below so
+                      they sit above every region's borders, not just this
+                      region's own border. */}
                     {/* Interactive label group — hovering it highlights the
                       region the same way as hovering one of its cells. */}
                     <g
@@ -3120,6 +3190,51 @@ export function HexMap({
                 );
               })}
 
+              {/* ── Region handle pass ──
+                Re-rendered after every region's borders so each handle sits
+                on top of any neighboring region's border, not just its own. */}
+              {coverageRegions.map((r, i) =>
+                r.handles.map((h, hi) => (
+                  <circle
+                    key={`handle-${i}-${hi}`}
+                    cx={h.x}
+                    cy={h.y}
+                    r={3.5 / renderScale}
+                    fill={r.color}
+                    stroke="white"
+                    strokeWidth={1.4 / renderScale}
+                    pointerEvents="none"
+                  />
+                )),
+              )}
+
+              {/* ── Hover highlight stroke ──
+                Drawn last so the dark outline of the currently hovered cell
+                is visible even when the cell sits at a region perimeter. */}
+              {(() => {
+                const targetId =
+                  hoveredClusterId ?? externalHoveredClusterId ?? null;
+                if (targetId === null) return null;
+                const tile = data.hexTiles.find(
+                  (t) => t.cluster?.id === targetId,
+                );
+                if (!tile || !tile.cluster) return null;
+                const cellScale = cellScaleOf(tile.cluster.id);
+                return (
+                  <g
+                    transform={`translate(${tile.x}, ${tile.y}) scale(${cellScale})`}
+                    pointerEvents="none"
+                  >
+                    <path
+                      d={hexPath}
+                      fill="none"
+                      stroke="#1E293B"
+                      strokeWidth={2.5}
+                    />
+                  </g>
+                );
+              })()}
+
               {/* ── Cart amber-dot layer ──
                 Drawn AFTER tiles + regions so the dot is always on top of any
                 inset shadow / border / leader. Hovered cells use the in-tile
@@ -3132,59 +3247,86 @@ export function HexMap({
                     hoveredClusterId !== t.cluster.id,
                 )
                 .map((t) => {
+                  // Anchored at the hex's upper-right vertex (300°).
+                  // Position scales with cellScale so the badge stays on the
+                  // actual vertex; the dot itself is a fixed size.
                   const cellScale = cellScaleOf(t.cluster!.id);
+                  const VX = 0.5; // cos(300°)
+                  const VY = -Math.sqrt(3) / 2; // sin(300°), SVG y-down
                   return (
                     <circle
                       key={`cart-dot-${t.cluster!.id}`}
-                      cx={t.x + HEX_SIZE * 0.55 * cellScale}
-                      cy={t.y - HEX_SIZE * 0.55 * cellScale}
-                      r={HEX_SIZE * 0.14 * cellScale}
+                      cx={t.x + HEX_SIZE * VX * cellScale}
+                      cy={t.y + HEX_SIZE * VY * cellScale}
+                      r={HEX_SIZE * 0.2}
                       fill="#F59E0B"
                       stroke="white"
-                      strokeWidth={1.2}
+                      strokeWidth={1.5}
                       pointerEvents="none"
                     />
                   );
                 })}
+
+              {/* ── Hover cart button (+/−) ──
+                Top of every other layer so the click target and the icon
+                are never partially hidden by region borders or labels. */}
+              {hoveredClusterId !== null &&
+                (() => {
+                  const tile = data.hexTiles.find(
+                    (t) => t.cluster?.id === hoveredClusterId,
+                  );
+                  if (!tile || !tile.cluster) return null;
+                  // Anchored at the hex's upper-right vertex (300°). Position
+                  // scales with cellScale so the badge sits on the actual
+                  // vertex; circle/font are fixed sizes.
+                  const cellScale = cellScaleOf(tile.cluster.id);
+                  const VX = 0.5; // cos(300°)
+                  const VY = -Math.sqrt(3) / 2; // sin(300°), SVG y-down
+                  const cx = tile.x + HEX_SIZE * VX * cellScale;
+                  const cy = tile.y + HEX_SIZE * VY * cellScale;
+                  const r = HEX_SIZE * 0.28;
+                  const inCart = cartIds.has(tile.cluster.id);
+                  return (
+                    <g
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onCartToggle?.(tile.cluster!.id);
+                      }}
+                      // Re-assert hover when the cursor enters the button
+                      // itself; without this the cell's mouseLeave (fired
+                      // when the cursor crosses from the cell <path> onto
+                      // the button) clears hoveredClusterId and removes
+                      // the button before the click can land. React batches
+                      // both updates so the final state stays = target id.
+                      onMouseEnter={() => setHoveredClusterId(tile.cluster!.id)}
+                      onMouseLeave={() => setHoveredClusterId(null)}
+                      style={{ cursor: "pointer" }}
+                    >
+                      <circle
+                        cx={cx}
+                        cy={cy}
+                        r={r}
+                        fill={inCart ? "#F59E0B" : "#374151"}
+                        stroke="white"
+                        strokeWidth={1.8}
+                      />
+                      <text
+                        x={cx}
+                        y={cy}
+                        textAnchor="middle"
+                        dominantBaseline="central"
+                        fontSize={HEX_SIZE * 0.36}
+                        fontWeight={700}
+                        fill="white"
+                        pointerEvents="none"
+                      >
+                        {inCart ? "−" : "+"}
+                      </text>
+                    </g>
+                  );
+                })()}
             </g>
           </svg>
-
-          {/* Complementary empty-cart overlay */}
-          {effectiveColorMode === "complementary" && cartIds.size === 0 && (
-            <div
-              style={{
-                position: "absolute",
-                inset: 0,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                pointerEvents: "none",
-                zIndex: 5,
-              }}
-            >
-              <div
-                style={{
-                  background: "rgba(255,255,255,0.94)",
-                  backdropFilter: "blur(4px)",
-                  borderRadius: 10,
-                  border: "1px solid #E5E7EB",
-                  boxShadow: "0 4px 16px rgba(0,0,0,0.08)",
-                  padding: "12px 20px",
-                  fontSize: 15,
-                  fontWeight: 500,
-                  color: "#475569",
-                  textAlign: "center",
-                  maxWidth: 360,
-                }}
-              >
-                Add at least one cell to the working set to see complementary
-                candidates.
-                <div style={{ fontSize: 13, color: "#94A3B8", marginTop: 4 }}>
-                  Shift+click a cell to add it.
-                </div>
-              </div>
-            </div>
-          )}
 
           {/* In-map legend (top-right). Always rendered — child blocks decide
             their own visibility based on mode. */}
@@ -3272,325 +3414,1424 @@ export function HexMap({
               )}
             </div>
 
-            {legendsVisible && (<>
-            {/* Original Tuner-mode legend — tuner-dominant colors + Mixed.
-                Hidden when the big figure-capture legend is active. */}
-            {effectiveColorMode === "tuner-perf" && !figureLegendVisible && (
-              <div
-                style={{
-                  background: "rgba(255,255,255,0.92)",
-                  backdropFilter: "blur(4px)",
-                  borderRadius: 8,
-                  border: "1px solid #E5E7EB",
-                  boxShadow: "0 2px 8px rgba(0,0,0,0.10)",
-                  padding: "6px 10px",
-                }}
-              >
-                <div
-                  style={{
-                    fontSize: 13,
-                    fontWeight: 700,
-                    color: "#374151",
-                    marginBottom: 6,
-                  }}
-                >
-                  Dominant tuner
-                </div>
-                <div
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "1fr 1fr",
-                    columnGap: 10,
-                    rowGap: 3,
-                  }}
-                >
-                  {TUNER_NAMES.filter((t) => selectedTuners.has(t)).map((t) => (
-                    <div
-                      key={t}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 6,
-                        fontSize: 11,
-                        color: "#374151",
-                      }}
-                    >
-                      <span
-                        style={{
-                          width: 11,
-                          height: 11,
-                          borderRadius: 2,
-                          background: TUNER_COLORS[t],
-                          border: "1px solid rgba(0,0,0,0.05)",
-                          flexShrink: 0,
-                        }}
-                      />
-                      <span style={{ fontWeight: 600 }}>
-                        {TUNER_DISPLAY_NAMES[t]}
-                      </span>
-                    </div>
-                  ))}
+            {legendsVisible && (
+              <>
+                {/* Complementary-mode legend — consolidated, matches the
+                tuner-perf / tuner-param layout. Sections: Score → Size →
+                Markers. Auto-shown whenever the working set is non-empty
+                (which is exactly when complementary mode is active). */}
+                {effectiveColorMode === "complementary" && t3Scores && (
                   <div
                     style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 6,
-                      fontSize: 11,
-                      color: "#374151",
-                    }}
-                  >
-                    <span
-                      style={{
-                        width: 11,
-                        height: 11,
-                        borderRadius: 2,
-                        background: MIXED_COLOR,
-                        border: "1px solid rgba(0,0,0,0.05)",
-                        flexShrink: 0,
-                      }}
-                    />
-                    <span style={{ fontWeight: 600 }}>Mixed</span>
-                  </div>
-                </div>
-                <div
-                  style={{
-                    fontSize: 10,
-                    color: "#94A3B8",
-                    marginTop: 4,
-                    fontStyle: "italic",
-                  }}
-                >
-                  ≥ 50% of trials → tuner color
-                </div>
-              </div>
-            )}
-
-            {/* Tuner-mode big legend — figure-style consolidated CELL + REGION
-                key. Replaces all other legend cards while in this mode. */}
-            {effectiveColorMode === "tuner-perf" &&
-              figureLegendVisible &&
-              (() => {
-                const fmt = (v: number) => v.toLocaleString();
-                const sectionHeader = (title: string) => (
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 10,
-                      margin: "0 0 10px",
-                    }}
-                  >
-                    <div
-                      style={{ flex: 1, height: 1, background: "#CBD5E1" }}
-                    />
-                    <span
-                      style={{
-                        fontSize: 16,
-                        fontWeight: 700,
-                        letterSpacing: 1.8,
-                        color: "#475569",
-                      }}
-                    >
-                      {title}
-                    </span>
-                    <div
-                      style={{ flex: 1, height: 1, background: "#CBD5E1" }}
-                    />
-                  </div>
-                );
-                const subHeader = (title: string) => (
-                  <div
-                    style={{
-                      fontSize: 16,
-                      fontWeight: 700,
-                      color: "#374151",
-                      marginBottom: 4,
-                    }}
-                  >
-                    {title}
-                  </div>
-                );
-                const tiers = [
-                  { scale: 0.7, range: `≤ ${fmt(cellSizeTier.lowMax)}` },
-                  {
-                    scale: 1.0,
-                    range: `${fmt(cellSizeTier.lowMax)}–${fmt(cellSizeTier.midMax)}`,
-                  },
-                  { scale: 1.25, range: `> ${fmt(cellSizeTier.midMax)}` },
-                ];
-                // Match the apparent hex radius on the map: HEX_SIZE × scale
-                // (the same product that produces an on-map cell's visible
-                // size). Multiplied by per-tier cellScale (0.7 / 1.0 / 1.25).
-                const baseHexR = HEX_SIZE * scale;
-                const maxTierR = baseHexR * 1.25;
-                const sampleBox = Math.max(Math.ceil(maxTierR * 2 + 10), 36);
-                // Default-tier hex used in annotation rows.
-                const sampleHexR = baseHexR;
-                // Same font sizes the on-map highlight labels use (12px value,
-                // 10px unit) so the legend's sample hexes match what the user
-                // sees in the data view.
-                const VALUE_SIZE = 12;
-                const UNIT_SIZE = 10;
-                const LINE_GAP = 4;
-                // Match map's halo (white stroke + paintOrder=stroke) so the
-                // sample text reads exactly the same as on-map highlight text.
-                const HALO_W = 3;
-                const sampleHex = (
-                  opts: { text?: string; sub?: string; dot?: boolean } = {},
-                ) => {
-                  const totalH = opts.text
-                    ? opts.sub
-                      ? VALUE_SIZE + LINE_GAP + UNIT_SIZE
-                      : VALUE_SIZE
-                    : 0;
-                  const topY = -totalH / 2;
-                  const valueY = opts.sub ? topY + VALUE_SIZE / 2 : 0;
-                  const unitY = topY + VALUE_SIZE + LINE_GAP + UNIT_SIZE / 2;
-                  return (
-                    <svg
-                      width={sampleBox}
-                      height={sampleBox}
-                      viewBox={`-${sampleBox / 2} -${sampleBox / 2} ${sampleBox} ${sampleBox}`}
-                    >
-                      {/* Cell hex — no visible border, matching the map where
-                        the default cell stroke is barely-perceptible (0.5px
-                        SVG × scale ≈ sub-pixel). */}
-                      <path
-                        d={getHexPath(sampleHexR)}
-                        fill={MIXED_COLOR}
-                        stroke="none"
-                      />
-                      {opts.text && (
-                        <text
-                          x={0}
-                          y={valueY}
-                          textAnchor="middle"
-                          dominantBaseline="central"
-                          fontSize={VALUE_SIZE}
-                          fontWeight={700}
-                          fill="#0F172A"
-                          stroke="white"
-                          strokeWidth={HALO_W}
-                          paintOrder="stroke"
-                        >
-                          {opts.text}
-                        </text>
-                      )}
-                      {opts.sub && (
-                        <text
-                          x={0}
-                          y={unitY}
-                          textAnchor="middle"
-                          dominantBaseline="central"
-                          fontSize={UNIT_SIZE}
-                          fontWeight={600}
-                          fill="#475569"
-                          stroke="white"
-                          strokeWidth={HALO_W}
-                          paintOrder="stroke"
-                        >
-                          {opts.sub}
-                        </text>
-                      )}
-                      {/* Amber dot — proportions match the on-map cart marker
-                        (r = HEX × 0.14, offset = HEX × 0.55) so the legend
-                        glyph and the actual map glyph are pixel-equivalent. */}
-                      {opts.dot && (
-                        <circle
-                          cx={sampleHexR * 0.55}
-                          cy={-sampleHexR * 0.55}
-                          r={sampleHexR * 0.14}
-                          fill="#F59E0B"
-                          stroke="white"
-                          strokeWidth={1.2 * scale}
-                        />
-                      )}
-                    </svg>
-                  );
-                };
-                // Annotation row template
-                const annoRow = (
-                  visual: React.ReactNode,
-                  label: string,
-                  key: string,
-                ) => (
-                  <div
-                    key={key}
-                    style={{ display: "flex", alignItems: "center", gap: 12 }}
-                  >
-                    <div
-                      style={{
-                        width: sampleBox,
-                        flexShrink: 0,
-                        display: "flex",
-                        justifyContent: "center",
-                      }}
-                    >
-                      {visual}
-                    </div>
-                    <span style={{ fontSize: 16, color: "#475569" }}>
-                      {label}
-                    </span>
-                  </div>
-                );
-                // Width scales loosely with hex size so larger viewports get
-                // a roomier legend (still capped to keep portrait layouts sane).
-                const legendWidth = Math.min(
-                  Math.max(340, sampleBox * 6 + 40),
-                  420,
-                );
-                return (
-                  <div
-                    style={{
-                      pointerEvents: "auto",
-                      position: "relative",
-                      background: "rgba(255,255,255)",
+                      background: "rgba(255,255,255,0.92)",
                       backdropFilter: "blur(4px)",
-                      borderRadius: 12,
-                      // border: "1px solid #E5E7EB",
-                      // boxShadow: "0 6px 22px rgba(0,0,0,0.12)",
-                      padding: "14px 18px 16px",
-                      width: legendWidth,
-                      color: "#374151",
+                      borderRadius: 10,
+                      border: "1px solid #E5E7EB",
+                      boxShadow: "0 2px 8px rgba(0,0,0,0.10)",
+                      padding: "12px 16px",
+                      maxWidth: 320,
                     }}
                   >
-                    <button
-                      onClick={() => setFigureLegendVisible(false)}
-                      title="Hide legend"
-                      style={{
-                        position: "absolute",
-                        top: 6,
-                        right: 8,
-                        width: 22,
-                        height: 22,
-                        border: "none",
-                        borderRadius: 6,
-                        background: "transparent",
-                        color: "#94A3B8",
-                        fontSize: 16,
-                        lineHeight: 1,
-                        cursor: "pointer",
-                        pointerEvents: "auto",
-                      }}
-                    >
-                      ×
-                    </button>
-                    {sectionHeader("CELL")}
-
-                    {/* Tuner colors */}
+                    {/* — Section 1: Score — */}
                     <div
                       style={{
-                        display: "grid",
-                        gridTemplateColumns: "1fr 1fr 1fr 1fr",
-                        columnGap: 12,
-                        rowGap: 6,
+                        fontSize: 14,
+                        fontWeight: 700,
+                        color: "#374151",
                         marginBottom: 6,
                       }}
                     >
-                      {TUNER_NAMES.filter((t) => selectedTuners.has(t)).map(
-                        (t) => (
+                      Score{" "}
+                      <span style={{ fontWeight: 500, color: "#6B7280" }}>
+                        (+ {metricLabel})
+                      </span>
+                    </div>
+                    <svg width={200} height={30}>
+                      <defs>
+                        <linearGradient
+                          id="comp-legend-grad"
+                          x1="0"
+                          y1="0"
+                          x2="1"
+                          y2="0"
+                        >
+                          <stop offset="0%" stopColor="#F1F5F9" />
+                          <stop offset="100%" stopColor="#10B981" />
+                        </linearGradient>
+                      </defs>
+                      <rect
+                        width={200}
+                        height={12}
+                        fill="url(#comp-legend-grad)"
+                        stroke="#E5E7EB"
+                        strokeWidth={0.5}
+                        rx={2}
+                      />
+                      <text
+                        x={0}
+                        y={26}
+                        fontSize={11}
+                        fill="#6B7280"
+                        textAnchor="start"
+                      >
+                        0
+                      </text>
+                      <text
+                        x={200}
+                        y={26}
+                        fontSize={11}
+                        fill="#6B7280"
+                        fontStyle="italic"
+                        textAnchor="end"
+                      >
+                        +{fmtMetric(t3Scores.maxScore)}
+                      </text>
+                    </svg>
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: "#94A3B8",
+                        marginTop: 4,
+                        fontStyle: "italic",
+                      }}
+                    >
+                      Anchor: {fmtMetric(t3Scores.anchorBranchCount)}{" "}
+                      {metricLabel}
+                    </div>
+
+                    {/* — Section 2: Size — */}
+                    {cellSizeTier.tierMap.size > 0 &&
+                      (() => {
+                        const fmt = (v: number) => v.toLocaleString();
+                        const tiers = [
+                          {
+                            key: "low",
+                            scale: 0.7,
+                            range: `≤ ${fmt(cellSizeTier.lowMax)}`,
+                          },
+                          {
+                            key: "mid",
+                            scale: 1.0,
+                            range: `${fmt(cellSizeTier.lowMax)}–${fmt(cellSizeTier.midMax)}`,
+                          },
+                          {
+                            key: "high",
+                            scale: 1.25,
+                            range: `> ${fmt(cellSizeTier.midMax)}`,
+                          },
+                        ] as const;
+                        const hexBoxPx = 26;
+                        const hexR = 9;
+                        return (
+                          <>
+                            <div
+                              style={{
+                                fontSize: 14,
+                                fontWeight: 700,
+                                color: "#374151",
+                                marginTop: 14,
+                                marginBottom: 6,
+                              }}
+                            >
+                              Size
+                            </div>
+                            <div
+                              style={{
+                                display: "flex",
+                                alignItems: "flex-end",
+                                gap: 14,
+                              }}
+                            >
+                              {tiers.map((t) => (
+                                <div
+                                  key={t.key}
+                                  style={{
+                                    display: "flex",
+                                    flexDirection: "column",
+                                    alignItems: "center",
+                                    gap: 3,
+                                  }}
+                                >
+                                  <svg
+                                    width={hexBoxPx}
+                                    height={hexBoxPx}
+                                    viewBox={`-${hexBoxPx / 2} -${hexBoxPx / 2} ${hexBoxPx} ${hexBoxPx}`}
+                                  >
+                                    <path
+                                      d={getHexPath(hexR * t.scale)}
+                                      fill={MIXED_COLOR}
+                                    />
+                                  </svg>
+                                  <span
+                                    style={{
+                                      fontSize: 11,
+                                      color: "#6B7280",
+                                      fontWeight: 600,
+                                    }}
+                                  >
+                                    {t.range}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </>
+                        );
+                      })()}
+
+                    {/* — Section 3: Markers — example cells matching the on-map
+                    rendering for complementary candidates / working set. */}
+                    <div
+                      style={{
+                        fontSize: 14,
+                        fontWeight: 700,
+                        color: "#374151",
+                        marginTop: 14,
+                        marginBottom: 6,
+                      }}
+                    >
+                      Markers
+                    </div>
+                    {(() => {
+                      const sampleR = 16;
+                      const sampleBoxW = 50;
+                      const sampleBoxH = 40;
+                      const SampleHex = ({
+                        children,
+                        stroke,
+                      }: {
+                        children: React.ReactNode;
+                        stroke?: string;
+                      }) => (
+                        <svg
+                          width={sampleBoxW}
+                          height={sampleBoxH}
+                          viewBox={`-${sampleBoxW / 2} -${sampleBoxH / 2} ${sampleBoxW} ${sampleBoxH}`}
+                        >
+                          <path d={getHexPath(sampleR)} fill={MIXED_COLOR} />
+                          {stroke && (
+                            <path
+                              d={getHexPath(sampleR)}
+                              fill="none"
+                              stroke={stroke}
+                              strokeWidth={2}
+                            />
+                          )}
+                          {children}
+                        </svg>
+                      );
+                      const Row = ({
+                        visual,
+                        label,
+                      }: {
+                        visual: React.ReactNode;
+                        label: string;
+                      }) => (
+                        <div
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 10,
+                            fontSize: 12,
+                            color: "#374151",
+                          }}
+                        >
+                          {visual}
+                          <span>{label}</span>
+                        </div>
+                      );
+                      return (
+                        <div
+                          style={{
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 6,
+                          }}
+                        >
+                          <Row
+                            visual={
+                              <SampleHex stroke="#059669">
+                                <text
+                                  x={0}
+                                  y={-5}
+                                  textAnchor="middle"
+                                  dominantBaseline="central"
+                                  fontSize={13}
+                                  fontWeight={700}
+                                  fill="#0F172A"
+                                  stroke="white"
+                                  strokeWidth={3}
+                                  paintOrder="stroke"
+                                >
+                                  No. 1
+                                </text>
+                                <text
+                                  x={0}
+                                  y={11}
+                                  textAnchor="middle"
+                                  dominantBaseline="central"
+                                  fontSize={11}
+                                  fontWeight={600}
+                                  fontStyle="italic"
+                                  fill="#10B981"
+                                  stroke="white"
+                                  strokeWidth={3}
+                                  paintOrder="stroke"
+                                >
+                                  +X
+                                </text>
+                              </SampleHex>
+                            }
+                            label="Top complement candidates"
+                          />
+                          <Row
+                            visual={
+                              <SampleHex stroke="#1E293B">
+                                <text
+                                  x={0}
+                                  y={0}
+                                  textAnchor="middle"
+                                  dominantBaseline="central"
+                                  fontSize={14}
+                                  fontWeight={700}
+                                  fill="#0F172A"
+                                  stroke="white"
+                                  strokeWidth={3}
+                                  paintOrder="stroke"
+                                >
+                                  #N
+                                </text>
+                              </SampleHex>
+                            }
+                            label={`Working set member`}
+                          />
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+                {/* Coverage legend — shown only while the Coverage checkbox is
+              hovered or pinned. Mirrors the d3.interpolateGreens scale used
+              for the cell fill, with min/max labels from globalCovRange. */}
+                {(coverageHovered || coverageOverlay) &&
+                  (() => {
+                    const fmt = (v: number) => fmtMetric(v);
+                    const stops = [0, 0.25, 0.5, 0.75, 1];
+                    return (
+                      <div
+                        style={{
+                          background: "rgba(255,255,255,0.92)",
+                          backdropFilter: "blur(4px)",
+                          borderRadius: 8,
+                          border: "1px solid #E5E7EB",
+                          boxShadow: "0 2px 8px rgba(0,0,0,0.10)",
+                          padding: "6px 10px",
+                        }}
+                      >
+                        <div
+                          style={{
+                            fontSize: 13,
+                            fontWeight: 700,
+                            color: "#374151",
+                            marginBottom: 6,
+                          }}
+                        >
+                          {isHPO ? "Accuracy" : "Coverage"}{" "}
+                          <span style={{ fontWeight: 500, color: "#6B7280" }}>
+                            ({coverageMetric})
+                          </span>
+                        </div>
+                        <svg width={200} height={30}>
+                          <defs>
+                            <linearGradient
+                              id="cov-legend-grad"
+                              x1="0"
+                              y1="0"
+                              x2="1"
+                              y2="0"
+                            >
+                              {stops.map((t) => (
+                                <stop
+                                  key={t}
+                                  offset={`${t * 100}%`}
+                                  stopColor={d3.interpolateGreens(
+                                    0.1 + t * 0.8,
+                                  )}
+                                />
+                              ))}
+                            </linearGradient>
+                          </defs>
+                          <rect
+                            width={200}
+                            height={12}
+                            fill="url(#cov-legend-grad)"
+                            stroke="#E5E7EB"
+                            strokeWidth={0.5}
+                            rx={2}
+                          />
+                          <text
+                            x={0}
+                            y={26}
+                            fontSize={11}
+                            fill="#6B7280"
+                            fontStyle="italic"
+                            textAnchor="start"
+                          >
+                            {fmt(globalCovRange.min)}
+                          </text>
+                          <text
+                            x={200}
+                            y={26}
+                            fontSize={11}
+                            fill="#6B7280"
+                            fontStyle="italic"
+                            textAnchor="end"
+                          >
+                            {fmt(globalCovRange.max)}
+                          </text>
+                        </svg>
+                      </div>
+                    );
+                  })()}
+                {/* Tuner-mode legend — single consolidated card covering:
+                  1) Trials-per-cell size tiers (shown first)
+                  2) Cell markers — example hex per marker, no descriptive
+                     prefix (the meaning is enough)
+                  3) Coverage zone definitions on two lines (label + desc)
+                Hidden when the big figure-capture legend is active. */}
+                {effectiveColorMode === "tuner-perf" &&
+                  !figureLegendVisible && (
+                    <div
+                      style={{
+                        background: "rgba(255,255,255,0.92)",
+                        backdropFilter: "blur(4px)",
+                        borderRadius: 10,
+                        border: "1px solid #E5E7EB",
+                        boxShadow: "0 2px 8px rgba(0,0,0,0.10)",
+                        padding: "12px 16px",
+                        maxWidth: 300,
+                      }}
+                    >
+                      {/* — Section 1: Trials per cell — */}
+                      {cellSizeTier.tierMap.size > 0 &&
+                        (() => {
+                          const fmt = (v: number) => v.toLocaleString();
+                          const tiers = [
+                            {
+                              key: "low",
+                              scale: 0.7,
+                              range: `≤ ${fmt(cellSizeTier.lowMax)}`,
+                            },
+                            {
+                              key: "mid",
+                              scale: 1.0,
+                              range: `${fmt(cellSizeTier.lowMax)}–${fmt(cellSizeTier.midMax)}`,
+                            },
+                            {
+                              key: "high",
+                              scale: 1.25,
+                              range: `> ${fmt(cellSizeTier.midMax)}`,
+                            },
+                          ] as const;
+                          const hexBoxPx = 26;
+                          const hexR = 9;
+                          return (
+                            <>
+                              <div
+                                style={{
+                                  fontSize: 14,
+                                  fontWeight: 700,
+                                  color: "#374151",
+                                  marginBottom: 6,
+                                }}
+                              >
+                                Size
+                              </div>
+                              <div
+                                style={{
+                                  display: "flex",
+                                  alignItems: "flex-end",
+                                  gap: 14,
+                                }}
+                              >
+                                {tiers.map((t) => (
+                                  <div
+                                    key={t.key}
+                                    style={{
+                                      display: "flex",
+                                      flexDirection: "column",
+                                      alignItems: "center",
+                                      gap: 3,
+                                    }}
+                                  >
+                                    <svg
+                                      width={hexBoxPx}
+                                      height={hexBoxPx}
+                                      viewBox={`-${hexBoxPx / 2} -${hexBoxPx / 2} ${hexBoxPx} ${hexBoxPx}`}
+                                    >
+                                      <path
+                                        d={getHexPath(hexR * t.scale)}
+                                        fill={MIXED_COLOR}
+                                      />
+                                    </svg>
+                                    <span
+                                      style={{
+                                        fontSize: 11,
+                                        color: "#6B7280",
+                                        fontWeight: 600,
+                                      }}
+                                    >
+                                      {t.range}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            </>
+                          );
+                        })()}
+
+                      {/* — Section 2: Cell markers — example cells (mixed-color
+                    background) with the marker rendered in context. */}
+                      <div
+                        style={{
+                          fontSize: 14,
+                          fontWeight: 700,
+                          color: "#374151",
+                          marginTop: 14,
+                          marginBottom: 6,
+                        }}
+                      >
+                        Markers
+                      </div>
+                      {(() => {
+                        const sampleR = 16;
+                        const sampleBoxW = 50;
+                        const sampleBoxH = 40;
+                        const areaClipId = "tp-legend-area-clip";
+                        const areaBlurId = "tp-legend-area-blur";
+                        const areaOutsideMaskId = "tp-legend-area-outside";
+                        const SampleHex = ({
+                          children,
+                        }: {
+                          children: React.ReactNode;
+                        }) => (
+                          <svg
+                            width={sampleBoxW}
+                            height={sampleBoxH}
+                            viewBox={`-${sampleBoxW / 2} -${sampleBoxH / 2} ${sampleBoxW} ${sampleBoxH}`}
+                          >
+                            <path d={getHexPath(sampleR)} fill={MIXED_COLOR} />
+                            {children}
+                          </svg>
+                        );
+                        const Row = ({
+                          visual,
+                          label,
+                        }: {
+                          visual: React.ReactNode;
+                          label: string;
+                        }) => (
                           <div
-                            key={t}
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 10,
+                              fontSize: 12,
+                              color: "#374151",
+                            }}
+                          >
+                            {visual}
+                            <span>{label}</span>
+                          </div>
+                        );
+                        return (
+                          <div
+                            style={{
+                              display: "flex",
+                              flexDirection: "column",
+                              gap: 6,
+                            }}
+                          >
+                            <Row
+                              visual={
+                                <SampleHex>
+                                  <text
+                                    x={0}
+                                    y={0}
+                                    textAnchor="middle"
+                                    dominantBaseline="central"
+                                    fontSize={14}
+                                    fontWeight={700}
+                                    fontStyle="italic"
+                                    fill="#0F172A"
+                                    stroke="white"
+                                    strokeWidth={3}
+                                    paintOrder="stroke"
+                                  >
+                                    82.6
+                                  </text>
+                                </SampleHex>
+                              }
+                              label={`Min / Max ${metricLabel} cell`}
+                            />
+                            <Row
+                              visual={
+                                <SampleHex>
+                                  <text
+                                    x={0}
+                                    y={-5}
+                                    textAnchor="middle"
+                                    dominantBaseline="central"
+                                    fontSize={14}
+                                    fontWeight={700}
+                                    fill="#0F172A"
+                                    stroke="white"
+                                    strokeWidth={3}
+                                    paintOrder="stroke"
+                                  >
+                                    1,500
+                                  </text>
+                                  <text
+                                    x={0}
+                                    y={11}
+                                    textAnchor="middle"
+                                    dominantBaseline="central"
+                                    fontSize={11}
+                                    fontWeight={600}
+                                    fill="#475569"
+                                    stroke="white"
+                                    strokeWidth={3}
+                                    paintOrder="stroke"
+                                  >
+                                    trials
+                                  </text>
+                                </SampleHex>
+                              }
+                              label="Densest / Sparsest cell"
+                            />
+                            <Row
+                              visual={
+                                <SampleHex>
+                                  {/* Mirrors the on-map region rendering: blurred
+                              + clipped inset shadow, white outer underlay,
+                              then the dark border line on top. */}
+                                  <defs>
+                                    <clipPath id={areaClipId}>
+                                      <path d={getHexPath(sampleR)} />
+                                    </clipPath>
+                                    <filter
+                                      id={areaBlurId}
+                                      x="-50%"
+                                      y="-50%"
+                                      width="200%"
+                                      height="200%"
+                                    >
+                                      <feGaussianBlur stdDeviation={2} />
+                                    </filter>
+                                    {/* Mask = everywhere EXCEPT the hex interior,
+                                so the white underlay only shows outside the
+                                cell (matches the on-map rendering). */}
+                                    <mask
+                                      id={areaOutsideMaskId}
+                                      maskUnits="userSpaceOnUse"
+                                      x={-sampleBoxW / 2}
+                                      y={-sampleBoxH / 2}
+                                      width={sampleBoxW}
+                                      height={sampleBoxH}
+                                    >
+                                      <rect
+                                        x={-sampleBoxW / 2}
+                                        y={-sampleBoxH / 2}
+                                        width={sampleBoxW}
+                                        height={sampleBoxH}
+                                        fill="white"
+                                      />
+                                      <path
+                                        d={getHexPath(sampleR)}
+                                        fill="black"
+                                      />
+                                    </mask>
+                                  </defs>
+                                  <path
+                                    d={getHexPath(sampleR)}
+                                    fill="none"
+                                    stroke="#0F172A"
+                                    strokeWidth={sampleR * 0.45}
+                                    strokeOpacity={0.4}
+                                    strokeLinejoin="round"
+                                    filter={`url(#${areaBlurId})`}
+                                    clipPath={`url(#${areaClipId})`}
+                                  />
+                                  <path
+                                    d={getHexPath(sampleR)}
+                                    fill="none"
+                                    stroke="white"
+                                    strokeWidth={3}
+                                    strokeOpacity={0.9}
+                                    strokeLinejoin="round"
+                                    mask={`url(#${areaOutsideMaskId})`}
+                                  />
+                                  <path
+                                    d={getHexPath(sampleR)}
+                                    fill="none"
+                                    stroke="#0F172A"
+                                    strokeWidth={1.5}
+                                    strokeOpacity={0.85}
+                                    strokeLinejoin="round"
+                                  />
+                                </SampleHex>
+                              }
+                              label="Area highlight"
+                            />
+                          </div>
+                        );
+                      })()}
+
+                      {/* — Section 3: Labels — name + meaning on separate lines
+                    so each label reads as a paragraph. */}
+                      <div
+                        style={{
+                          fontSize: 14,
+                          fontWeight: 700,
+                          color: "#374151",
+                          marginTop: 14,
+                          marginBottom: 6,
+                        }}
+                      >
+                        Labels
+                      </div>
+                      <div
+                        style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 10,
+                        }}
+                      >
+                        {[
+                          {
+                            name: "Overexplored but Low",
+                            desc: "cov ≤ p25 ∧ trials ≥ p75",
+                          },
+                          { name: "High-Coverage Zone", desc: "cov ≥ p75" },
+                          { name: "Low-Coverage Zone", desc: "cov ≤ p25" },
+                          {
+                            name: "Coverage Plateau",
+                            desc: "cov ∈ [p33, p67]",
+                          },
+                        ].map((z) => (
+                          <div
+                            key={z.name}
+                            style={{
+                              fontSize: 12,
+                              color: "#374151",
+                              lineHeight: 1.45,
+                            }}
+                          >
+                            <div style={{ fontWeight: 600 }}>{z.name}</div>
+                            <div style={{ color: "#94A3B8" }}>{z.desc}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                {/* Parameter-mode legend — consolidated. Layout:
+                  Bins (single-param only, surfaces first since it's what
+                       the user is actively inspecting) →
+                  Size → Markers → Labels.
+                In "All" view (no specific param), Bins is skipped. */}
+                {effectiveColorMode === "tuner-param" && (
+                  <div
+                    style={{
+                      background: "rgba(255,255,255,0.92)",
+                      backdropFilter: "blur(4px)",
+                      borderRadius: 10,
+                      border: "1px solid #E5E7EB",
+                      boxShadow: "0 2px 8px rgba(0,0,0,0.10)",
+                      padding: "12px 16px",
+                      maxWidth: 320,
+                    }}
+                  >
+                    {/* — Section 1: Bins (only when a specific param is selected) — */}
+                    {selectedParam && paramCellBins && (
+                      <>
+                        <div
+                          style={{
+                            fontSize: 14,
+                            fontWeight: 700,
+                            color: "#374151",
+                            marginBottom: 6,
+                          }}
+                        >
+                          {selectedParam}{" "}
+                          <span style={{ fontWeight: 500, color: "#6B7280" }}>
+                            ({selectedParamType})
+                          </span>
+                        </div>
+                        <div
+                          style={(() => {
+                            // Layout choice:
+                            //  - numeric: vertical column (range strings are wide)
+                            //  - boolean (3 bins): single horizontal row (no wrap)
+                            //  - categorical: 2-col grid if many, else flex row
+                            if (selectedParamType === "numeric") {
+                              return {
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: 2,
+                              } as React.CSSProperties;
+                            }
+                            if (selectedParamType === "boolean") {
+                              return {
+                                display: "flex",
+                                flexWrap: "nowrap",
+                                gap: 12,
+                                alignItems: "center",
+                              } as React.CSSProperties;
+                            }
+                            return {
+                              display: "grid",
+                              gridTemplateColumns:
+                                paramCellBins.binNames.length > 3
+                                  ? "repeat(2, minmax(0, 1fr))"
+                                  : "repeat(auto-fit, minmax(80px, 1fr))",
+                              columnGap: 10,
+                              rowGap: 2,
+                            } as React.CSSProperties;
+                          })()}
+                        >
+                          {paramCellBins.binNames.map((bin) => (
+                            <div
+                              key={bin}
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 5,
+                                minWidth: 0,
+                              }}
+                            >
+                              <div
+                                style={{
+                                  width: 12,
+                                  height: 12,
+                                  borderRadius: 2,
+                                  backgroundColor:
+                                    paramCellBins.binColors[bin] ?? MIXED_COLOR,
+                                  opacity: 0.7,
+                                  flexShrink: 0,
+                                }}
+                              />
+                              <span
+                                style={{
+                                  fontSize: 12,
+                                  fontWeight: 600,
+                                  color:
+                                    paramCellBins.binColors[bin] ?? MIXED_COLOR,
+                                  whiteSpace: "nowrap",
+                                  overflow:
+                                    selectedParamType === "numeric"
+                                      ? "visible"
+                                      : "hidden",
+                                  textOverflow:
+                                    selectedParamType === "numeric"
+                                      ? "clip"
+                                      : "ellipsis",
+                                }}
+                                title={bin}
+                              >
+                                {bin}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    )}
+
+                    {/* — Section 2: Size — */}
+                    {cellSizeTier.tierMap.size > 0 &&
+                      (() => {
+                        const fmt = (v: number) => v.toLocaleString();
+                        const tiers = [
+                          {
+                            key: "low",
+                            scale: 0.7,
+                            range: `≤ ${fmt(cellSizeTier.lowMax)}`,
+                          },
+                          {
+                            key: "mid",
+                            scale: 1.0,
+                            range: `${fmt(cellSizeTier.lowMax)}–${fmt(cellSizeTier.midMax)}`,
+                          },
+                          {
+                            key: "high",
+                            scale: 1.25,
+                            range: `> ${fmt(cellSizeTier.midMax)}`,
+                          },
+                        ] as const;
+                        const hexBoxPx = 26;
+                        const hexR = 9;
+                        return (
+                          <>
+                            <div
+                              style={{
+                                fontSize: 14,
+                                fontWeight: 700,
+                                color: "#374151",
+                                marginTop: selectedParam ? 14 : 0,
+                                marginBottom: 6,
+                              }}
+                            >
+                              Size
+                            </div>
+                            <div
+                              style={{
+                                display: "flex",
+                                alignItems: "flex-end",
+                                gap: 14,
+                              }}
+                            >
+                              {tiers.map((t) => (
+                                <div
+                                  key={t.key}
+                                  style={{
+                                    display: "flex",
+                                    flexDirection: "column",
+                                    alignItems: "center",
+                                    gap: 3,
+                                  }}
+                                >
+                                  <svg
+                                    width={hexBoxPx}
+                                    height={hexBoxPx}
+                                    viewBox={`-${hexBoxPx / 2} -${hexBoxPx / 2} ${hexBoxPx} ${hexBoxPx}`}
+                                  >
+                                    <path
+                                      d={getHexPath(hexR * t.scale)}
+                                      fill={MIXED_COLOR}
+                                    />
+                                  </svg>
+                                  <span
+                                    style={{
+                                      fontSize: 11,
+                                      color: "#6B7280",
+                                      fontWeight: 600,
+                                    }}
+                                  >
+                                    {t.range}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </>
+                        );
+                      })()}
+
+                    {/* — Section 3: Markers — */}
+                    <div
+                      style={{
+                        fontSize: 14,
+                        fontWeight: 700,
+                        color: "#374151",
+                        marginTop: 14,
+                        marginBottom: 6,
+                      }}
+                    >
+                      Markers
+                    </div>
+                    {(() => {
+                      const sampleR = 16;
+                      const sampleBoxW = 50;
+                      const sampleBoxH = 40;
+                      const areaClipId = "pp-legend-area-clip";
+                      const areaBlurId = "pp-legend-area-blur";
+                      const areaOutsideMaskId = "pp-legend-area-outside";
+                      const SampleHex = ({
+                        children,
+                      }: {
+                        children: React.ReactNode;
+                      }) => (
+                        <svg
+                          width={sampleBoxW}
+                          height={sampleBoxH}
+                          viewBox={`-${sampleBoxW / 2} -${sampleBoxH / 2} ${sampleBoxW} ${sampleBoxH}`}
+                        >
+                          <path d={getHexPath(sampleR)} fill={MIXED_COLOR} />
+                          {children}
+                        </svg>
+                      );
+                      const Row = ({
+                        visual,
+                        label,
+                      }: {
+                        visual: React.ReactNode;
+                        label: string;
+                      }) => (
+                        <div
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 10,
+                            fontSize: 12,
+                            color: "#374151",
+                          }}
+                        >
+                          {visual}
+                          <span>{label}</span>
+                        </div>
+                      );
+                      return (
+                        <div
+                          style={{
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 6,
+                          }}
+                        >
+                          <Row
+                            visual={
+                              <SampleHex>
+                                <text
+                                  x={0}
+                                  y={0}
+                                  textAnchor="middle"
+                                  dominantBaseline="central"
+                                  fontSize={14}
+                                  fontWeight={700}
+                                  fontStyle="italic"
+                                  fill="#0F172A"
+                                  stroke="white"
+                                  strokeWidth={3}
+                                  paintOrder="stroke"
+                                >
+                                  82.6
+                                </text>
+                              </SampleHex>
+                            }
+                            label={`Min / Max ${metricLabel} cell`}
+                          />
+                          <Row
+                            visual={
+                              <SampleHex>
+                                <text
+                                  x={0}
+                                  y={-5}
+                                  textAnchor="middle"
+                                  dominantBaseline="central"
+                                  fontSize={14}
+                                  fontWeight={700}
+                                  fill="#0F172A"
+                                  stroke="white"
+                                  strokeWidth={3}
+                                  paintOrder="stroke"
+                                >
+                                  1,500
+                                </text>
+                                <text
+                                  x={0}
+                                  y={11}
+                                  textAnchor="middle"
+                                  dominantBaseline="central"
+                                  fontSize={11}
+                                  fontWeight={600}
+                                  fill="#475569"
+                                  stroke="white"
+                                  strokeWidth={3}
+                                  paintOrder="stroke"
+                                >
+                                  trials
+                                </text>
+                              </SampleHex>
+                            }
+                            label="Densest / Sparsest cell"
+                          />
+                          <Row
+                            visual={
+                              <SampleHex>
+                                {/* Mirrors the on-map region rendering: blurred
+                              + clipped inset shadow, white outer underlay,
+                              then the dark border line on top. */}
+                                <defs>
+                                  <clipPath id={areaClipId}>
+                                    <path d={getHexPath(sampleR)} />
+                                  </clipPath>
+                                  <filter
+                                    id={areaBlurId}
+                                    x="-50%"
+                                    y="-50%"
+                                    width="200%"
+                                    height="200%"
+                                  >
+                                    <feGaussianBlur stdDeviation={2} />
+                                  </filter>
+                                  {/* Mask = everywhere EXCEPT the hex interior,
+                                so the white underlay only shows outside the
+                                cell (matches the on-map rendering). */}
+                                  <mask
+                                    id={areaOutsideMaskId}
+                                    maskUnits="userSpaceOnUse"
+                                    x={-sampleBoxW / 2}
+                                    y={-sampleBoxH / 2}
+                                    width={sampleBoxW}
+                                    height={sampleBoxH}
+                                  >
+                                    <rect
+                                      x={-sampleBoxW / 2}
+                                      y={-sampleBoxH / 2}
+                                      width={sampleBoxW}
+                                      height={sampleBoxH}
+                                      fill="white"
+                                    />
+                                    <path
+                                      d={getHexPath(sampleR)}
+                                      fill="black"
+                                    />
+                                  </mask>
+                                </defs>
+                                <path
+                                  d={getHexPath(sampleR)}
+                                  fill="none"
+                                  stroke="#0F172A"
+                                  strokeWidth={sampleR * 0.45}
+                                  strokeOpacity={0.4}
+                                  strokeLinejoin="round"
+                                  filter={`url(#${areaBlurId})`}
+                                  clipPath={`url(#${areaClipId})`}
+                                />
+                                <path
+                                  d={getHexPath(sampleR)}
+                                  fill="none"
+                                  stroke="white"
+                                  strokeWidth={3}
+                                  strokeOpacity={0.9}
+                                  strokeLinejoin="round"
+                                  mask={`url(#${areaOutsideMaskId})`}
+                                />
+                                <path
+                                  d={getHexPath(sampleR)}
+                                  fill="none"
+                                  stroke="#0F172A"
+                                  strokeWidth={1.5}
+                                  strokeOpacity={0.85}
+                                  strokeLinejoin="round"
+                                />
+                              </SampleHex>
+                            }
+                            label="Area highlight"
+                          />
+                        </div>
+                      );
+                    })()}
+
+                    {/* — Section 4: Labels — content depends on All vs single-param. */}
+                    <div
+                      style={{
+                        fontSize: 14,
+                        fontWeight: 700,
+                        color: "#374151",
+                        marginTop: 14,
+                        marginBottom: 6,
+                      }}
+                    >
+                      Labels
+                    </div>
+                    {selectedParam ? (
+                      // Single-param view → coverage qualitative regions (same
+                      // five as tuner mode).
+                      <div
+                        style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 10,
+                        }}
+                      >
+                        {[
+                          {
+                            name: "Underexplored Promising",
+                            desc: "cov ≥ p75 ∧ trials ≤ p25",
+                          },
+                          {
+                            name: "Overexplored but Low",
+                            desc: "cov ≤ p25 ∧ trials ≥ p75",
+                          },
+                          { name: "High-Coverage Zone", desc: "cov ≥ p75" },
+                          { name: "Low-Coverage Zone", desc: "cov ≤ p25" },
+                          {
+                            name: "Coverage Plateau",
+                            desc: "cov ∈ [p33, p67]",
+                          },
+                        ].map((z) => (
+                          <div
+                            key={z.name}
+                            style={{
+                              fontSize: 12,
+                              color: "#374151",
+                              lineHeight: 1.45,
+                            }}
+                          >
+                            <div style={{ fontWeight: 600 }}>{z.name}</div>
+                            <div style={{ color: "#94A3B8" }}>{z.desc}</div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      // All view → top-5 contrastive parameters with format hint.
+                      <div
+                        style={{
+                          fontSize: 12,
+                          color: "#374151",
+                          lineHeight: 1.45,
+                        }}
+                      >
+                        <div style={{ fontWeight: 600 }}>
+                          <span style={{ fontStyle: "italic" }}>parameter</span>
+                          : <span style={{ fontStyle: "italic" }}>bin</span>
+                        </div>
+                        <div style={{ color: "#94A3B8", marginTop: 3 }}>
+                          Top 5 most-important parameters and their dominant bin
+                          in the largest contrastive region.
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Tuner-mode big legend — figure-style consolidated CELL + REGION
+                key. Replaces all other legend cards while in this mode. */}
+                {effectiveColorMode === "tuner-perf" &&
+                  figureLegendVisible &&
+                  (() => {
+                    const fmt = (v: number) => v.toLocaleString();
+                    const subHeader = (title: string) => (
+                      <div
+                        style={{
+                          fontSize: 16,
+                          fontWeight: 700,
+                          color: "#374151",
+                          marginBottom: 4,
+                        }}
+                      >
+                        {title}
+                      </div>
+                    );
+                    const tiers = [
+                      { scale: 0.7, range: `≤ ${fmt(cellSizeTier.lowMax)}` },
+                      {
+                        scale: 1.0,
+                        range: `${fmt(cellSizeTier.lowMax)}–${fmt(cellSizeTier.midMax)}`,
+                      },
+                      { scale: 1.25, range: `> ${fmt(cellSizeTier.midMax)}` },
+                    ];
+                    // Match the apparent hex radius on the map: HEX_SIZE × scale
+                    // (the same product that produces an on-map cell's visible
+                    // size). Multiplied by per-tier cellScale (0.7 / 1.0 / 1.25).
+                    const baseHexR = HEX_SIZE * scale;
+                    const maxTierR = baseHexR * 1.25;
+                    const sampleBox = Math.max(
+                      Math.ceil(maxTierR * 2 + 10),
+                      36,
+                    );
+                    // Default-tier hex used in annotation rows.
+                    const sampleHexR = baseHexR;
+                    // Same font sizes the on-map highlight labels use (12px value,
+                    // 10px unit) so the legend's sample hexes match what the user
+                    // sees in the data view.
+                    const VALUE_SIZE = 12;
+                    const UNIT_SIZE = 10;
+                    const LINE_GAP = 4;
+                    // Match map's halo (white stroke + paintOrder=stroke) so the
+                    // sample text reads exactly the same as on-map highlight text.
+                    const HALO_W = 3;
+                    const sampleHex = (
+                      opts: {
+                        text?: string;
+                        sub?: string;
+                        dot?: boolean;
+                        italic?: boolean;
+                      } = {},
+                    ) => {
+                      const totalH = opts.text
+                        ? opts.sub
+                          ? VALUE_SIZE + LINE_GAP + UNIT_SIZE
+                          : VALUE_SIZE
+                        : 0;
+                      const topY = -totalH / 2;
+                      const valueY = opts.sub ? topY + VALUE_SIZE / 2 : 0;
+                      const unitY =
+                        topY + VALUE_SIZE + LINE_GAP + UNIT_SIZE / 2;
+                      return (
+                        <svg
+                          width={sampleBox}
+                          height={sampleBox}
+                          viewBox={`-${sampleBox / 2} -${sampleBox / 2} ${sampleBox} ${sampleBox}`}
+                        >
+                          {/* Cell hex — no visible border, matching the map where
+                        the default cell stroke is barely-perceptible (0.5px
+                        SVG × scale ≈ sub-pixel). */}
+                          <path
+                            d={getHexPath(sampleHexR)}
+                            fill={MIXED_COLOR}
+                            stroke="none"
+                          />
+                          {opts.text && (
+                            <text
+                              x={0}
+                              y={valueY}
+                              textAnchor="middle"
+                              dominantBaseline="central"
+                              fontSize={VALUE_SIZE}
+                              fontWeight={700}
+                              fontStyle={opts.italic ? "italic" : undefined}
+                              fill="#0F172A"
+                              stroke="white"
+                              strokeWidth={HALO_W}
+                              paintOrder="stroke"
+                            >
+                              {opts.text}
+                            </text>
+                          )}
+                          {opts.sub && (
+                            <text
+                              x={0}
+                              y={unitY}
+                              textAnchor="middle"
+                              dominantBaseline="central"
+                              fontSize={UNIT_SIZE}
+                              fontWeight={600}
+                              fill="#475569"
+                              stroke="white"
+                              strokeWidth={HALO_W}
+                              paintOrder="stroke"
+                            >
+                              {opts.sub}
+                            </text>
+                          )}
+                          {/* Amber dot — proportions match the on-map cart marker
+                        (r = HEX × 0.14, offset = HEX × 0.55) so the legend
+                        glyph and the actual map glyph are pixel-equivalent. */}
+                          {opts.dot && (
+                            <circle
+                              cx={sampleHexR * 0.55}
+                              cy={-sampleHexR * 0.55}
+                              r={sampleHexR * 0.14}
+                              fill="#F59E0B"
+                              stroke="white"
+                              strokeWidth={1.2 * scale}
+                            />
+                          )}
+                        </svg>
+                      );
+                    };
+                    // Annotation row template
+                    const annoRow = (
+                      visual: React.ReactNode,
+                      label: string,
+                      key: string,
+                    ) => (
+                      <div
+                        key={key}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 12,
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: sampleBox,
+                            flexShrink: 0,
+                            display: "flex",
+                            justifyContent: "center",
+                          }}
+                        >
+                          {visual}
+                        </div>
+                        <span style={{ fontSize: 16, color: "#475569" }}>
+                          {label}
+                        </span>
+                      </div>
+                    );
+                    // Width scales loosely with hex size so larger viewports get
+                    // a roomier legend (still capped to keep portrait layouts sane).
+                    const legendWidth = Math.min(
+                      Math.max(340, sampleBox * 6 + 40),
+                      420,
+                    );
+                    return (
+                      <div
+                        style={{
+                          pointerEvents: "auto",
+                          position: "relative",
+                          background: "rgba(255,255,255)",
+                          backdropFilter: "blur(4px)",
+                          borderRadius: 12,
+                          // border: "1px solid #E5E7EB",
+                          // boxShadow: "0 6px 22px rgba(0,0,0,0.12)",
+                          padding: "14px 18px 16px",
+                          width: legendWidth,
+                          color: "#374151",
+                        }}
+                      >
+                        <button
+                          onClick={() => setFigureLegendVisible(false)}
+                          title="Hide legend"
+                          style={{
+                            position: "absolute",
+                            top: 6,
+                            right: 8,
+                            width: 22,
+                            height: 22,
+                            border: "none",
+                            borderRadius: 6,
+                            background: "transparent",
+                            color: "#94A3B8",
+                            fontSize: 16,
+                            lineHeight: 1,
+                            cursor: "pointer",
+                            pointerEvents: "auto",
+                          }}
+                        >
+                          ×
+                        </button>
+                        {/* Mirrors the on-map standard legend layout:
+                            Colors → Size → Markers. Bigger fonts since
+                            this view is meant for screenshots / figures. */}
+                        {/* — Colors — */}
+                        {subHeader("Colors")}
+                        <div
+                          style={{
+                            display: "grid",
+                            gridTemplateColumns: "repeat(3, 1fr)",
+                            columnGap: 12,
+                            rowGap: 6,
+                            marginBottom: 16,
+                          }}
+                        >
+                          {TUNER_NAMES.filter((t) => selectedTuners.has(t)).map(
+                            (t) => (
+                              <div
+                                key={t}
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: 8,
+                                  fontSize: 14,
+                                }}
+                              >
+                                <span
+                                  style={{
+                                    width: 14,
+                                    height: 14,
+                                    borderRadius: 3,
+                                    background: TUNER_COLORS[t],
+                                    flexShrink: 0,
+                                  }}
+                                />
+                                <span style={{ fontWeight: 600 }}>
+                                  {TUNER_DISPLAY_NAMES[t]}
+                                </span>
+                              </div>
+                            ),
+                          )}
+                          <div
                             style={{
                               display: "flex",
                               alignItems: "center",
@@ -3600,663 +4841,357 @@ export function HexMap({
                           >
                             <span
                               style={{
-                                width: 12,
-                                height: 12,
-                                borderRadius: "50%",
-                                background: TUNER_COLORS[t],
+                                width: 14,
+                                height: 14,
+                                borderRadius: 3,
+                                background: MIXED_COLOR,
                                 flexShrink: 0,
                               }}
                             />
-                            <span style={{ fontWeight: 600 }}>
-                              {TUNER_DISPLAY_NAMES[t]}
-                            </span>
+                            <span style={{ fontWeight: 600 }}>Mixed</span>
                           </div>
-                        ),
-                      )}
-                      <div
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 8,
-                          fontSize: 14,
-                        }}
-                      >
-                        <span
-                          style={{
-                            width: 12,
-                            height: 12,
-                            borderRadius: "50%",
-                            background: MIXED_COLOR,
-                            flexShrink: 0,
-                          }}
-                        />
-                        <span style={{ fontWeight: 600 }}>Mixed</span>
-                      </div>
-                    </div>
-                    <div
-                      style={{
-                        fontSize: 11,
-                        color: "#94A3B8",
-                        fontStyle: "italic",
-                        marginBottom: 14,
-                      }}
-                    >
-                      {/* ≥ 50% of trials → tuner color */}
-                    </div>
+                        </div>
 
-                    {/* Trials-per-cell hex sizes */}
-                    {subHeader("Trials per cell")}
-                    <div
-                      style={{
-                        display: "flex",
-                        alignItems: "flex-end",
-                        gap: 18,
-                        marginBottom: 14,
-                      }}
-                    >
-                      {tiers.map((t) => (
+                        {/* — Size — */}
+                        {subHeader("Size")}
                         <div
-                          key={t.range}
+                          style={{
+                            display: "flex",
+                            alignItems: "flex-end",
+                            gap: 18,
+                            marginBottom: 16,
+                          }}
+                        >
+                          {tiers.map((t) => (
+                            <div
+                              key={t.range}
+                              style={{
+                                display: "flex",
+                                flexDirection: "column",
+                                alignItems: "center",
+                                gap: 4,
+                              }}
+                            >
+                              <svg
+                                width={sampleBox}
+                                height={sampleBox}
+                                viewBox={`-${sampleBox / 2} -${sampleBox / 2} ${sampleBox} ${sampleBox}`}
+                              >
+                                <path
+                                  d={getHexPath(sampleHexR * t.scale)}
+                                  fill={MIXED_COLOR}
+                                  stroke="none"
+                                />
+                              </svg>
+                              <span
+                                style={{
+                                  fontSize: 13,
+                                  color: "#6B7280",
+                                  fontWeight: 600,
+                                }}
+                              >
+                                {t.range}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* — Markers — */}
+                        {subHeader("Markers")}
+                        <div
                           style={{
                             display: "flex",
                             flexDirection: "column",
-                            alignItems: "center",
-                            gap: 4,
+                            gap: 6,
+                            marginBottom: 16,
                           }}
                         >
-                          <svg
-                            width={sampleBox}
-                            height={sampleBox}
-                            viewBox={`-${sampleBox / 2} -${sampleBox / 2} ${sampleBox} ${sampleBox}`}
-                          >
-                            <path
-                              d={getHexPath(sampleHexR * t.scale)}
-                              fill={MIXED_COLOR}
-                              stroke="none"
-                            />
-                          </svg>
-                          <span
-                            style={{
-                              fontSize: 13,
-                              color: "#6B7280",
-                              fontWeight: 600,
-                            }}
-                          >
-                            {t.range}
-                          </span>
-                        </div>
-                      ))}
-                      <div
-                        style={{
-                          flex: 1,
-                          fontSize: 11,
-                          color: "#94A3B8",
-                          fontStyle: "italic",
-                          alignSelf: "flex-end",
-                          paddingBottom: 18,
-                        }}
-                      >
-                        {/* trials */}
-                      </div>
-                    </div>
-
-                    {/* Annotations */}
-                    {subHeader("Annotations")}
-                    <div
-                      style={{
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: 1,
-                        marginBottom: 4,
-                      }}
-                    >
-                      {annoRow(
-                        sampleHex({ text: "82.6", sub: "branches" }),
-                        "Min / Max coverage",
-                        "anno-cov",
-                      )}
-                      {annoRow(
-                        sampleHex({ text: "16", sub: "trials" }),
-                        "Density extremes",
-                        "anno-dens",
-                      )}
-                      {annoRow(
-                        sampleHex({ dot: true }),
-                        "Working set member",
-                        "anno-cart",
-                      )}
-                    </div>
-
-                    {sectionHeader("REGION")}
-
-                    <div
-                      style={{
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: 2,
-                      }}
-                    >
-                      {/* Coverage region — slate inset shadow band (clipped to
-                        the hex interior) plus the unified dark border. Mirrors
-                        the on-map "tuner-perf" region rendering. */}
-                      {annoRow(
-                        <svg
-                          width={sampleBox}
-                          height={sampleBox}
-                          viewBox={`-${sampleBox / 2} -${sampleBox / 2} ${sampleBox} ${sampleBox}`}
-                        >
-                          <defs>
-                            <clipPath id="legend-cov-region-clip">
-                              <path d={getHexPath(sampleHexR)} />
-                            </clipPath>
-                          </defs>
-                          <path
-                            d={getHexPath(sampleHexR)}
-                            fill="none"
-                            stroke="#475569"
-                            strokeWidth={sampleHexR * 0.7}
-                            strokeOpacity={0.4}
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            clipPath="url(#legend-cov-region-clip)"
-                          />
-                          <path
-                            d={getHexPath(sampleHexR)}
-                            fill="none"
-                            stroke="white"
-                            strokeWidth={5.5}
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            opacity={0.9}
-                          />
-                          <path
-                            d={getHexPath(sampleHexR)}
-                            fill="none"
-                            stroke="#0F172A"
-                            strokeWidth={3}
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                          />
-                        </svg>,
-                        "Coverage region",
-                        "reg-cov",
-                      )}
-                      {/* Contrastive parameter region — same border + inset
-                        shadow recipe but in a category color, plus the 0.28
-                        cell wash that param mode adds inside region cells. */}
-                      {annoRow(
-                        <svg
-                          width={sampleBox}
-                          height={sampleBox}
-                          viewBox={`-${sampleBox / 2} -${sampleBox / 2} ${sampleBox} ${sampleBox}`}
-                        >
-                          <defs>
-                            <clipPath id="legend-cp-region-clip">
-                              <path d={getHexPath(sampleHexR)} />
-                            </clipPath>
-                          </defs>
-                          <path
-                            d={getHexPath(sampleHexR)}
-                            fill="#F28E2B"
-                            fillOpacity={0.28}
-                          />
-                          <path
-                            d={getHexPath(sampleHexR)}
-                            fill="none"
-                            stroke="#F28E2B"
-                            strokeWidth={sampleHexR * 0.7}
-                            strokeOpacity={0.4}
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            clipPath="url(#legend-cp-region-clip)"
-                          />
-                          <path
-                            d={getHexPath(sampleHexR)}
-                            fill="none"
-                            stroke="white"
-                            strokeWidth={5.5}
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            opacity={0.9}
-                          />
-                          <path
-                            d={getHexPath(sampleHexR)}
-                            fill="none"
-                            stroke="#0F172A"
-                            strokeWidth={3}
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                          />
-                        </svg>,
-                        "Contrastive parameter region",
-                        "reg-contra",
-                      )}
-                      {/* Region annotation — bordered "Annotation" label + the
-                        cubic Bezier leader curve + a circular handle at the
-                        anchor end. No sample cell shown (per request). */}
-                      {(() => {
-                        const annoSvgW = 152;
-                        const annoSvgH = 44;
-                        const cy = annoSvgH / 2;
-                        const labelW = 92;
-                        const labelH = 24;
-                        const labelX1 = 4;
-                        const labelX2 = labelX1 + labelW;
-                        const handleX = annoSvgW - 8;
-                        // Cubic curve from label right edge → handle. Control
-                        // offsets are roughly ⅓ of the gap so the curve still
-                        // bends visibly even at the shortened length.
-                        const curveD = `M ${labelX2},${cy} C ${labelX2 + 15},${cy - 8} ${handleX - 15},${cy + 8} ${handleX},${cy}`;
-                        return (
-                          <div
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: 12,
-                            }}
-                          >
-                            <svg width={annoSvgW} height={annoSvgH}>
-                              {/* Label box — pill-shape (rx = h/2) to match the
-                                on-map region label box; stroke width 1.8 px
-                                matches the map's apparent border (1.8 SVG ÷
-                                renderScale, then × outer scale). */}
+                          {annoRow(
+                            sampleHex({
+                              text: isHPO ? "0.876" : "82.6",
+                              italic: true,
+                            }),
+                            `Min / Max ${metricLabel} cell`,
+                            "fmark-cov",
+                          )}
+                          {annoRow(
+                            sampleHex({ text: "1,500", sub: "trials" }),
+                            "Number of trials",
+                            "fmark-dens",
+                          )}
+                          {annoRow(
+                            <svg
+                              width={sampleBox}
+                              height={sampleBox}
+                              viewBox={`-${sampleBox / 2} -${sampleBox / 2} ${sampleBox} ${sampleBox}`}
+                            >
+                              <defs>
+                                <clipPath id="legend-fig-area-clip">
+                                  <path d={getHexPath(sampleHexR)} />
+                                </clipPath>
+                                <filter
+                                  id="legend-fig-area-blur"
+                                  x="-50%"
+                                  y="-50%"
+                                  width="200%"
+                                  height="200%"
+                                >
+                                  <feGaussianBlur stdDeviation={2.5} />
+                                </filter>
+                                <mask
+                                  id="legend-fig-area-outside"
+                                  maskUnits="userSpaceOnUse"
+                                  x={-sampleBox / 2}
+                                  y={-sampleBox / 2}
+                                  width={sampleBox}
+                                  height={sampleBox}
+                                >
+                                  <rect
+                                    x={-sampleBox / 2}
+                                    y={-sampleBox / 2}
+                                    width={sampleBox}
+                                    height={sampleBox}
+                                    fill="white"
+                                  />
+                                  <path
+                                    d={getHexPath(sampleHexR)}
+                                    fill="black"
+                                  />
+                                </mask>
+                              </defs>
                               <path
-                                d={curveD}
-                                fill="none"
-                                stroke="white"
-                                strokeWidth={2.7}
-                                strokeLinecap="round"
-                                opacity={0.85}
+                                d={getHexPath(sampleHexR)}
+                                fill={MIXED_COLOR}
                               />
                               <path
-                                d={curveD}
+                                d={getHexPath(sampleHexR)}
                                 fill="none"
                                 stroke="#0F172A"
-                                strokeWidth={1.2}
-                                strokeLinecap="round"
+                                strokeWidth={sampleHexR * 0.45}
+                                strokeOpacity={0.4}
+                                strokeLinejoin="round"
+                                filter="url(#legend-fig-area-blur)"
+                                clipPath="url(#legend-fig-area-clip)"
                               />
-                              <rect
-                                x={labelX1}
-                                y={cy - labelH / 2}
-                                width={labelW}
-                                height={labelH}
-                                rx={labelH / 2}
-                                ry={labelH / 2}
-                                fill="white"
+                              <path
+                                d={getHexPath(sampleHexR)}
+                                fill="none"
+                                stroke="white"
+                                strokeWidth={4}
+                                strokeOpacity={0.9}
+                                strokeLinejoin="round"
+                                mask="url(#legend-fig-area-outside)"
+                              />
+                              <path
+                                d={getHexPath(sampleHexR)}
+                                fill="none"
                                 stroke="#0F172A"
                                 strokeWidth={1.8}
+                                strokeOpacity={0.85}
+                                strokeLinejoin="round"
                               />
-                              <text
-                                x={labelX1 + labelW / 2}
-                                y={cy + 0.5}
-                                textAnchor="middle"
-                                dominantBaseline="central"
-                                fontSize={12}
-                                fontWeight={700}
-                                fill="#0F172A"
+                            </svg>,
+                            "Area highlight",
+                            "fmark-area",
+                          )}
+                          {/* Region annotation — bordered "Annotation" pill +
+                              cubic Bezier leader curve + circular handle. */}
+                          {(() => {
+                            const annoSvgW = 152;
+                            const annoSvgH = 44;
+                            const cy = annoSvgH / 2;
+                            const labelW = 92;
+                            const labelH = 24;
+                            const labelX1 = 4;
+                            const labelX2 = labelX1 + labelW;
+                            const handleX = annoSvgW - 8;
+                            const curveD = `M ${labelX2},${cy} C ${labelX2 + 15},${cy - 8} ${handleX - 15},${cy + 8} ${handleX},${cy}`;
+                            return (
+                              <div
+                                key="fmark-region-anno"
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: 12,
+                                  marginTop: 4,
+                                }}
                               >
-                                Annotation
-                              </text>
-                              {/* Bezier leader — apparent widths matching the
-                                map: white underlay 2.7 px, dark stroke 1.2
-                                px (default, non-hover values). */}
+                                <div
+                                  style={{
+                                    width: annoSvgW,
+                                    flexShrink: 0,
+                                    display: "flex",
+                                    justifyContent: "center",
+                                    overflow: "visible",
+                                  }}
+                                >
+                                  <svg
+                                    width={annoSvgW}
+                                    height={annoSvgH}
+                                    style={{ overflow: "visible" }}
+                                  >
+                                    <path
+                                      d={curveD}
+                                      fill="none"
+                                      stroke="white"
+                                      strokeWidth={2.7}
+                                      strokeLinecap="round"
+                                      opacity={0.85}
+                                    />
+                                    <path
+                                      d={curveD}
+                                      fill="none"
+                                      stroke="#0F172A"
+                                      strokeWidth={1.2}
+                                      strokeLinecap="round"
+                                    />
+                                    <rect
+                                      x={labelX1}
+                                      y={cy - labelH / 2}
+                                      width={labelW}
+                                      height={labelH}
+                                      rx={labelH / 2}
+                                      ry={labelH / 2}
+                                      fill="white"
+                                      stroke="#0F172A"
+                                      strokeWidth={1.8}
+                                    />
+                                    <text
+                                      x={labelX1 + labelW / 2}
+                                      y={cy + 0.5}
+                                      textAnchor="middle"
+                                      dominantBaseline="central"
+                                      fontSize={12}
+                                      fontWeight={700}
+                                      fill="#0F172A"
+                                    >
+                                      Annotation
+                                    </text>
+                                    <circle
+                                      cx={handleX}
+                                      cy={cy}
+                                      r={3.5}
+                                      fill="#475569"
+                                      stroke="white"
+                                      strokeWidth={1.4}
+                                    />
+                                  </svg>
+                                </div>
+                                <span
+                                  style={{ fontSize: 16, color: "#475569" }}
+                                >
+                                  Region annotation
+                                </span>
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      </div>
+                    );
+                  })()}
 
-                              {/* Circle handle at the anchor end */}
-                              <circle
-                                cx={handleX}
-                                cy={cy}
-                                r={3.5}
-                                fill="#475569"
-                                stroke="white"
-                                strokeWidth={1.4}
-                              />
-                            </svg>
-                            <span style={{ fontSize: 16, color: "#475569" }}>
-                              Region annotation
-                            </span>
-                          </div>
-                        );
-                      })()}
-                    </div>
-                  </div>
-                );
-              })()}
-
-            {/* Cell-size legend — fixed trial-count buckets drive the hex scale.
-                Hidden in figure-capture mode (covered by the big legend). */}
-            {!(effectiveColorMode === "tuner-perf" && figureLegendVisible) &&
-              cellSizeTier.tierMap.size > 0 &&
-              (() => {
-                const fmt = (v: number) => v.toLocaleString();
-                const tiers = [
-                  {
-                    key: "low",
-                    scale: 0.7,
-                    range: `≤ ${fmt(cellSizeTier.lowMax)}`,
-                  },
-                  {
-                    key: "mid",
-                    scale: 1.0,
-                    range: `${fmt(cellSizeTier.lowMax)}–${fmt(cellSizeTier.midMax)}`,
-                  },
-                  {
-                    key: "high",
-                    scale: 1.25,
-                    range: `> ${fmt(cellSizeTier.midMax)}`,
-                  },
-                ] as const;
-                const hexBoxPx = 26;
-                const hexR = 9; // legend hex base radius
-                return (
-                  <div
-                    style={{
-                      background: "rgba(255,255,255,0.92)",
-                      backdropFilter: "blur(4px)",
-                      borderRadius: 8,
-                      border: "1px solid #E5E7EB",
-                      boxShadow: "0 2px 8px rgba(0,0,0,0.10)",
-                      padding: "6px 10px",
-                    }}
-                  >
-                    <div
-                      style={{
-                        fontSize: 13,
-                        fontWeight: 700,
-                        color: "#374151",
-                        marginBottom: 6,
-                      }}
-                    >
-                      Trials per cell
-                    </div>
-                    <div
-                      style={{
-                        display: "flex",
-                        alignItems: "flex-end",
-                        gap: 12,
-                      }}
-                    >
-                      {tiers.map((t) => (
+                {/* Cell-size legend — fixed trial-count buckets drive the hex scale.
+                Hidden in figure-capture mode (covered by the big legend) and
+                in all consolidated-legend modes (tuner-perf / tuner-param /
+                complementary fold this into their card). */}
+                {effectiveColorMode !== "tuner-perf" &&
+                  effectiveColorMode !== "tuner-param" &&
+                  effectiveColorMode !== "complementary" &&
+                  cellSizeTier.tierMap.size > 0 &&
+                  (() => {
+                    const fmt = (v: number) => v.toLocaleString();
+                    const tiers = [
+                      {
+                        key: "low",
+                        scale: 0.7,
+                        range: `≤ ${fmt(cellSizeTier.lowMax)}`,
+                      },
+                      {
+                        key: "mid",
+                        scale: 1.0,
+                        range: `${fmt(cellSizeTier.lowMax)}–${fmt(cellSizeTier.midMax)}`,
+                      },
+                      {
+                        key: "high",
+                        scale: 1.25,
+                        range: `> ${fmt(cellSizeTier.midMax)}`,
+                      },
+                    ] as const;
+                    const hexBoxPx = 26;
+                    const hexR = 9; // legend hex base radius
+                    return (
+                      <div
+                        style={{
+                          background: "rgba(255,255,255,0.92)",
+                          backdropFilter: "blur(4px)",
+                          borderRadius: 8,
+                          border: "1px solid #E5E7EB",
+                          boxShadow: "0 2px 8px rgba(0,0,0,0.10)",
+                          padding: "6px 10px",
+                        }}
+                      >
                         <div
-                          key={t.key}
                           style={{
-                            display: "flex",
-                            flexDirection: "column",
-                            alignItems: "center",
-                            gap: 2,
+                            fontSize: 13,
+                            fontWeight: 700,
+                            color: "#374151",
+                            marginBottom: 6,
                           }}
                         >
-                          <svg
-                            width={hexBoxPx}
-                            height={hexBoxPx}
-                            viewBox={`-${hexBoxPx / 2} -${hexBoxPx / 2} ${hexBoxPx} ${hexBoxPx}`}
-                          >
-                            <path
-                              d={getHexPath(hexR * t.scale)}
-                              fill="#94A3B8"
-                              stroke="#475569"
-                              strokeWidth={0.8}
-                            />
-                          </svg>
-                          <span
-                            style={{
-                              fontSize: 11,
-                              color: "#6B7280",
-                              fontWeight: 600,
-                            }}
-                          >
-                            {t.range}
-                          </span>
+                          Trials per cell
                         </div>
-                      ))}
-                    </div>
-                  </div>
-                );
-              })()}
-
-            {/* Parameter bin legend */}
-            {selectedParam &&
-              paramCellBins &&
-              (() => {
-                const isNumeric = selectedParamType === "numeric";
-                const manyBins = paramCellBins.binNames.length > 3;
-                // Numeric labels carry the range string and must stay readable.
-                const layoutStyle: React.CSSProperties = isNumeric
-                  ? {
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: 2,
-                    }
-                  : manyBins
-                    ? {
-                        display: "grid",
-                        gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-                        columnGap: 10,
-                        rowGap: 2,
-                      }
-                    : {
-                        display: "flex",
-                        flexWrap: "wrap",
-                        gap: "2px 8px",
-                        alignItems: "center",
-                      };
-                return (
-                  <div
-                    style={{
-                      background: "rgba(255,255,255,0.92)",
-                      backdropFilter: "blur(4px)",
-                      borderRadius: 8,
-                      border: "1px solid #E5E7EB",
-                      boxShadow: "0 2px 8px rgba(0,0,0,0.10)",
-                      padding: "6px 10px",
-                      maxWidth: isNumeric ? 260 : 240,
-                    }}
-                  >
-                    <div
-                      style={{
-                        fontSize: 13,
-                        fontWeight: 700,
-                        color: "#374151",
-                        marginBottom: 4,
-                      }}
-                    >
-                      {selectedParam} ({selectedParamType})
-                    </div>
-                    <div style={layoutStyle}>
-                      {paramCellBins.binNames.map((bin) => (
                         <div
-                          key={bin}
                           style={{
                             display: "flex",
-                            alignItems: "center",
-                            gap: 5,
-                            minWidth: 0,
+                            alignItems: "flex-end",
+                            gap: 12,
                           }}
                         >
-                          <div
-                            style={{
-                              width: 12,
-                              height: 12,
-                              borderRadius: 2,
-                              backgroundColor:
-                                paramCellBins.binColors[bin] ?? MIXED_COLOR,
-                              opacity: 0.7,
-                              flexShrink: 0,
-                            }}
-                          />
-                          <span
-                            style={{
-                              fontSize: 13,
-                              fontWeight: 600,
-                              color:
-                                paramCellBins.binColors[bin] ?? MIXED_COLOR,
-                              whiteSpace: "nowrap",
-                              overflow: isNumeric ? "visible" : "hidden",
-                              textOverflow: isNumeric ? "clip" : "ellipsis",
-                            }}
-                            title={bin}
-                          >
-                            {bin}
-                          </span>
+                          {tiers.map((t) => (
+                            <div
+                              key={t.key}
+                              style={{
+                                display: "flex",
+                                flexDirection: "column",
+                                alignItems: "center",
+                                gap: 2,
+                              }}
+                            >
+                              <svg
+                                width={hexBoxPx}
+                                height={hexBoxPx}
+                                viewBox={`-${hexBoxPx / 2} -${hexBoxPx / 2} ${hexBoxPx} ${hexBoxPx}`}
+                              >
+                                <path
+                                  d={getHexPath(hexR * t.scale)}
+                                  fill="#94A3B8"
+                                  stroke="#475569"
+                                  strokeWidth={0.8}
+                                />
+                              </svg>
+                              <span
+                                style={{
+                                  fontSize: 11,
+                                  color: "#6B7280",
+                                  fontWeight: 600,
+                                }}
+                              >
+                                {t.range}
+                              </span>
+                            </div>
+                          ))}
                         </div>
-                      ))}
-                    </div>
-                  </div>
-                );
-              })()}
+                      </div>
+                    );
+                  })()}
 
-            {/* Annotations legend — Tuner / Parameter modes share the same
-                notable-cell labels; Complementary has its own block below.
-                Hidden in figure-capture mode (covered by the big legend). */}
-            {!(effectiveColorMode === "tuner-perf" && figureLegendVisible) &&
-              (effectiveColorMode === "tuner-perf" ||
-                effectiveColorMode === "tuner-param") && (
-              <div
-                style={{
-                  background: "rgba(255,255,255,0.92)",
-                  backdropFilter: "blur(4px)",
-                  borderRadius: 8,
-                  border: "1px solid #E5E7EB",
-                  boxShadow: "0 2px 8px rgba(0,0,0,0.10)",
-                  padding: "6px 10px",
-                  maxWidth: 240,
-                }}
-              >
-                <div
-                  style={{
-                    fontSize: 13,
-                    fontWeight: 700,
-                    color: "#374151",
-                    marginBottom: 6,
-                  }}
-                >
-                  Annotations
-                </div>
-                <div
-                  style={{ display: "flex", flexDirection: "column", gap: 3 }}
-                >
-                  <div
-                    style={{ display: "flex", gap: 8, alignItems: "baseline" }}
-                  >
-                    <span
-                      style={{
-                        fontSize: 11,
-                        fontWeight: 700,
-                        color: "#0F172A",
-                        whiteSpace: "nowrap",
-                        minWidth: 90,
-                      }}
-                    >
-                      N{" "}
-                      <span style={{ fontWeight: 600, color: "#475569" }}>
-                        branches
-                      </span>
-                    </span>
-                    <span style={{ fontSize: 11, color: "#475569" }}>
-                      Max / Min coverage
-                    </span>
-                  </div>
-                  <div
-                    style={{ display: "flex", gap: 8, alignItems: "baseline" }}
-                  >
-                    <span
-                      style={{
-                        fontSize: 11,
-                        fontWeight: 700,
-                        color: "#0F172A",
-                        whiteSpace: "nowrap",
-                        minWidth: 90,
-                      }}
-                    >
-                      N{" "}
-                      <span style={{ fontWeight: 600, color: "#475569" }}>
-                        trials
-                      </span>
-                    </span>
-                    <span style={{ fontSize: 11, color: "#475569" }}>
-                      Densest / Sparsest cell
-                    </span>
-                  </div>
-                  <div
-                    style={{
-                      fontSize: 10,
-                      color: "#94A3B8",
-                      marginTop: 3,
-                      fontStyle: "italic",
-                    }}
-                  >
-                    Pill badge = tuner-exclusive cell
-                  </div>
-                </div>
-              </div>
+                {/* Parameter bin legend + Annotations legend (param-mode) folded
+                into the consolidated tuner-param legend block above. */}
+
+                {/* Complementary Annotations card folded into the consolidated
+                complementary legend above. */}
+              </>
             )}
-            {effectiveColorMode === "complementary" && (
-              <div
-                style={{
-                  background: "rgba(255,255,255,0.92)",
-                  backdropFilter: "blur(4px)",
-                  borderRadius: 8,
-                  border: "1px solid #E5E7EB",
-                  boxShadow: "0 2px 8px rgba(0,0,0,0.10)",
-                  padding: "6px 10px",
-                  maxWidth: 260,
-                }}
-              >
-                <div
-                  style={{
-                    fontSize: 13,
-                    fontWeight: 700,
-                    color: "#374151",
-                    marginBottom: 6,
-                  }}
-                >
-                  Annotations
-                </div>
-                <div
-                  style={{ display: "flex", flexDirection: "column", gap: 3 }}
-                >
-                  <div
-                    style={{ display: "flex", gap: 8, alignItems: "baseline" }}
-                  >
-                    <span
-                      style={{
-                        fontSize: 11,
-                        fontWeight: 700,
-                        color: "#0F172A",
-                        whiteSpace: "nowrap",
-                        minWidth: 90,
-                      }}
-                    >
-                      #N
-                    </span>
-                    <span style={{ fontSize: 11, color: "#475569" }}>
-                      Working set member (cluster ID)
-                    </span>
-                  </div>
-                  <div
-                    style={{ display: "flex", gap: 8, alignItems: "baseline" }}
-                  >
-                    <span
-                      style={{
-                        fontSize: 11,
-                        fontWeight: 700,
-                        color: "#0F172A",
-                        whiteSpace: "nowrap",
-                        minWidth: 90,
-                      }}
-                    >
-                      No. N{" "}
-                      <span style={{ fontWeight: 600, color: "#10B981" }}>
-                        +X new
-                      </span>
-                    </span>
-                    <span style={{ fontSize: 11, color: "#475569" }}>
-                      Top complement candidates
-                    </span>
-                  </div>
-                </div>
-              </div>
-            )}
-            </>)}
           </div>
 
           {/* Hover tooltip */}
@@ -4279,6 +5214,8 @@ export function HexMap({
             isCartMember={
               hoveredClusterId !== null && cartIds.has(hoveredClusterId)
             }
+            metricLabel={metricLabel}
+            formatMetric={fmtMetric}
           />
         </div>
       </div>
