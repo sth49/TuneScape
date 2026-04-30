@@ -4,9 +4,8 @@ import react from "@vitejs/plugin-react";
 
 // https://vite.dev/config/
 export default defineConfig({
-  // Use relative asset URLs ("./assets/..." etc.) so the build works under
-  // any subpath: GitHub Pages (/TuneScape/), Anonymous GitHub
-  // (/w/TuneScape-XXXX/), local file://, etc.
-  base: "./",
+  // Anonymous GitHub mirror path. If the anon ID is regenerated, update
+  // this and rebuild.
+  base: "/w/TuneScape-9380/",
   plugins: [react(), tailwindcss()],
 });
