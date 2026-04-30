@@ -4,8 +4,8 @@ import react from "@vitejs/plugin-react";
 
 // https://vite.dev/config/
 export default defineConfig({
-  // Anonymous GitHub mirror path. If the anon ID is regenerated, update
-  // this and rebuild.
-  base: "/w/TuneScape-9380/",
+  // Relative paths so the built bundle works under any subpath
+  // (e.g., Anonymous GitHub /w/TuneScape-XXXX/dist/, GitHub Pages, etc.)
+  base: "./",
   plugins: [react(), tailwindcss()],
 });
