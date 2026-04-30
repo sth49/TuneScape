@@ -37,7 +37,7 @@ const PROGRAM_LABELS: Record<Domain, string> = {
 
 function App() {
   const [mapDomain, setMapDomain] = useState<Domain>("SE");
-  const [mapProgram, setMapProgram] = useState<Program>("gawk");
+  const [mapProgram, setMapProgram] = useState<Program>("grep");
   const [selectedParam, setSelectedParam] = useState<string | null>(null);
   // Tuner subset shown depends on the current program (SE vs HPO).
   const [selectedTuners, setSelectedTuners] = useState<Set<TunerType>>(

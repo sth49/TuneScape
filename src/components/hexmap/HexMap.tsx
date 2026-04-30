@@ -157,7 +157,7 @@ export function HexMap({
   const emptyCart = useMemo(() => new Set<number>(), []);
   const cartIds = cartIdsProp ?? emptyCart;
   // Detail level (L0..L4); L3 default
-  const [detailLevel, setDetailLevel] = useState(3);
+  const [detailLevel, setDetailLevel] = useState(2);
 
   const svgRef = useRef<SVGSVGElement>(null);
 
@@ -171,7 +171,7 @@ export function HexMap({
       setAllLevels([]);
 
       try {
-        const url = `/data/${program}_hexmap_precomputed.json`;
+        const url = `${import.meta.env.BASE_URL}data/${program}_hexmap_precomputed.json`;
         const resp = await fetch(url);
         if (!resp.ok) throw new Error(`Failed to load ${url}`);
         const json = await resp.json();
@@ -201,7 +201,7 @@ export function HexMap({
 
   useEffect(() => {
     let cancelled = false;
-    fetch("/data/param_importance.json")
+    fetch(`${import.meta.env.BASE_URL}data/param_importance.json`)
       .then((r) => r.json())
       .then((d) => {
         if (cancelled) return;
