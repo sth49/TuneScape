@@ -1,17 +1,18 @@
 """
 Run 4 HPO tuners on tabular tasks with XGBoost, save trial logs.
 
-Tuners (all via Optuna for unified API):
-  - Random : RandomSampler
-  - Grid   : GridSampler over a reduced HP subset (full grid)
-  - Genetic: NSGAIISampler (single-objective)
-  - BOHB   : TPESampler + HyperbandPruner (BOHB-like multi-fidelity)
+Tuners (all via Optuna for unified API; chosen to span orthogonal search
+dynamics — i.i.d. / evolutionary / adaptive-distribution / multi-fidelity):
+  - Random            : RandomSampler                                (i.i.d. baseline)
+  - Genetic           : NSGAIISampler                                (operator-based EA)
+  - CMA_ES            : CmaEsSampler                                 (distribution-based EA)
+  - SuccessiveHalving : RandomSampler + SuccessiveHalvingPruner      (multi-fidelity)
 
 Output:
   data_hpo/raw/{task}_{tuner}.json  →  {task, tuner, trials: [{trialId,
                                           parameters, score, elapsed}, ...]}
 
-Run:  python scripts/run_hpo.py [--tasks adult covertype] [--trials 150]
+Run:  python scripts/run_hpo.py [--tasks adult] [--trials 200]
 """
 
 from __future__ import annotations
@@ -45,12 +46,12 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 TASKS: dict[str, int] = {
     "adult": 1590,        # ~48k rows, 14 features, binary
     "phoneme": 1489,      # ~5.4k rows, 5 features, binary  (small + sensitive)
-    "covertype": 1596,    # ~58k rows, 54 features, 7 classes
 }
 
 
 # ============================================================
-# Full HP space (Random / Genetic / BOHB)
+# Full HP space — 9 numeric HPs (no categoricals so CMA-ES / GP-BO have a
+# clean continuous space; otherwise both fall back to Random for categoricals).
 # ============================================================
 N_ESTIMATORS_MAX = 300  # cap to keep wall-clock reasonable
 
@@ -66,34 +67,7 @@ def suggest_full(trial: optuna.Trial) -> dict[str, Any]:
         "gamma": trial.suggest_float("gamma", 0.0, 5.0),
         "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
         "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 10.0, log=True),
-        "booster": trial.suggest_categorical("booster", ["gbtree", "dart"]),
     }
-
-
-# Grid: reduced subset (full grid otherwise explodes). Other HPs default.
-GRID_SEARCH_SPACE: dict[str, list[Any]] = {
-    "learning_rate": [1e-2, 5e-2, 1e-1],
-    "max_depth": [3, 6, 10],
-    "n_estimators": [100, 300],
-    "subsample": [0.6, 0.8, 1.0],
-    "colsample_bytree": [0.6, 0.8, 1.0],
-    # Booster also grid'd to make Grid see categorical effect
-    "booster": ["gbtree", "dart"],
-}
-GRID_DEFAULTS: dict[str, Any] = {
-    "min_child_weight": 1.0,
-    "gamma": 0.0,
-    "reg_lambda": 1.0,
-    "reg_alpha": 0.0,
-}
-
-
-def suggest_grid(trial: optuna.Trial) -> dict[str, Any]:
-    params: dict[str, Any] = {}
-    for k, vs in GRID_SEARCH_SPACE.items():
-        params[k] = trial.suggest_categorical(k, vs)
-    params.update(GRID_DEFAULTS)
-    return params
 
 
 # ============================================================
@@ -161,7 +135,6 @@ def make_model(params: dict[str, Any], n_classes: int, n_estimators: int | None 
         gamma=float(params["gamma"]),
         reg_lambda=float(params["reg_lambda"]),
         reg_alpha=float(params["reg_alpha"]),
-        booster=str(params["booster"]),
         tree_method="hist",
         n_jobs=-1,
         verbosity=0,
@@ -195,20 +168,16 @@ def run_random(task_name, data, n_trials, seed=42):
     )
 
 
-def run_grid(task_name, data, n_trials, seed=42):
-    # Optuna's GridSampler enumerates all combos; n_trials caps the run.
-    sampler = optuna.samplers.GridSampler(GRID_SEARCH_SPACE, seed=seed)
-    total_combos = 1
-    for vs in GRID_SEARCH_SPACE.values():
-        total_combos *= len(vs)
-    actual = min(n_trials, total_combos)
-    print(f"    Grid: {total_combos} unique combos → running {actual}")
+def run_cmaes(task_name, data, n_trials, seed=42):
+    # First n_startup_trials use Random; CMA-ES kicks in after.
     return _run_optuna_basic(
-        task_name, data, actual, suggest_grid, sampler=sampler,
+        task_name, data, n_trials, suggest_full,
+        sampler=optuna.samplers.CmaEsSampler(seed=seed, n_startup_trials=10),
     )
 
 
 def run_genetic(task_name, data, n_trials, seed=42):
+    # NSGA-II: operator-based GA (mutation + crossover on a population).
     return _run_optuna_basic(
         task_name, data, n_trials, suggest_full,
         sampler=optuna.samplers.NSGAIISampler(
@@ -218,19 +187,20 @@ def run_genetic(task_name, data, n_trials, seed=42):
     )
 
 
-def run_bohb(task_name, data, n_trials, seed=42):
-    """BOHB-like: TPE + Hyperband multi-fidelity (via report+prune callback)."""
-    Xtr, ytr, Xva, yva, n_classes = data
-    sampler = optuna.samplers.TPESampler(seed=seed, n_startup_trials=10, multivariate=True)
-    pruner = optuna.pruners.HyperbandPruner(
-        min_resource=50, max_resource=N_ESTIMATORS_MAX, reduction_factor=3,
+def run_successive_halving(task_name, data, n_trials, seed=42):
+    """SuccessiveHalving: random sampling + budget-based aggressive halving.
+    Multi-fidelity (no surrogate). n_estimators is the resource axis: each
+    trial fits at budgets [50, 100, 200, 300], reports the score after each,
+    and is pruned if the SH bracket says so."""
+    sampler = optuna.samplers.RandomSampler(seed=seed)
+    pruner = optuna.pruners.SuccessiveHalvingPruner(
+        min_resource=50, reduction_factor=3, min_early_stopping_rate=0,
     )
     study = optuna.create_study(direction="maximize", sampler=sampler, pruner=pruner)
     trials_log: list[dict] = []
 
     def objective(trial: optuna.Trial) -> float:
         params = suggest_full(trial)
-        # Report at multiple n_estimators "fidelity" steps so Hyperband can prune.
         budgets = [50, 100, 200, N_ESTIMATORS_MAX]
         budgets = [b for b in budgets if b <= int(params["n_estimators"])]
         if not budgets:
@@ -244,8 +214,6 @@ def run_bohb(task_name, data, n_trials, seed=42):
             last_correct = correct_idx
             trial.report(score, step=b)
             if trial.should_prune() and b != budgets[-1]:
-                last_b = b
-                # Save the partial trial info (pruned)
                 trials_log.append({
                     "trialId": trial.number + 1,
                     "parameters": {**params, "n_estimators": b},
@@ -318,9 +286,9 @@ def save_trials(task: str, tuner: str, trials: list[dict], n_val: int):
 # ============================================================
 TUNER_RUNNERS: dict[str, Any] = {
     "Random": run_random,
-    "Grid": run_grid,
     "Genetic": run_genetic,
-    "BOHB": run_bohb,
+    "CMA_ES": run_cmaes,
+    "SuccessiveHalving": run_successive_halving,
 }
 
 

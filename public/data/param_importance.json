@@ -5175,85 +5175,77 @@
     "_combined": [
       {
         "name": "learning_rate",
-        "importance": 48.7
-      },
-      {
-        "name": "min_child_weight",
-        "importance": 30.23
-      },
-      {
-        "name": "reg_lambda",
-        "importance": 24.97
-      },
-      {
-        "name": "reg_alpha",
-        "importance": 17.23
+        "importance": 47.06
       },
       {
         "name": "n_estimators",
-        "importance": 12.09
-      },
-      {
-        "name": "colsample_bytree",
-        "importance": 8.81
-      },
-      {
-        "name": "subsample",
-        "importance": 6.16
+        "importance": 45.83
       },
       {
         "name": "max_depth",
-        "importance": 4.12
+        "importance": 25.62
+      },
+      {
+        "name": "min_child_weight",
+        "importance": 19.08
+      },
+      {
+        "name": "subsample",
+        "importance": 18.01
+      },
+      {
+        "name": "reg_alpha",
+        "importance": 14.91
       },
       {
         "name": "gamma",
-        "importance": 2.01
+        "importance": 12.84
       },
       {
-        "name": "booster",
-        "importance": 0.51
+        "name": "reg_lambda",
+        "importance": 11.4
+      },
+      {
+        "name": "colsample_bytree",
+        "importance": 7.82
       }
     ],
     "Random": [
       {
         "name": "learning_rate",
-        "importance": 54.91
-      },
-      {
-        "name": "n_estimators",
-        "importance": 21.45
-      },
-      {
-        "name": "reg_lambda",
-        "importance": 16.78
+        "importance": 48.91
       },
       {
         "name": "max_depth",
-        "importance": 9.17
-      },
-      {
-        "name": "colsample_bytree",
-        "importance": 7.27
-      },
-      {
-        "name": "min_child_weight",
-        "importance": 7.24
+        "importance": 15.02
       },
       {
         "name": "reg_alpha",
-        "importance": 4.23
+        "importance": 14.51
+      },
+      {
+        "name": "n_estimators",
+        "importance": 9.68
       },
       {
         "name": "subsample",
-        "importance": 2.53
-      },
-      {
-        "name": "booster",
-        "importance": 0.04
+        "importance": 8.88
       },
       {
         "name": "gamma",
-        "importance": 0.02
+        "importance": 7.94
+      },
+      {
+        "name": "colsample_bytree",
+        "importance": 6.45
+      },
+      {
+        "name": "reg_lambda",
+        "importance": 1.57
+      },
+      {
+        "name": "min_child_weight",
+        "importance": 1.51
       }
     ],
     "Grid": [
@@ -5300,44 +5292,40 @@
     ],
     "Genetic": [
       {
+        "name": "max_depth",
+        "importance": 31.22
+      },
+      {
         "name": "learning_rate",
-        "importance": 57.64
-      },
-      {
-        "name": "min_child_weight",
-        "importance": 31.93
-      },
-      {
-        "name": "gamma",
-        "importance": 29.27
-      },
-      {
-        "name": "reg_alpha",
-        "importance": 28.87
+        "importance": 27.06
       },
       {
         "name": "colsample_bytree",
-        "importance": 27.6
-      },
-      {
-        "name": "reg_lambda",
-        "importance": 24.76
-      },
-      {
-        "name": "max_depth",
-        "importance": 13.76
-      },
-      {
-        "name": "subsample",
-        "importance": 5.18
+        "importance": 19.71
       },
       {
         "name": "n_estimators",
-        "importance": 4.95
+        "importance": 17.88
       },
       {
-        "name": "booster",
-        "importance": 0.56
+        "name": "min_child_weight",
+        "importance": 16.04
+      },
+      {
+        "name": "reg_lambda",
+        "importance": 13.31
+      },
+      {
+        "name": "subsample",
+        "importance": 12.52
+      },
+      {
+        "name": "reg_alpha",
+        "importance": 5.15
+      },
+      {
+        "name": "gamma",
+        "importance": 2.03
       }
     ],
     "BOHB": [
@@ -5380,6 +5368,120 @@
       {
         "name": "booster",
         "importance": 0.55
+      }
+    ],
+    "CMA_ES": [
+      {
+        "name": "gamma",
+        "importance": 34.32
+      },
+      {
+        "name": "reg_alpha",
+        "importance": 33.74
+      },
+      {
+        "name": "min_child_weight",
+        "importance": 30.46
+      },
+      {
+        "name": "learning_rate",
+        "importance": 30.3
+      },
+      {
+        "name": "subsample",
+        "importance": 28.54
+      },
+      {
+        "name": "colsample_bytree",
+        "importance": 27.65
+      },
+      {
+        "name": "reg_lambda",
+        "importance": 27.3
+      },
+      {
+        "name": "n_estimators",
+        "importance": 15.69
+      },
+      {
+        "name": "max_depth",
+        "importance": 6.56
+      }
+    ],
+    "TPE": [
+      {
+        "name": "min_child_weight",
+        "importance": 33.06
+      },
+      {
+        "name": "subsample",
+        "importance": 28.08
+      },
+      {
+        "name": "reg_alpha",
+        "importance": 23.95
+      },
+      {
+        "name": "n_estimators",
+        "importance": 21.84
+      },
+      {
+        "name": "learning_rate",
+        "importance": 20.74
+      },
+      {
+        "name": "reg_lambda",
+        "importance": 17.76
+      },
+      {
+        "name": "colsample_bytree",
+        "importance": 16.43
+      },
+      {
+        "name": "max_depth",
+        "importance": 7.92
+      },
+      {
+        "name": "gamma",
+        "importance": 4.33
+      }
+    ],
+    "SuccessiveHalving": [
+      {
+        "name": "learning_rate",
+        "importance": 67.1
+      },
+      {
+        "name": "n_estimators",
+        "importance": 54.6
+      },
+      {
+        "name": "max_depth",
+        "importance": 16.3
+      },
+      {
+        "name": "reg_alpha",
+        "importance": 11.68
+      },
+      {
+        "name": "gamma",
+        "importance": 8.75
+      },
+      {
+        "name": "min_child_weight",
+        "importance": 5.09
+      },
+      {
+        "name": "colsample_bytree",
+        "importance": 3.09
+      },
+      {
+        "name": "subsample",
+        "importance": 2.85
+      },
+      {
+        "name": "reg_lambda",
+        "importance": 0.38
       }
     ]
   },

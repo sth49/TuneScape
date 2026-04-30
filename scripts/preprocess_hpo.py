@@ -29,7 +29,7 @@ RAW_DIR = Path("data_hpo/raw")
 OUT_DIR = Path("public/data")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-TUNERS = ["Random", "Grid", "Genetic", "BOHB"]
+TUNERS = ["Random", "Genetic", "CMA_ES", "SuccessiveHalving"]
 
 
 def convert_trial(trial: dict, prev_union: set[int]) -> tuple[dict, set[int]]:

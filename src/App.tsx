@@ -22,8 +22,7 @@ type Program =
 
 const PROGRAMS_BY_DOMAIN: Record<Domain, Program[]> = {
   SE: ["gawk", "gcal", "grep"],
-  // covertype joins this list once its trial run finishes preprocessing.
-  ML: ["adult", "phoneme"],
+  ML: ["adult"],
 };
 
 const DOMAIN_LABELS: Record<Domain, string> = {

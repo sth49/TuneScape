@@ -158,12 +158,12 @@ export const SE_TUNERS: TunerType[] = [
 
 export const HPO_TUNERS: TunerType[] = [
   "Random",
-  "Grid",
   "Genetic",
-  "BOHB",
+  "CMA_ES",
+  "SuccessiveHalving",
 ];
 
-export const HPO_PROGRAMS = new Set<string>(["adult", "phoneme", "covertype"]);
+export const HPO_PROGRAMS = new Set<string>(["adult"]);
 
 export function getTunersForProgram(program: string): TunerType[] {
   return HPO_PROGRAMS.has(program) ? HPO_TUNERS : SE_TUNERS;

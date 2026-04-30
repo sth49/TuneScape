@@ -205,7 +205,7 @@ function serializeLevel(
 
 // ── Main ──
 
-const PROGRAMS = ["gawk", "gcal", "grep", "adult", "phoneme"] as const;
+const PROGRAMS = ["gawk", "gcal", "grep", "adult"] as const;
 
 async function main() {
   const dtPath = path.join(DATA_DIR, "decision_tree_data.json");

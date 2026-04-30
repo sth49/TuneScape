@@ -2566,9 +2566,9 @@ export function HexMap({
                         fill={TUNER_COLORS[pinnedTuners[0]]}
                       />
                       <line
-                        x1="0"
+                        x1="4"
                         y1="0"
-                        x2="0"
+                        x2="4"
                         y2="8"
                         stroke={TUNER_COLORS[pinnedTuners[1]]}
                         strokeWidth={stripeW}
@@ -2791,113 +2791,11 @@ export function HexMap({
                   );
                 })}
 
-              {/* ── Notable-cell labels: optional text + optional tuner badge, stacked ── */}
-              {effectiveHighlightLabels.map(
-                ({ tile, clusterId, text, badge }) => {
-                  const halo = 3 / renderScale;
-                  const valueSize = 12 / renderScale;
-                  const unitSize = 10 / renderScale;
-                  const lineGap = 4 / renderScale;
-                  const badgeFont = 11 / renderScale;
-                  const badgePadX = 6 / renderScale;
-                  const badgePadY = 3 / renderScale;
-                  const charW = badgeFont * 0.62;
-
-                  // Pre-compute the height of each piece so we can vertically center the stack.
-                  const textH = text
-                    ? valueSize + (text.unit ? lineGap + unitSize : 0)
-                    : 0;
-                  const badgeH = badge ? badgeFont + badgePadY * 2 : 0;
-                  const stackGap = text && badge ? 4 / renderScale : 0;
-                  const totalH = textH + stackGap + badgeH;
-
-                  let cursorY = tile.y - totalH / 2;
-
-                  return (
-                    <g key={`label-${clusterId}`} pointerEvents="none">
-                      {text && (
-                        <>
-                          <text
-                            x={tile.x}
-                            y={cursorY + valueSize / 2}
-                            textAnchor="middle"
-                            dominantBaseline="central"
-                            fontSize={valueSize}
-                            fontWeight={700}
-                            fontStyle={text.italic ? "italic" : undefined}
-                            fill="#0F172A"
-                            stroke="white"
-                            strokeWidth={halo}
-                            paintOrder="stroke"
-                            style={{ userSelect: "none" }}
-                          >
-                            {text.value}
-                          </text>
-                          {text.unit && (
-                            <text
-                              x={tile.x}
-                              y={cursorY + valueSize + lineGap + unitSize / 2}
-                              textAnchor="middle"
-                              dominantBaseline="central"
-                              fontSize={unitSize}
-                              fontWeight={600}
-                              fontStyle={text.italic ? "italic" : undefined}
-                              fill="#475569"
-                              stroke="white"
-                              strokeWidth={halo}
-                              paintOrder="stroke"
-                              style={{ userSelect: "none" }}
-                            >
-                              {text.unit}
-                            </text>
-                          )}
-                        </>
-                      )}
-                      {badge &&
-                        (() => {
-                          cursorY += textH + stackGap;
-                          const label = TUNER_DISPLAY_NAMES[badge.tuner];
-                          const w = label.length * charW + badgePadX * 2;
-                          const h = badgeH;
-                          const cy = cursorY + h / 2;
-                          return (
-                            <g transform={`translate(${tile.x}, ${cy})`}>
-                              <rect
-                                x={-w / 2}
-                                y={-h / 2}
-                                width={w}
-                                height={h}
-                                rx={h / 2}
-                                ry={h / 2}
-                                fill={TUNER_COLORS[badge.tuner]}
-                                stroke="white"
-                                strokeWidth={1.5 / renderScale}
-                              />
-                              <text
-                                x={0}
-                                y={0}
-                                textAnchor="middle"
-                                dominantBaseline="central"
-                                fontSize={badgeFont}
-                                fontWeight={700}
-                                fill="white"
-                                style={{ userSelect: "none" }}
-                              >
-                                {label}
-                              </text>
-                            </g>
-                          );
-                        })()}
-                    </g>
-                  );
-                },
-              )}
-
               {/* ── Coverage-mode region callouts: border + leader line + label in margin ── */}
               {coverageRegions.map((r, i) => {
                 const isHov = hoveredRegionIdx === i;
                 const isOtherHov = hoveredRegionIdx !== null && !isHov;
-                const fontSize = (isHov ? 14 : 13) / renderScale;
+                const fontSize = (isHov ? 17 : 16) / renderScale;
                 const borderStrokeOuter = (isHov ? 6.5 : 5.5) / renderScale;
                 const borderStrokeInner = (isHov ? 4 : 3) / renderScale;
                 const leaderStroke = (isHov ? 1.8 : 1.2) / renderScale;
@@ -2985,8 +2883,8 @@ export function HexMap({
                       {/* Backing pill — same shape for every label, white fill +
                       subtle border, sits behind text/badges. */}
                       {(() => {
-                        const charPxR = 7.6 / renderScale;
-                        const lineHpxR = 14 / renderScale;
+                        const charPxR = 9.4 / renderScale;
+                        const lineHpxR = 17 / renderScale;
                         const boxPadXR = 20 / renderScale;
                         const boxPadYR = 10 / renderScale;
                         const combinedRowGap = 10 / renderScale;
@@ -3235,6 +3133,110 @@ export function HexMap({
                   </g>
                 );
               })()}
+
+              {/* ── Notable-cell labels — sit on top of region borders &
+                  leader lines, but BELOW cart amber-dot + hover cart button so
+                  the orange dot stays visible over any text. ── */}
+              {effectiveHighlightLabels.map(
+                ({ tile, clusterId, text, badge }) => {
+                  const isComp = effectiveColorMode === "complementary";
+                  const halo = 3 / renderScale;
+                  const valueSize = (isComp ? 20 : 18) / renderScale;
+                  const unitSize = (isComp ? 17 : 15) / renderScale;
+                  const lineGap = 4 / renderScale;
+                  const badgeFont = (isComp ? 17 : 15) / renderScale;
+                  const badgePadX = 6 / renderScale;
+                  const badgePadY = 3 / renderScale;
+                  const charW = badgeFont * 0.62;
+
+                  const textH = text
+                    ? valueSize + (text.unit ? lineGap + unitSize : 0)
+                    : 0;
+                  const badgeH = badge ? badgeFont + badgePadY * 2 : 0;
+                  const stackGap = text && badge ? 4 / renderScale : 0;
+                  const totalH = textH + stackGap + badgeH;
+
+                  let cursorY = tile.y - totalH / 2;
+
+                  return (
+                    <g key={`label-${clusterId}`} pointerEvents="none">
+                      {text && (
+                        <>
+                          <text
+                            x={tile.x}
+                            y={cursorY + valueSize / 2}
+                            textAnchor="middle"
+                            dominantBaseline="central"
+                            fontSize={valueSize}
+                            fontWeight={700}
+                            fontStyle={text.italic ? "italic" : undefined}
+                            fill="#0F172A"
+                            stroke="white"
+                            strokeWidth={halo}
+                            paintOrder="stroke"
+                            style={{ userSelect: "none" }}
+                          >
+                            {text.value}
+                          </text>
+                          {text.unit && (
+                            <text
+                              x={tile.x}
+                              y={cursorY + valueSize + lineGap + unitSize / 2}
+                              textAnchor="middle"
+                              dominantBaseline="central"
+                              fontSize={unitSize}
+                              fontWeight={700}
+                              fontStyle={text.italic ? "italic" : undefined}
+                              fill="#475569"
+                              stroke="white"
+                              strokeWidth={halo}
+                              paintOrder="stroke"
+                              style={{ userSelect: "none" }}
+                            >
+                              {text.unit}
+                            </text>
+                          )}
+                        </>
+                      )}
+                      {badge &&
+                        (() => {
+                          cursorY += textH + stackGap;
+                          const label = TUNER_DISPLAY_NAMES[badge.tuner];
+                          const w = label.length * charW + badgePadX * 2;
+                          const h = badgeH;
+                          const cy = cursorY + h / 2;
+                          return (
+                            <g transform={`translate(${tile.x}, ${cy})`}>
+                              <rect
+                                x={-w / 2}
+                                y={-h / 2}
+                                width={w}
+                                height={h}
+                                rx={h / 2}
+                                ry={h / 2}
+                                fill={TUNER_COLORS[badge.tuner]}
+                                stroke="white"
+                                strokeWidth={1.5 / renderScale}
+                              />
+                              <text
+                                x={0}
+                                y={0}
+                                textAnchor="middle"
+                                dominantBaseline="central"
+                                fontSize={badgeFont}
+                                fontWeight={700}
+                                fill="white"
+                                style={{ userSelect: "none" }}
+                              >
+                                {label}
+                              </text>
+                            </g>
+                          );
+                        })()}
+                    </g>
+                  );
+                },
+              )}
 
               {/* ── Cart amber-dot layer ──
                 Drawn AFTER tiles + regions so the dot is always on top of any
@@ -3812,6 +3814,142 @@ export function HexMap({
                         maxWidth: 300,
                       }}
                     >
+                      {/* — Section 0: Tuner Comparison — only when two
+                        tuners are pinned. Mirrors the per-cell rendering:
+                        solid swatch per tuner + 45° hatched swatch for
+                        cells where both have trials. */}
+                      {pinnedTuners.length === 2 && (
+                        <>
+                          <div
+                            style={{
+                              fontSize: 14,
+                              fontWeight: 700,
+                              color: "#374151",
+                              marginBottom: 6,
+                            }}
+                          >
+                            Tuner Comparison
+                          </div>
+                          <div
+                            style={{
+                              display: "flex",
+                              gap: 12,
+                              alignItems: "center",
+                              marginBottom: 12,
+                              flexWrap: "wrap",
+                            }}
+                          >
+                            <div
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 5,
+                              }}
+                            >
+                              <span
+                                style={{
+                                  width: 16,
+                                  height: 16,
+                                  background:
+                                    TUNER_COLORS[pinnedTuners[0]],
+                                  borderRadius: 3,
+                                  display: "inline-block",
+                                }}
+                              />
+                              <span
+                                style={{
+                                  fontSize: 12,
+                                  fontWeight: 600,
+                                  color: "#374151",
+                                }}
+                              >
+                                {TUNER_DISPLAY_NAMES[pinnedTuners[0]]}
+                              </span>
+                            </div>
+                            <div
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 5,
+                              }}
+                            >
+                              <span
+                                style={{
+                                  width: 16,
+                                  height: 16,
+                                  background:
+                                    TUNER_COLORS[pinnedTuners[1]],
+                                  borderRadius: 3,
+                                  display: "inline-block",
+                                }}
+                              />
+                              <span
+                                style={{
+                                  fontSize: 12,
+                                  fontWeight: 600,
+                                  color: "#374151",
+                                }}
+                              >
+                                {TUNER_DISPLAY_NAMES[pinnedTuners[1]]}
+                              </span>
+                            </div>
+                            <div
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 5,
+                              }}
+                            >
+                              <svg
+                                width={16}
+                                height={16}
+                                style={{ display: "block" }}
+                              >
+                                <defs>
+                                  <pattern
+                                    id="legend-hatch-both"
+                                    patternUnits="userSpaceOnUse"
+                                    width="8"
+                                    height="8"
+                                    patternTransform="rotate(45)"
+                                  >
+                                    <rect
+                                      width="8"
+                                      height="8"
+                                      fill={TUNER_COLORS[pinnedTuners[0]]}
+                                    />
+                                    <line
+                                      x1="4"
+                                      y1="0"
+                                      x2="4"
+                                      y2="8"
+                                      stroke={
+                                        TUNER_COLORS[pinnedTuners[1]]
+                                      }
+                                      strokeWidth={4}
+                                    />
+                                  </pattern>
+                                </defs>
+                                <rect
+                                  width={16}
+                                  height={16}
+                                  fill="url(#legend-hatch-both)"
+                                  rx={3}
+                                />
+                              </svg>
+                              <span
+                                style={{
+                                  fontSize: 12,
+                                  fontWeight: 600,
+                                  color: "#374151",
+                                }}
+                              >
+                                Both
+                              </span>
+                            </div>
+                          </div>
+                        </>
+                      )}
                       {/* — Section 1: Trials per cell — */}
                       {cellSizeTier.tierMap.size > 0 &&
                         (() => {

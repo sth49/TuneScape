@@ -22,7 +22,7 @@ from scipy.cluster.hierarchy import linkage, fcluster
 DEFAULT_FUZZING_TUNERS = [
     "SymTuner", "CMA_ES", "Genetic", "SuccessiveHalving", "TPE", "BayesianOptimization",
 ]
-HPO_TUNERS = ["Random", "Grid", "Genetic", "BOHB"]
+HPO_TUNERS = ["Random", "Genetic", "CMA_ES", "SuccessiveHalving"]
 DATA_DIR = Path(__file__).parent.parent / "public" / "data"
 OUTPUT_DIR = Path(__file__).parent.parent / "public" / "data"
 
