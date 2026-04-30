@@ -4,11 +4,15 @@ Convert HPO trial logs → fuzzing-compatible visualization schema.
 Mapping (one task at a time, e.g. adult):
   data_hpo/raw/{task}_{tuner}.json  →  public/data/{task}_{tuner}_processed.json
 
-Score semantics (validation accuracy in [0, 1]) reframed as "branch coverage":
-  totalCovered        = round(score * 1000)
-  coveredBranches     = [0, 1, …, int(score * 1000)]   (so |union| = best score)
-  cumulativeCoverage  = best_so_far_score * 1000      (auto from set union)
-  marginalCoverage    = improvement_over_prev_best * 1000
+Per-instance correctness semantics ("branch" = validation sample index):
+  coveredBranches     = correctIndices from raw trial
+                        (= validation sample indices the trial classifies correctly)
+  totalCovered        = |coveredBranches|  (= correctly classified count)
+  cumulativeCoverage  = |running union of coveredBranches across this tuner's
+                         trials so far|
+  marginalCoverage    = |this trial's coveredBranches \\ running union|
+                        (i.e. NEW samples first covered by this trial)
+  totalUniqueBranches = nValSamples (= |Xva|)
 
 Run:  python scripts/preprocess_hpo.py [--task adult]
 """
@@ -26,31 +30,36 @@ OUT_DIR = Path("public/data")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 TUNERS = ["Random", "Grid", "Genetic", "BOHB"]
-SCORE_SCALE = 1000  # round(score * SCORE_SCALE) → integer "branch ids"
 
 
-def convert_trial(trial: dict, prev_best_int: int) -> tuple[dict, int]:
-    """Convert one HPO trial into the fuzzing-style trial dict."""
+def convert_trial(trial: dict, prev_union: set[int]) -> tuple[dict, set[int]]:
+    """Convert one HPO trial into the fuzzing-style trial dict.
+
+    prev_union: running union of correctIndices across this tuner's prior trials.
+    Returns (trial_out, updated_union).
+    """
     score = float(trial["score"])
-    score_int = int(round(score * SCORE_SCALE))
-    score_int = max(0, min(SCORE_SCALE, score_int))
-    new_best = max(prev_best_int, score_int)
-    marginal = max(0, new_best - prev_best_int)
+    correct = trial.get("correctIndices")
+    if correct is None:
+        raise ValueError(
+            f"trial {trial.get('trialId')} missing 'correctIndices' — "
+            "raw HPO logs must be regenerated with run_hpo.py."
+        )
+    correct_set = {int(i) for i in correct}
+    new_only = correct_set - prev_union
+    new_union = prev_union | correct_set
     out = {
         "trialId": int(trial["trialId"]),
-        "marginalCoverage": marginal,
-        "cumulativeCoverage": new_best,
-        "totalCovered": score_int,
-        # Set semantics: trial "covers" all integer levels up to its score.
-        # Union of trials' coveredBranches = best_so_far. Trial-internal length
-        # = score_int + 1.
-        "coveredBranches": list(range(0, score_int + 1)),
+        "marginalCoverage": len(new_only),
+        "cumulativeCoverage": len(new_union),
+        "totalCovered": len(correct_set),
+        "coveredBranches": sorted(correct_set),
         "parameters": dict(trial["parameters"]),
         # Extra HPO context kept for reference (not consumed by viz directly).
         "score": score,
         "elapsed": float(trial.get("elapsed", 0.0)),
     }
-    return out, new_best
+    return out, new_union
 
 
 def convert_tuner_file(task: str, tuner: str) -> dict | None:
@@ -64,39 +73,43 @@ def convert_tuner_file(task: str, tuner: str) -> dict | None:
     if not raw_trials:
         print(f"  ✗ {tuner}: no trials")
         return None
+    n_val = int(raw.get("nValSamples", 0))
     trials_out: list[dict] = []
-    best = 0
+    union: set[int] = set()
     for t in raw_trials:
-        out, best = convert_trial(t, best)
+        out, union = convert_trial(t, union)
         trials_out.append(out)
     payload = {
         "program": task,
         "tuner": tuner,
         "totalTrials": len(trials_out),
-        # Across-program union = best score reached + 1 levels (0..best inclusive).
-        "totalUniqueBranches": best + 1,
+        # Universe = total validation samples (= max possible coverage).
+        "totalUniqueBranches": n_val,
+        "nValSamples": n_val,
         "trials": trials_out,
     }
     return payload
 
 
 def compute_program_total_unique(per_tuner: dict[str, dict]) -> int:
-    best = 0
+    """All tuners share the same Xva, so any tuner's nValSamples is authoritative."""
     for payload in per_tuner.values():
-        for t in payload["trials"]:
-            best = max(best, int(t["totalCovered"]))
-    return best + 1
+        n = int(payload.get("nValSamples", 0))
+        if n > 0:
+            return n
+    return 0
 
 
 def write_per_tuner(task: str, per_tuner: dict[str, dict]):
     program_total = compute_program_total_unique(per_tuner)
-    print(f"  Program-level best score: {program_total - 1} / {SCORE_SCALE}")
+    print(f"  Validation universe: {program_total} samples")
     for tuner, payload in per_tuner.items():
         payload["totalUniqueBranches"] = program_total
         out_path = OUT_DIR / f"{task}_{tuner}_processed.json"
         with open(out_path, "w") as f:
             json.dump(payload, f)
-        print(f"    → {out_path}  (n={payload['totalTrials']})")
+        best = max(t["totalCovered"] for t in payload["trials"])
+        print(f"    → {out_path}  (n={payload['totalTrials']}, best={best}/{program_total})")
 
 
 # ─── Param importance — XGBoost-feature-based weight + variance fallback ──

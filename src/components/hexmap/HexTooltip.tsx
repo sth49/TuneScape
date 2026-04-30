@@ -62,9 +62,9 @@ export function HexTooltip({
     : 0;
   const meanLabel = fmt(meanCov);
 
-  // Cumulative = size of branch union. HPO encodes branches as score levels
-  // 0..best_score*1000 so the union size ≈ best score scaled; fuzzing is the
-  // raw # of unique branches.
+  // Cumulative = size of the cell's union. HPO: union of validation samples
+  // ever correctly classified by some trial in this cell (≤ nValSamples);
+  // fuzzing: raw # of unique branches covered.
   const cumLabel = fmt(cluster.coveredBranches.length);
 
   // Top tuner (by trial count among selected)

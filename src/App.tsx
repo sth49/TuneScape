@@ -171,7 +171,9 @@ function App() {
               hoveredClusterId={hoveredClusterId}
               onHoverChange={setHoveredClusterId}
               metricLabel={metricLabelFor(mapProgram)}
-              formatMetric={(v) => formatMetricValue(v, mapProgram)}
+              formatMetric={(v) =>
+                formatMetricValue(v, mapProgram, cartData?.totalUniqueBranches)
+              }
             />
           </div>
         </div>

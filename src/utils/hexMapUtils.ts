@@ -129,20 +129,22 @@ export interface HexMapData {
 // Constants
 // ============================================================
 
-// SE + HPO palette. Some hues are shared across modes since SE and HPO
+// SE + HPO palette. Tableau 10 (the same family as CAT_PALETTE used for
+// categorical-parameter regions) so tuner-mode and parameter-mode reads
+// cohere tonally. Some hues are shared across modes since SE and HPO
 // tuners are never displayed together (one program at a time).
 export const TUNER_COLORS: Record<TunerType, string> = {
   // SE
-  SymTuner: "#3B82F6",             // blue
-  CMA_ES: "#EF4444",               // red
-  Genetic: "#EAB308",              // yellow (shared with HPO Genetic)
-  SuccessiveHalving: "#8B5CF6",    // violet
-  TPE: "#F9A8D4",                  // light pink
-  BayesianOptimization: "#92400E", // brown
-  // HPO (Random/Grid/BOHB unique; Genetic above is shared)
-  Random: "#3B82F6",               // blue
-  Grid: "#EF4444",                 // red
-  BOHB: "#8B5CF6",                 // violet
+  SymTuner: "#4E79A7",             // blue
+  CMA_ES: "#F28E2B",               // orange
+  Genetic: "#E15759",              // red (shared with HPO Genetic)
+  SuccessiveHalving: "#FF9DA7",    // pink (Tableau 10 #8)
+  TPE: "#59A14F",                  // green
+  BayesianOptimization: "#EDC948", // yellow
+  // HPO (Random/Grid/BOHB share hues with SE; Genetic above is shared)
+  Random: "#4E79A7",               // blue
+  Grid: "#F28E2B",                 // orange
+  BOHB: "#59A14F",                 // green
 };
 
 export const SE_TUNERS: TunerType[] = [
@@ -167,10 +169,6 @@ export function getTunersForProgram(program: string): TunerType[] {
   return HPO_PROGRAMS.has(program) ? HPO_TUNERS : SE_TUNERS;
 }
 
-/** Programs encode metric values as round(score × HPO_SCORE_SCALE).
- *  Display divides by this to recover the raw 0–1 accuracy. */
-export const HPO_SCORE_SCALE = 1000;
-
 export function isHPOProgram(program: string): boolean {
   return HPO_PROGRAMS.has(program);
 }
@@ -180,11 +178,22 @@ export function metricLabelFor(program: string): string {
 }
 
 /** Formats a stored metric integer for display.
- *  HPO  : v / 1000 → "0.872" (3 decimals)
- *  Fuzz : v → "1,500" (integer with thousands separator)
+ *  HPO  : v / nValSamples → "0.872" (3 decimals, fraction of validation
+ *         samples correctly classified — bounded in [0, 1])
+ *  Fuzz : v → "1,500" (integer with thousands separator, # branches covered)
+ *
+ *  nValSamples is the program's totalUniqueBranches; pass it from the loaded
+ *  HexMapData so HPO values normalize against the validation-set size.
  */
-export function formatMetricValue(v: number, program: string): string {
-  if (isHPOProgram(program)) return (v / HPO_SCORE_SCALE).toFixed(3);
+export function formatMetricValue(
+  v: number,
+  program: string,
+  nValSamples?: number,
+): string {
+  if (isHPOProgram(program)) {
+    if (!nValSamples || nValSamples <= 0) return v.toString();
+    return (v / nValSamples).toFixed(3);
+  }
   return Math.round(v).toLocaleString();
 }
 

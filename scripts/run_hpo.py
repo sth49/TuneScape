@@ -173,13 +173,16 @@ def make_model(params: dict[str, Any], n_classes: int, n_estimators: int | None 
     )
 
 
-def evaluate(params, data, n_estimators: int | None = None) -> tuple[float, float]:
+def evaluate(params, data, n_estimators: int | None = None) -> tuple[float, float, list[int]]:
     Xtr, ytr, Xva, yva, n_classes = data
     model = make_model(params, n_classes, n_estimators=n_estimators)
     t0 = time.time()
     model.fit(Xtr, ytr)
-    score = float(model.score(Xva, yva))
-    return score, time.time() - t0
+    y_pred = model.predict(Xva)
+    correct = (y_pred == yva)
+    score = float(correct.mean())
+    correct_idx = np.flatnonzero(correct).astype(int).tolist()
+    return score, time.time() - t0, correct_idx
 
 
 # ============================================================
@@ -235,8 +238,10 @@ def run_bohb(task_name, data, n_trials, seed=42):
         t0 = time.time()
         score = 0.0
         last_b = budgets[-1]
+        last_correct: list[int] = []
         for b in budgets:
-            score, _ = evaluate(params, data, n_estimators=b)
+            score, _, correct_idx = evaluate(params, data, n_estimators=b)
+            last_correct = correct_idx
             trial.report(score, step=b)
             if trial.should_prune() and b != budgets[-1]:
                 last_b = b
@@ -248,6 +253,7 @@ def run_bohb(task_name, data, n_trials, seed=42):
                     "elapsed": time.time() - t0,
                     "fidelity": b,
                     "pruned": True,
+                    "correctIndices": last_correct,
                 })
                 raise optuna.TrialPruned()
         elapsed = time.time() - t0
@@ -258,6 +264,7 @@ def run_bohb(task_name, data, n_trials, seed=42):
             "elapsed": elapsed,
             "fidelity": last_b,
             "pruned": False,
+            "correctIndices": last_correct,
         })
         return score
 
@@ -271,12 +278,13 @@ def _run_optuna_basic(task_name, data, n_trials, suggest_fn, sampler):
 
     def objective(trial: optuna.Trial) -> float:
         params = suggest_fn(trial)
-        score, elapsed = evaluate(params, data)
+        score, elapsed, correct_idx = evaluate(params, data)
         trials_log.append({
             "trialId": trial.number + 1,
             "parameters": params,
             "score": score,
             "elapsed": elapsed,
+            "correctIndices": correct_idx,
         })
         return score
 
@@ -287,12 +295,13 @@ def _run_optuna_basic(task_name, data, n_trials, suggest_fn, sampler):
 # ============================================================
 # Save
 # ============================================================
-def save_trials(task: str, tuner: str, trials: list[dict]):
+def save_trials(task: str, tuner: str, trials: list[dict], n_val: int):
     path = OUT_DIR / f"{task}_{tuner}.json"
     payload = {
         "task": task,
         "tuner": tuner,
         "totalTrials": len(trials),
+        "nValSamples": int(n_val),
         "trials": trials,
     }
     with open(path, "w") as f:
@@ -334,12 +343,13 @@ def main():
         print(f"Task: {task_name}")
         print(f"{'='*60}")
         data = load_task(task_name, cache=cache)
+        n_val = int(data[3].shape[0])  # yva length
         for tuner in args.tuners:
             print(f"\n  Tuner: {tuner}  (n_trials={args.trials})")
             t0 = time.time()
             trials = TUNER_RUNNERS[tuner](task_name, data, args.trials, seed=args.seed)
             print(f"    done in {time.time() - t0:.1f}s, {len(trials)} trials logged")
-            save_trials(task_name, tuner, trials)
+            save_trials(task_name, tuner, trials, n_val)
 
 
 if __name__ == "__main__":

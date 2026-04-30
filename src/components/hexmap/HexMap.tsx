@@ -94,18 +94,12 @@ export function HexMap({
   const height = containerSize.height;
   // Per-program tuner subset (SE → 6, HPO → 4). Drives ControlsBar buttons,
   // legends, dominance computations everywhere a tuner roster is needed.
-  const programTuners = useMemo(
-    () => getTunersForProgram(program),
-    [program],
-  );
-  // Cached HPO/SE flags + display helpers. Used wherever we need to format
-  // a metric value or pick a label ("coverage" vs "accuracy").
+  const programTuners = useMemo(() => getTunersForProgram(program), [program]);
+  // Cached HPO/SE flags. Used wherever we need to pick a label
+  // ("coverage" vs "accuracy"). Note: fmtMetric is defined further below
+  // because it depends on `data` (which itself depends on allLevels).
   const isHPO = useMemo(() => isHPOProgram(program), [program]);
   const metricLabel = useMemo(() => metricLabelFor(program), [program]);
-  const fmtMetric = useCallback(
-    (v: number) => formatMetricValue(v, program),
-    [program],
-  );
   // All 5 levels: index 0 = L0, ... 4 = L4
   const [allLevels, setAllLevels] = useState<HexMapData[]>([]);
   const [loading, setLoading] = useState(true);
@@ -292,6 +286,13 @@ export function HexMap({
   // Active data for current detail level
   const data = allLevels[effectiveDetailLevel] ?? null;
   const HEX_SIZE = data?.hexSize ?? HEX_SIZE_DEFAULT;
+
+  // Format a metric value: HPO → fraction of validation samples (0-1);
+  // SE → integer branch count. Needs data.totalUniqueBranches to scale HPO.
+  const fmtMetric = useCallback(
+    (v: number) => formatMetricValue(v, program, data?.totalUniqueBranches),
+    [program, data?.totalUniqueBranches],
+  );
 
   // Compute transform to fit and center the honeycomb
   const { centerX, centerY, scale } = useMemo(() => {
@@ -3844,7 +3845,7 @@ export function HexMap({
                                   marginBottom: 6,
                                 }}
                               >
-                                Size
+                                Cluster Size
                               </div>
                               <div
                                 style={{
@@ -4573,22 +4574,74 @@ export function HexMap({
                         ))}
                       </div>
                     ) : (
-                      // All view → top-5 contrastive parameters with format hint.
+                      // All view → color legend listing each top-5 parameter
+                      // with its assigned CAT_PALETTE color and dominant bin.
                       <div
                         style={{
-                          fontSize: 12,
-                          color: "#374151",
-                          lineHeight: 1.45,
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 6,
                         }}
                       >
-                        <div style={{ fontWeight: 600 }}>
-                          <span style={{ fontStyle: "italic" }}>parameter</span>
-                          : <span style={{ fontStyle: "italic" }}>bin</span>
+                        <div
+                          style={{
+                            fontSize: 11,
+                            color: "#94A3B8",
+                            lineHeight: 1.4,
+                            marginBottom: 2,
+                          }}
+                        >
+                          Top 5 most-important parameters; each region shows the
+                          parameter's dominant bin.
                         </div>
-                        <div style={{ color: "#94A3B8", marginTop: 3 }}>
-                          Top 5 most-important parameters and their dominant bin
-                          in the largest contrastive region.
-                        </div>
+                        {coverageRegions.length === 0 ? (
+                          <div style={{ fontSize: 12, color: "#94A3B8" }}>
+                            No regions surfaced.
+                          </div>
+                        ) : (
+                          coverageRegions.map((r, i) => {
+                            const pname = r.lines[0] ?? r.label.split(":")[0];
+                            return (
+                              <div
+                                key={i}
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: 8,
+                                  fontSize: 12,
+                                  color: "#374151",
+                                }}
+                              >
+                                {/* Swatch mirrors map cell rendering: grey base
+                                    (#E2E8F0) with the region color washed at 0.28
+                                    opacity on top, so the legend reads the same
+                                    tone as the on-map region wash. */}
+                                <div
+                                  style={{
+                                    position: "relative",
+                                    width: 14,
+                                    height: 14,
+                                    borderRadius: 3,
+                                    background: "#E2E8F0",
+                                    flexShrink: 0,
+                                    border: "1px solid rgba(0,0,0,0.08)",
+                                    overflow: "hidden",
+                                  }}
+                                >
+                                  <div
+                                    style={{
+                                      position: "absolute",
+                                      inset: 0,
+                                      background: r.color,
+                                      opacity: 0.28,
+                                    }}
+                                  />
+                                </div>
+                                <span style={{ fontWeight: 600 }}>{pname}</span>
+                              </div>
+                            );
+                          })
+                        )}
                       </div>
                     )}
                   </div>
@@ -4853,7 +4906,7 @@ export function HexMap({
                         </div>
 
                         {/* — Size — */}
-                        {subHeader("Size")}
+                        {subHeader("Cluster Size")}
                         <div
                           style={{
                             display: "flex",
