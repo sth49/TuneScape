@@ -1689,7 +1689,12 @@ export function HexMap({
             const rel = wrapAng(Math.atan2(vy - ly, vx - lx) - baseAngle);
             let clean = true;
             for (const oc of otherCellsData) {
-              if (distSP(vx, vy, lx, ly, oc.x, oc.y) < oc.rad) {
+              // Relaxed clean check: only mark dirty when the segment passes
+              // through the *core* of another region's cell, not when it just
+              // grazes the edge — otherwise the clean filter rejects vertices
+              // that are visually fine and forces the bracket onto outlying
+              // ones that look worse.
+              if (distSP(vx, vy, lx, ly, oc.x, oc.y) < oc.rad * 0.5) {
                 clean = false;
                 break;
               }
@@ -1700,9 +1705,20 @@ export function HexMap({
         // Pick top (max rel) and bot (min rel) — prefer clean candidates.
         const cleanVerts = verts.filter((v) => v.clean);
         const pool = cleanVerts.length > 0 ? cleanVerts : verts;
-        let topV = pool[0];
-        let botV = pool[0];
-        for (const v of pool) {
+        // Restrict to the N vertices closest to the label before picking the
+        // angular extremes. Without this restriction, top/bot are chosen from
+        // the entire pool, so handles end up on the region's outer perimeter
+        // (max possible angular spread) — visually far from the label even
+        // when there are nicely-placed inner vertices nearby.
+        const distToLabel2 = (v: Vert) =>
+          (v.x - lx) ** 2 + (v.y - ly) ** 2;
+        const NEAREST_K = Math.min(pool.length, 8);
+        const nearPool = [...pool]
+          .sort((a, b) => distToLabel2(a) - distToLabel2(b))
+          .slice(0, NEAREST_K);
+        let topV = nearPool[0];
+        let botV = nearPool[0];
+        for (const v of nearPool) {
           if (v.rel > topV.rel) topV = v;
           if (v.rel < botV.rel) botV = v;
         }
